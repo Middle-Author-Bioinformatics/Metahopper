@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# MetaHopper run outputs / scratch (rename these to match your actual -o/--outdir names)
+qc/
+polyg/
+megahit/
+prodigal/
+diamond/
+classification/
+bins/
+*.log
+fake_hits.tsv
+
+# Large reference data -- never commit these
+*.dmnd
+*.fasta
+*.fa
+*.fastq
+*.fastq.gz
+*.fq.gz
+taxdump/
+*.dmp
