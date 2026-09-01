@@ -2,24 +2,38 @@
 """
 metatax_binner.py
 
-End-to-end pipeline for taxonomic classification and binning of metagenomic contigs.
-Input is either a pair of raw FASTQs (QC'd and assembled first) or an already-assembled
-contigs FASTA.
+End-to-end pipeline for assembly, microbial-contig retention, taxonomic genome binning,
+seed-and-extension, assembly refinement, and quality assessment. Inputs may be reads alone,
+contigs alone, or contigs plus their paired reads.
 
-    R1.fastq, R2.fastq  (raw paired-end reads; optional -- skip straight to contigs.fasta)
+    R1.fastq, R2.fastq  (reads-only mode)
         -> [optional] fastp poly-G trimming (--trim-polyg -- for NextSeq/NovaSeq
            two-channel-chemistry poly-G tail artifacts)
         -> QC: Trimmomatic (adapter clip + quality trim) + FLASH (merge overlapping pairs)
            [skippable with --skip-qc]
         -> MEGAHIT assembly
-    contigs.fasta
-        -> Prodigal (ORF/gene prediction, meta mode)
-        -> DIAMOND blastp vs. a pre-built nr.dmnd database (any nr.dmnd works -- no
-           --taxonmap/--taxonnodes needed; organism names are parsed straight out of
-           the trailing "[Organism name]" in each hit's stitle, standard NCBI nr format)
-        -> per-ORF top hits -> per-contig taxonomic classification
-        -> bin FASTA files at genus / species level (or whatever --ranks you ask for)
-        -> per-bin-set summary.tsv (QUAST contiguity + CheckM completeness/contamination)
+    initial contigs.fasta  (supplied directly, or produced above)
+        -> preliminary Prodigal (ORF/gene prediction, meta mode)
+        -> preliminary DIAMOND blastp vs. taxonomy-enabled nr-tax.dmnd; rank names are
+           emitted directly from taxonomy embedded in the database
+        -> preliminary per-ORF hits -> per-contig taxonomic classification
+        -> drop host-animal/plant contamination (Metazoa/Viridiplantae kingdoms, by
+           default -- see --exclude-kingdoms); Bacteria, Archaea, Fungi, and protists
+           are kept
+        -> preliminary seed-bin FASTAs at the requested ranks
+        -> [default whenever reads exist] one competitive Bowtie2 seed mapping against all
+           bins at a source rank; uniquely winning templates enter that bin and ties are
+           excluded, followed by guarded BBDuk frontier extension
+        -> focused SPAdes/metaSPAdes, Unicycler circularization attempt, and Pilon polishing
+        -> consolidate successful reassemblies and original fallbacks from one source rank
+        -> final Prodigal + DIAMOND classification of the consolidated contigs
+        -> reapply animal/plant filtering and rebuild final multirank FASTA bins
+        -> final QUAST contiguity + CheckM completeness/contamination summaries
+
+The default seed-and-extension stage is aimed at
+           fragmented, low-abundance, or fast-diverging genomes (e.g. host symbionts) that
+the whole-metagenome MEGAHIT co-assembly split into many pieces. Pass
+--skip-reassembly to stop after the preliminary bins and assess those directly.
 
 CLASSIFICATION METHOD (what this script does and why)
 -------------------------------------------------------
@@ -30,8 +44,8 @@ and Kraken-style consensus callers solve, and the approach used here follows tha
      ORF's best bitscore (i.e. a "bit-score competitive set", not just the single top hit).
      This avoids over-trusting one alignment when several equally-good references exist.
   2. Each kept hit's organism name is parsed from its stitle (the "[Genus species]" at the
-     end), resolved to an NCBI lineage by name (local taxdump or ete3), and contributes its
-     full bitscore as a "vote" for every taxon in that lineage.
+     hit's rank names are read directly from nr-tax.dmnd and its bitscore contributes a
+     vote at each available rank.
   3. Votes are tallied *independently at each rank* (genus, species by default -- ask for
      domain/phylum/family too via --ranks) across every ORF on the contig. At each rank,
      the taxon with the largest share of total bitscore wins IF its share clears
@@ -56,50 +70,40 @@ EXTERNAL TOOLS REQUIRED ON $PATH
 
   Always needed:
     prodigal            https://github.com/hyattpd/Prodigal
-    diamond             https://github.com/bbuchfink/diamond   (any nr.dmnd built with
-                         `diamond makedb --in nr.faa[.gz] --db nr` works -- taxonomy is NOT
-                         read from the database; organism names come from stitle instead, so
-                         headers must look like standard NCBI nr: "... [Genus species]")
+    diamond >=2.1.17    https://github.com/bbuchfink/diamond
+                         (requires nr-tax.dmnd built with --taxonmap, --taxonnodes,
+                         and --taxonnames)
     quast.py            https://github.com/ablab/quast          (optional; falls back to a
                          built-in N50/L50/GC calculator if missing or --skip-quast is given)
     checkm (lineage_wf) https://github.com/Ecogenomics/CheckM    (optional; skipped with a
                          warning if missing or --skip-checkm is given)
 
-PYTHON DEPENDENCIES
--------------------------------------------------------
-  Only needed if NOT using --taxdump-dir (see below):
-    pip install ete3 six --break-system-packages
-    (ete3.NCBITaxa downloads/builds a local NCBI taxonomy sqlite db on first use -- this
-    can take several minutes and ~1-2 GB of disk the very first time the script is run,
-    and requires outbound internet access.)
-
-TAXONOMY LOOKUPS
--------------------------------------------------------
-  --taxdump-dir <dir>  Point this at a local NCBI taxdump (nodes.dmp + names.dmp, e.g. an
-                        extracted taxdump.tar.gz from
-                        https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz). Fast,
-                        offline, no ete3 dependency. Recommended, and required if the
-                        machine running this has no outbound internet access.
-                        Without it, falls back to ete3.NCBITaxa (see above).
+  Needed by default whenever reads are supplied (disable with --skip-reassembly):
+    bowtie2, bowtie2-build   https://github.com/BenLangmead/bowtie2
+    samtools                 https://github.com/samtools/samtools (needs `samtools view -N`)
+    bbduk.sh (BBMap)         https://sourceforge.net/projects/bbmap/
+    spades.py                https://github.com/ablab/spades
+    unicycler                https://github.com/rrwick/Unicycler
+    pilon                    https://github.com/broadinstitute/pilon
+    trimmomatic, flash       (same as above -- required even if --skip-qc was used for the
+                              main assembly, since recruited reads always get QC'd)
 
 EXAMPLES
 -------------------------------------------------------
   # From an existing assembly:
   python metatax_binner.py \\
       -i contigs.fasta \\
-      -d /dbs/nr.dmnd \\
+      -d /dbs/nr-tax.dmnd \\
       -o metatax_out \\
-      -t 16 \\
-      --taxdump-dir /dbs/taxdump
+      -t 16
 
-  # From raw paired-end reads (QC -> MEGAHIT -> classify -> bin):
+  # From raw paired-end reads (full default workflow, including seed-and-extension):
   python metatax_binner.py \\
       --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \\
       --trimmomatic-folder /path/to/Trimmomatic-0.39 \\
-      -d /dbs/nr.dmnd \\
+      -d /dbs/nr-tax.dmnd \\
       -o metatax_out \\
-      -t 16 \\
-      --taxdump-dir /dbs/taxdump
+      -t 16
 
 OUTPUT LAYOUT
 -------------------------------------------------------
@@ -109,12 +113,20 @@ OUTPUT LAYOUT
     prodigal/proteins.faa, genes.gff
     diamond/hits.tsv
     classification/contig_classification.tsv
-    bins/genus/<taxon>.fasta ... summary.tsv, bin_membership.tsv
-    bins/species/...
+    classification/excluded_animal_plant_contamination.fasta  (only if --exclude-kingdoms
+                                                                 dropped anything)
+    bins/genus/<taxon>.fasta ... bin_membership.tsv        (preliminary seed bins)
+    reassembly/<rank>/<bin>/reassembled.fasta, recruitment.tsv
+    final/assembly/consolidated_contigs.fasta, contig_provenance.tsv
+    final/prodigal/proteins.faa, genes.gff
+    final/diamond/hits.tsv
+    final/classification/contig_classification.tsv
+    final/bins/<rank>/<taxon>.fasta, bin_membership.tsv, summary.tsv
 """
 
 import argparse
 import csv
+import gzip
 import logging
 import re
 import shlex
@@ -128,30 +140,37 @@ from pathlib import Path
 # Constants
 # --------------------------------------------------------------------------------------
 
-# Both "domain" and "superkingdom" are included because NCBI renamed this top rank from
-# "superkingdom" to "domain" in their taxdump around 2023 (reflecting the three-domain
-# system). Whichever label your nodes.dmp actually uses will match; the other is a
-# harmless no-op.
-WANTED_RANKS = ["domain", "superkingdom", "phylum", "family", "genus", "species"]
+# Both "domain" and "superkingdom" are requested because taxonomy-enabled DIAMOND
+# databases can expose either top-rank label. "kingdom" lets the default retention filter
+# distinguish Fungi from Metazoa and Viridiplantae within Eukaryota.
+WANTED_RANKS = ["domain", "superkingdom", "kingdom", "phylum", "family", "genus", "species"]
 BIN_RANKS_DEFAULT = ["genus", "species"]
 
+# Eukaryotic kingdoms dropped from binning by default (--exclude-kingdoms). Metazoa and
+# Viridiplantae are the only two of NCBI's formal "kingdom"-rank taxa besides Fungi --
+# everything else under Eukaryota (the various protist lineages: SAR, Excavata,
+# Amoebozoa, etc.) has no kingdom-rank ancestor at all in NCBI's taxonomy, so it's never
+# matched by this filter and passes through untouched, same as Fungi.
+DEFAULT_EXCLUDED_KINGDOMS = ["Metazoa", "Viridiplantae"]
+
+DIAMOND_RANK_FIELDS = {
+    "domain": "sdomain",
+    "superkingdom": "ssuperkingdom",
+    "kingdom": "skingdom",
+    "phylum": "sphylum",
+    "family": "sfamily",
+    "genus": "sgenus",
+    "species": "sspecies",
+}
+
+# DIAMOND >=2.1.17 exposes generic sRANK output fields. The accession-to-taxid map,
+# NCBI tree, and scientific names used to resolve these fields are baked into nr-tax.dmnd
+# at `diamond makedb` time, so no external taxdump is needed at runtime.
 DIAMOND_FIELDS = [
     "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
     "qstart", "qend", "sstart", "send", "evalue", "bitscore",
-    "stitle",
+    "staxids", *DIAMOND_RANK_FIELDS.values(), "stitle",
 ]
-
-# Matches the trailing "[Organism name]" NCBI nr convention, e.g.
-# "chromosomal replication initiator protein DnaA [Escherichia coli]" -> "Escherichia coli"
-ORGANISM_RE = re.compile(r"\[([^\[\]]+)\]\s*$")
-
-
-def parse_organism(stitle: str) -> str:
-    """Pull the organism name out of a diamond stitle's trailing [brackets]."""
-    if not stitle:
-        return None
-    m = ORGANISM_RE.search(stitle.strip())
-    return m.group(1).strip() if m else None
 
 
 log = logging.getLogger("metatax_binner")
@@ -190,6 +209,24 @@ def which_or_die(tool: str) -> str:
     return path
 
 
+def require_diamond_taxonomy_fields() -> None:
+    """Require the DIAMOND release that introduced generic ``sRANK`` fields."""
+    proc = subprocess.run(["diamond", "version"], capture_output=True, text=True)
+    version_text = f"{proc.stdout} {proc.stderr}".strip()
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_text)
+    if proc.returncode != 0 or not match:
+        log.error("Could not determine DIAMOND version: %s", version_text or "no output")
+        sys.exit(1)
+    version = tuple(int(part) for part in match.groups())
+    if version < (2, 1, 17):
+        log.error(
+            "DIAMOND %s is too old. MetaHopper requires >=2.1.17 for taxonomy fields "
+            "such as sphylum, sfamily, and sgenus.",
+            ".".join(str(part) for part in version),
+        )
+        sys.exit(1)
+
+
 def run_cmd(cmd, log_file: Path = None, cwd: Path = None) -> None:
     log.info("Running: %s", " ".join(str(c) for c in cmd))
     with open(log_file, "a") if log_file else open("/dev/null", "w") as lf:
@@ -199,6 +236,51 @@ def run_cmd(cmd, log_file: Path = None, cwd: Path = None) -> None:
         if log_file and Path(log_file).exists():
             tail = "\n".join(Path(log_file).read_text().splitlines()[-30:])
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(str(c) for c in cmd)}\n{tail}")
+
+
+def run_pipeline(cmds, stdout_path: Path = None, log_file: Path = None) -> None:
+    """Runs cmds[0] | cmds[1] | ... | cmds[-1], like a bash pipe. The last stage's stdout is
+    written to stdout_path if given, otherwise discarded; every stage's stderr is appended
+    to log_file. Used for the bowtie2 | samtools and samtools collate | samtools fastq
+    pipelines in the targeted bin-reassembly module (Step 7)."""
+    opened = []
+    lf = open(log_file, "a") if log_file else subprocess.DEVNULL
+    if lf is not subprocess.DEVNULL:
+        opened.append(lf)
+    procs = []
+    prev_stdout = None
+    try:
+        for i, cmd in enumerate(cmds):
+            is_last = i == len(cmds) - 1
+            if is_last:
+                out = open(stdout_path, "wb") if stdout_path else subprocess.DEVNULL
+                if stdout_path:
+                    opened.append(out)
+            else:
+                out = subprocess.PIPE
+            proc = subprocess.Popen(cmd, stdin=prev_stdout, stdout=out, stderr=lf)
+            if prev_stdout is not None:
+                prev_stdout.close()
+            prev_stdout = proc.stdout
+            procs.append(proc)
+        for proc in procs:
+            proc.wait()
+    finally:
+        for fh in opened:
+            fh.close()
+    for cmd, proc in zip(cmds, procs):
+        if proc.returncode != 0:
+            raise RuntimeError(f"Pipeline stage failed ({proc.returncode}): {' '.join(str(c) for c in cmd)}")
+
+
+def count_fastq_reads(path: Path) -> int:
+    """Fast read count via `zcat -f | wc -l` (handles both gzipped and plain FASTQ)."""
+    if not path or not Path(path).exists() or Path(path).stat().st_size == 0:
+        return 0
+    proc = subprocess.run(f"zcat -f -- {shlex.quote(str(path))} | wc -l",
+                           shell=True, capture_output=True, text=True, check=True)
+    lines = int((proc.stdout or "0").strip() or 0)
+    return lines // 4
 
 
 def sanitize(name: str) -> str:
@@ -445,184 +527,74 @@ def run_diamond(query_faa: Path, db: Path, outdir: Path, threads: int, evalue: f
 
 
 class Hit:
-    __slots__ = ("sseqid", "pident", "length", "evalue", "bitscore", "organism")
+    __slots__ = ("sseqid", "pident", "length", "evalue", "bitscore", "lineage")
 
-    def __init__(self, sseqid, pident, length, evalue, bitscore, organism):
+    def __init__(self, sseqid, pident, length, evalue, bitscore, lineage):
         self.sseqid = sseqid
         self.pident = pident
         self.length = length
         self.evalue = evalue
         self.bitscore = bitscore
-        self.organism = organism
+        self.lineage = lineage
+
+
+def parse_diamond_taxa(value: str) -> tuple:
+    """Return the unique taxa represented by one DIAMOND taxonomy field.
+
+    A protein accession can be associated with more than one taxid. DIAMOND may render
+    the resulting names with semicolon or ``<>`` separators. Keeping every unique value
+    and splitting the hit's vote avoids making an arbitrary first-name assignment.
+    """
+    if not value or value in {"N/A", "*", "0"}:
+        return ()
+    return tuple(dict.fromkeys(
+        item.strip() for item in re.split(r"\s*(?:<>|;)\s*", value) if item.strip()
+    ))
 
 
 def parse_diamond_hits(hits_tsv: Path) -> dict:
-    """Returns {orf_id: [Hit, ...]}"""
+    """Return ``{orf_id: [Hit, ...]}`` with hierarchy read from nr-tax.dmnd."""
     hits_by_orf = defaultdict(list)
     idx = {f: i for i, f in enumerate(DIAMOND_FIELDS)}
-    any_organism = False
+    any_taxonomy = False
     with open(hits_tsv) as fh:
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if len(f) < len(DIAMOND_FIELDS):
                 continue
-            organism = parse_organism(f[idx["stitle"]])
-            if organism:
-                any_organism = True
+            lineage = {
+                rank: parse_diamond_taxa(f[idx[field]])
+                for rank, field in DIAMOND_RANK_FIELDS.items()
+            }
+            if any(lineage.values()):
+                any_taxonomy = True
             hits_by_orf[f[idx["qseqid"]]].append(Hit(
                 sseqid=f[idx["sseqid"]],
                 pident=float(f[idx["pident"]]),
                 length=int(f[idx["length"]]),
                 evalue=float(f[idx["evalue"]]),
                 bitscore=float(f[idx["bitscore"]]),
-                organism=organism,
+                lineage=lineage,
             ))
-    if hits_by_orf and not any_organism:
+    if hits_by_orf and not any_taxonomy:
         log.warning(
-            "Could not parse an organism name (trailing '[...]') out of any DIAMOND "
-            "stitle. Your nr.dmnd may not have been built from headers in standard "
-            "NCBI nr format ('... [Genus species]'), so taxonomic classification will "
-            "be empty."
+            "DIAMOND returned protein hits but no rank-resolved taxonomy. Confirm that "
+            "-d points to nr-tax.dmnd built with --taxonmap, --taxonnodes, and "
+            "--taxonnames, and that DIAMOND is version 2.1.17 or newer."
         )
     return hits_by_orf
 
 
 # --------------------------------------------------------------------------------------
-# Step 3: Taxonomy lookup (local NCBI taxdump, or ete3 as a fallback)
+# Step 3: Taxonomy is read directly from nr-tax.dmnd DIAMOND output fields.
 # --------------------------------------------------------------------------------------
-
-class LocalTaxdump:
-    """Pure-python reader for a local NCBI taxdump (nodes.dmp + names.dmp) -- no network
-    access, no ete3/sqlite build required. Point --taxdump-dir at a directory containing
-    both files (e.g. the extraction of taxdump.tar.gz from
-    https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz)."""
-
-    def __init__(self, taxdump_dir: Path):
-        nodes_path = Path(taxdump_dir) / "nodes.dmp"
-        names_path = Path(taxdump_dir) / "names.dmp"
-        if not nodes_path.exists() or not names_path.exists():
-            log.error("--taxdump-dir %s must contain both nodes.dmp and names.dmp", taxdump_dir)
-            sys.exit(1)
-
-        log.info("Loading local NCBI taxdump from %s (nodes.dmp + names.dmp)...", taxdump_dir)
-        self.parent = {}   # taxid -> parent taxid
-        self.rank = {}     # taxid -> rank string
-        self.name_of = {}  # taxid -> scientific name
-        self.taxid_of = {}  # lowercased scientific name -> taxid (first one wins)
-
-        with open(nodes_path) as fh:
-            for line in fh:
-                f = line.split("|")
-                taxid = int(f[0].strip())
-                parent = int(f[1].strip())
-                rank = f[2].strip()
-                self.parent[taxid] = parent
-                self.rank[taxid] = rank
-
-        with open(names_path) as fh:
-            for line in fh:
-                f = line.split("|")
-                taxid = int(f[0].strip())
-                name = f[1].strip()
-                name_class = f[3].strip()
-                if name_class == "scientific name":
-                    self.name_of[taxid] = name
-                    self.taxid_of.setdefault(name.lower(), taxid)
-
-        log.info("Loaded taxdump: %d taxa.", len(self.parent))
-
-    def lineage(self, taxid) -> dict:
-        result = {}
-        seen = set()
-        cur = taxid
-        while cur is not None and cur not in seen:
-            seen.add(cur)
-            r = self.rank.get(cur)
-            if r in WANTED_RANKS and r not in result:
-                result[r] = self.name_of.get(cur)
-            parent = self.parent.get(cur)
-            if parent is None or parent == cur:
-                break
-            cur = parent
-        return result
-
-
-class TaxonomyLookup:
-    """Lazily-initialized organism name -> {rank: name} lookup.
-
-    Uses a local NCBI taxdump (nodes.dmp/names.dmp, via --taxdump-dir) if given -- fast,
-    offline, no extra dependency. Otherwise falls back to ete3.NCBITaxa, which downloads
-    and builds its own local sqlite taxonomy db (~/.etetoolkit/taxa.sqlite) on first use;
-    that requires outbound internet access from wherever the script runs.
-
-    Organism names come from DIAMOND stitle (the trailing "[Genus species]"), not from
-    staxids, so the DIAMOND database itself does not need --taxonmap/--taxonnodes at all.
-    """
-
-    def __init__(self, taxdump_dir: Path = None):
-        self._taxdump = LocalTaxdump(taxdump_dir) if taxdump_dir else None
-        self._ncbi = None
-        self._cache = {}
-
-    def _ensure_ncbi(self):
-        if self._ncbi is None:
-            try:
-                from ete3 import NCBITaxa
-            except ImportError:
-                log.error("ete3 is required for taxonomy lookups: pip install ete3 six --break-system-packages")
-                sys.exit(1)
-            log.info("Initializing NCBI taxonomy database (ete3) -- first run may take a while...")
-            self._ncbi = NCBITaxa()
-
-    def lineage_by_name(self, organism: str) -> dict:
-        """Resolve an organism name (e.g. 'Escherichia coli') to its NCBI lineage."""
-        if not organism:
-            return {}
-        if organism in self._cache:
-            return self._cache[organism]
-
-        # Names with strain/isolate qualifiers ("Escherichia coli str. K-12") usually
-        # aren't in the taxdump as scientific names -- fall back to just the binomial.
-        candidates = [organism]
-        parts = organism.split()
-        if len(parts) > 2:
-            candidates.append(" ".join(parts[:2]))
-
-        result = {}
-        if self._taxdump is not None:
-            for name in candidates:
-                taxid = self._taxdump.taxid_of.get(name.lower())
-                if taxid is not None:
-                    result = self._taxdump.lineage(taxid)
-                    break
-        else:
-            self._ensure_ncbi()
-            try:
-                for name in candidates:
-                    taxids = self._ncbi.get_name_translator([name]).get(name)
-                    if taxids:
-                        taxid = taxids[0]
-                        lineage_ids = self._ncbi.get_lineage(taxid)
-                        ranks = self._ncbi.get_rank(lineage_ids)
-                        names = self._ncbi.get_taxid_translator(lineage_ids)
-                        for tid in lineage_ids:
-                            r = ranks.get(tid)
-                            if r in WANTED_RANKS:
-                                result[r] = names.get(tid)
-                        break
-            except Exception as exc:
-                log.debug("Lineage lookup failed for organism '%s': %s", organism, exc)
-                result = {}
-
-        self._cache[organism] = result
-        return result
 
 
 # --------------------------------------------------------------------------------------
 # Step 4: Per-contig classification (bitscore-weighted majority/plurality vote per rank)
 # --------------------------------------------------------------------------------------
 
-def classify_contig(orf_ids, hits_by_orf: dict, taxlookup: TaxonomyLookup, ranks,
+def classify_contig(orf_ids, hits_by_orf: dict, ranks,
                      bitscore_range: float = 0.9, max_hits_per_orf: int = 5,
                      min_support: float = 0.5) -> dict:
     rank_weights = {r: defaultdict(float) for r in ranks}
@@ -641,14 +613,13 @@ def classify_contig(orf_ids, hits_by_orf: dict, taxlookup: TaxonomyLookup, ranks
         if kept:
             n_orfs_with_hits += 1
         for h in kept:
-            if not h.organism:
-                continue
-            lineage = taxlookup.lineage_by_name(h.organism)
             for r in ranks:
                 total_weight[r] += h.bitscore
-                name = lineage.get(r)
-                if name:
-                    rank_weights[r][name] += h.bitscore
+                names = h.lineage.get(r, ())
+                if names:
+                    per_name_weight = h.bitscore / len(names)
+                    for name in names:
+                        rank_weights[r][name] += per_name_weight
 
     result = {}
     for r in ranks:
@@ -665,7 +636,7 @@ def classify_contig(orf_ids, hits_by_orf: dict, taxlookup: TaxonomyLookup, ranks
     return result
 
 
-def classify_all_contigs(contig_ids, orf_to_contig, hits_by_orf, taxlookup, ranks,
+def classify_all_contigs(contig_ids, orf_to_contig, hits_by_orf, ranks,
                           bitscore_range, max_hits_per_orf, min_support) -> dict:
     contig_to_orfs = defaultdict(list)
     for orf_id, contig_id in orf_to_contig.items():
@@ -675,27 +646,54 @@ def classify_all_contigs(contig_ids, orf_to_contig, hits_by_orf, taxlookup, rank
     for i, contig_id in enumerate(contig_ids, 1):
         orfs = contig_to_orfs.get(contig_id, [])
         classifications[contig_id] = classify_contig(
-            orfs, hits_by_orf, taxlookup, ranks, bitscore_range, max_hits_per_orf, min_support
+            orfs, hits_by_orf, ranks, bitscore_range, max_hits_per_orf, min_support
         )
         if i % 500 == 0:
             log.info("Classified %d/%d contigs...", i, len(contig_ids))
     return classifications
 
 
-def write_classification_table(classifications: dict, ranks, out_path: Path) -> None:
+def write_classification_table(classifications: dict, ranks, out_path: Path,
+                                excluded_ids: set = None) -> None:
+    excluded_ids = excluded_ids or set()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         header = ["contig", "n_orfs", "n_orfs_with_hits"]
         for r in ranks:
             header += [r, f"{r}_support"]
+        header.append("excluded_animal_plant")
         w.writerow(header)
         for contig_id, res in classifications.items():
             row = [contig_id, res["_n_orfs_total"], res["_n_orfs_with_hits"]]
             for r in ranks:
                 taxon, support = res[r]
                 row += [taxon, support]
+            row.append(contig_id in excluded_ids)
             w.writerow(row)
+
+
+def split_excluded_eukaryotes(classifications: dict, exclude_kingdoms) -> tuple:
+    """Splits off contigs whose (always-computed) 'kingdom' classification confidently
+    matches one of exclude_kingdoms -- by default Metazoa/Viridiplantae, i.e. host-animal
+    or plant contamination. Bacteria, Archaea, Fungi, and protist lineages (which mostly
+    have no formal kingdom-rank ancestor in NCBI taxonomy, so 'kingdom' comes back
+    Unclassified for them) are never matched here and always pass through.
+
+    Returns (kept_classifications, excluded_contig_ids).
+    """
+    if not exclude_kingdoms:
+        return classifications, set()
+    exclude_set = set(exclude_kingdoms)
+    kept = {}
+    excluded = set()
+    for contig_id, res in classifications.items():
+        kingdom, _support = res.get("kingdom", ("Unclassified", 0.0))
+        if kingdom in exclude_set:
+            excluded.add(contig_id)
+        else:
+            kept[contig_id] = res
+    return kept, excluded
 
 
 # --------------------------------------------------------------------------------------
@@ -804,19 +802,20 @@ def basic_assembly_stats(fasta_path: Path) -> dict:
     }
 
 
-def run_quast_multi(bin_fastas: dict, outdir: Path, threads: int) -> dict:
+def run_quast_multi(bin_fastas: dict, outdir: Path, threads: int, quast_cmd: str = "quast.py") -> dict:
     """bin_fastas: {bin_name: Path}. Returns {bin_name: {stat: value}}."""
     if not bin_fastas:
         return {}
-    if shutil.which("quast.py") is None:
-        log.warning("quast.py not found on PATH -- falling back to built-in assembly stats.")
+    quast_argv = shlex.split(quast_cmd)
+    if shutil.which(quast_argv[0]) is None:
+        log.warning("%s not found on PATH -- falling back to built-in assembly stats.", quast_cmd)
         return {name: basic_assembly_stats(p) for name, p in bin_fastas.items()}
 
     outdir.mkdir(parents=True, exist_ok=True)
     names = list(bin_fastas.keys())
     paths = [str(bin_fastas[n]) for n in names]
     cmd = [
-        "quast.py", "-o", str(outdir), "--threads", str(threads),
+        *quast_argv, "-o", str(outdir), "--threads", str(threads),
         "--min-contig", "0", "--silent", "--labels", ",".join(names), *paths,
     ]
     try:
@@ -858,10 +857,14 @@ def run_quast_multi(bin_fastas: dict, outdir: Path, threads: int) -> dict:
     return stats
 
 
-def run_checkm(bin_dir: Path, outdir: Path, threads: int) -> dict:
-    """Runs `checkm lineage_wf` on a directory of bin FASTAs. Returns {bin_name: {stat: value}}."""
-    if shutil.which("checkm") is None:
-        log.warning("checkm not found on PATH -- skipping completeness/contamination (will be NA).")
+def run_checkm(bin_dir: Path, outdir: Path, threads: int, checkm_cmd: str = "checkm") -> dict:
+    """Runs `checkm lineage_wf`, reporting only completeness/contamination per bin (no
+    plots, no extended stats -- just `-x fasta --tab_table -f <results.tsv>`, same as
+    the minimal `checkm lineage_wf -t T -x fasta <bins_dir> <out_dir>` invocation).
+    Returns {bin_name: {stat: value}}."""
+    checkm_argv = shlex.split(checkm_cmd)
+    if shutil.which(checkm_argv[0]) is None:
+        log.warning("%s not found on PATH -- skipping completeness/contamination (will be NA).", checkm_cmd)
         return {}
     fastas = list(bin_dir.glob("*.fasta"))
     if not fastas:
@@ -869,7 +872,7 @@ def run_checkm(bin_dir: Path, outdir: Path, threads: int) -> dict:
     outdir.mkdir(parents=True, exist_ok=True)
     results_tsv = outdir / "checkm_results.tsv"
     cmd = [
-        "checkm", "lineage_wf", "-x", "fasta", "--tab_table", "-f", str(results_tsv),
+        *checkm_argv, "lineage_wf", "-x", "fasta", "--tab_table", "-f", str(results_tsv),
         "-t", str(threads), str(bin_dir), str(outdir),
     ]
     try:
@@ -889,13 +892,13 @@ def run_checkm(bin_dir: Path, outdir: Path, threads: int) -> dict:
                 stats[bin_id] = {
                     "completeness_percent": row.get("Completeness"),
                     "contamination_percent": row.get("Contamination"),
-                    "strain_heterogeneity": row.get("Strain heterogeneity"),
                 }
     return stats
 
 
 def summarize_bin_set(rank: str, rank_dir: Path, threads: int, skip_quast: bool,
-                       skip_checkm: bool) -> None:
+                       skip_checkm: bool, quast_cmd: str = "quast.py",
+                       checkm_cmd: str = "checkm") -> None:
     bin_fastas = {p.stem: p for p in sorted(rank_dir.glob("*.fasta"))}
     if not bin_fastas:
         log.warning("No bins found for rank '%s'; skipping summary.", rank)
@@ -904,13 +907,13 @@ def summarize_bin_set(rank: str, rank_dir: Path, threads: int, skip_quast: bool,
     if skip_quast:
         quast_stats = {name: basic_assembly_stats(p) for name, p in bin_fastas.items()}
     else:
-        quast_stats = run_quast_multi(bin_fastas, rank_dir / "quast_out", threads)
+        quast_stats = run_quast_multi(bin_fastas, rank_dir / "quast_out", threads, quast_cmd)
 
-    checkm_stats = {} if skip_checkm else run_checkm(rank_dir, rank_dir / "checkm_out", threads)
+    checkm_stats = {} if skip_checkm else run_checkm(rank_dir, rank_dir / "checkm_out", threads, checkm_cmd)
 
     out_path = rank_dir / "summary.tsv"
     fields = ["bin", "num_contigs", "total_length_bp", "largest_contig_bp", "N50", "L50",
-              "GC_percent", "completeness_percent", "contamination_percent", "strain_heterogeneity"]
+              "GC_percent", "completeness_percent", "contamination_percent"]
     with open(out_path, "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         w.writerow(fields)
@@ -927,9 +930,782 @@ def summarize_bin_set(rank: str, rank_dir: Path, threads: int, skip_quast: bool,
                 q.get("GC_percent", "NA"),
                 c.get("completeness_percent", "NA"),
                 c.get("contamination_percent", "NA"),
-                c.get("strain_heterogeneity", "NA"),
             ])
     log.info("Wrote %s", out_path)
+
+
+# --------------------------------------------------------------------------------------
+# Step 7: Targeted bin reassembly -- competitive seed mapping + ITSME-inspired BBDuk
+# frontier extension + focused SPAdes/metaSPAdes + Unicycler/Pilon refinement.
+# --------------------------------------------------------------------------------------
+#
+# Whole-metagenome co-assembly (MEGAHIT, Step 0c) fragments low-abundance or
+# fast-diverging genomes -- especially host-restricted symbionts (Wolbachia, Rickettsia,
+# etc.) that share conserved genes/k-mers with other community members and rarely have a
+# close enough reference genome to assemble against directly. Rather than requiring a
+# reference, this step combines every mutually exclusive bin at a selected rank into one
+# seed index. Reads map competitively: only a unique best-scoring bin wins the template,
+# while equal best-score ties are excluded. Winning read pools are optionally extended
+# outward with cheap exact-kmer "frontier" scans (BBDuk) to catch divergent regions the
+# initial contigs missed entirely, and the resulting small, mostly-single-organism read
+# pool is reassembled alone with SPAdes/metaSPAdes. A subset-only assembly graph is far
+# simpler than the whole-community graph, so it can often resolve tangles (shared genes,
+# similar-coverage strains) that fragmented the original bin. Frontier extension is
+# guarded by growth-rate/accepted-fraction stop conditions so recruitment cannot snowball.
+# Optional external anchors are named BIN=FASTA so they participate for only their intended
+# competitor. Unicycler then attempts graph circularization and Pilon polishes the result.
+#
+# This does NOT replace the original bin FASTA. It writes a separate reassembled contig
+# set plus a before/after comparison table so you can judge whether it actually helped.
+
+def build_bowtie2_index(fasta: Path, index_prefix: Path, threads: int, log_file: Path) -> None:
+    run_cmd(["bowtie2-build", "--threads", str(threads), str(fasta), str(index_prefix)], log_file=log_file)
+
+
+def map_reads_to_index(r1: Path, r2: Path, index_prefix: Path, out_bam: Path, threads: int,
+                        score_min: str, max_insert: int, log_file: Path,
+                        report_multiple: int = 1) -> None:
+    """Maps ALL raw read pairs (mapped and unmapped alike -- no --no-unal) against
+    index_prefix. Keeping unmapped records in the BAM is what lets extract_templates()
+    later pull out reads recruited purely by frontier k-mer matching, not just direct
+    alignment, using this same BAM."""
+    bt2 = ["bowtie2", "--very-sensitive-local", "--score-min", score_min,
+           "-X", str(max_insert), "-p", str(threads), "-x", str(index_prefix),
+           "-1", str(r1), "-2", str(r2)]
+    if report_multiple > 1:
+        bt2 += ["-k", str(report_multiple)]
+    sam = ["samtools", "view", "-@", str(threads), "-b", "-o", str(out_bam), "-"]
+    run_pipeline([bt2, sam], log_file=log_file)
+
+
+def aligned_bases_from_cigar(cigar: str) -> int:
+    return sum(int(n) for n, _op in re.findall(r"(\d+)([MI=X])", cigar))
+
+
+def query_bases_from_cigar(cigar: str) -> int:
+    """Query length represented by a CIGAR, including soft-clipped sequence."""
+    return sum(int(n) for n, _op in re.findall(r"(\d+)([MIS=X])", cigar))
+
+
+def build_competitive_seed_reference(bin_fastas, out_fasta: Path,
+                                     anchors_by_bin: dict = None) -> dict:
+    """Combine all rank bins into one reference and return ``reference -> bin``.
+
+    Prefixing every record with a generated ID makes the owning bin unambiguous even
+    when input FASTAs reuse contig names. Named external anchors, when present, join only
+    their specified bin instead of being duplicated across every competitor.
+    """
+    anchors_by_bin = anchors_by_bin or {}
+    ref_to_bin = {}
+    out_fasta.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_fasta, "w") as out_fh:
+        for bin_n, bin_fasta in enumerate(bin_fastas, 1):
+            bin_name = bin_fasta.stem
+            sources = [("contig", bin_fasta)]
+            sources.extend(("anchor", p) for p in anchors_by_bin.get(bin_name, []))
+            record_n = 0
+            for source_kind, source_fasta in sources:
+                for _original_id, seq in read_fasta(source_fasta).items():
+                    record_n += 1
+                    ref_id = f"MHSEED_{bin_n:06d}_{record_n:09d}_{source_kind}"
+                    ref_to_bin[ref_id] = bin_name
+                    out_fh.write(f">{ref_id}\n")
+                    for i in range(0, len(seq), 80):
+                        out_fh.write(seq[i:i + 80] + "\n")
+    if not ref_to_bin:
+        raise RuntimeError("Competitive seed reference contains no sequences.")
+    return ref_to_bin
+
+
+def competitively_assign_templates(bam: Path, ref_to_bin: dict, min_aligned_fraction: float,
+                                   min_identity: float, threads: int) -> tuple:
+    """Assign each template to its unique best-scoring bin across the combined seed index.
+
+    Secondary alignments are retained so conserved reads can expose cross-bin competition.
+    The best AS score for each mate is summed within each candidate bin. Equal best scores
+    across bins are called ambiguous and excluded from every bin.
+    """
+    proc = subprocess.run(
+        ["samtools", "view", "-@", str(threads), "-F", "2052", str(bam)],
+        capture_output=True, text=True, check=True,
+    )
+    per_template = defaultdict(lambda: defaultdict(dict))
+    for line in proc.stdout.splitlines():
+        f = line.split("\t")
+        if len(f) < 11 or f[2] not in ref_to_bin or f[5] == "*":
+            continue
+        flag = int(f[1])
+        aligned = aligned_bases_from_cigar(f[5])
+        query_len = query_bases_from_cigar(f[5]) or len(f[9])
+        nm = 0
+        alignment_score = None
+        for tag in f[11:]:
+            if tag.startswith("NM:i:"):
+                nm = int(tag.split(":", 2)[2])
+            elif tag.startswith("AS:i:"):
+                alignment_score = int(tag.split(":", 2)[2])
+        if not query_len or not aligned or alignment_score is None:
+            continue
+        if aligned / query_len < min_aligned_fraction:
+            continue
+        if (aligned - nm) / aligned < min_identity:
+            continue
+        mate = 1 if flag & 64 else (2 if flag & 128 else 0)
+        bin_name = ref_to_bin[f[2]]
+        prior = per_template[f[0]][bin_name].get(mate)
+        if prior is None or alignment_score > prior:
+            per_template[f[0]][bin_name][mate] = alignment_score
+
+    assignments = defaultdict(set)
+    ambiguous = 0
+    for template, bin_mates in per_template.items():
+        scores = {
+            bin_name: sum(mate_scores.values())
+            for bin_name, mate_scores in bin_mates.items()
+        }
+        if not scores:
+            continue
+        best_score = max(scores.values())
+        winners = [bin_name for bin_name, score in scores.items() if score == best_score]
+        if len(winners) != 1:
+            ambiguous += 1
+            continue
+        assignments[winners[0]].add(template)
+    return {bin_name: names for bin_name, names in assignments.items()}, len(per_template), ambiguous
+
+
+def recruit_read_names(bam: Path, min_aligned_fraction: float, min_identity: float, threads: int) -> set:
+    """Primary, mapped (not secondary/supplementary) alignments only (-F 2308), filtered by
+    aligned-fraction-of-read and approximate identity -- the same seed-hit criteria ITSME
+    uses for its strict seed mapping."""
+    proc = subprocess.run(["samtools", "view", "-@", str(threads), "-F", "2308", str(bam)],
+                           capture_output=True, text=True, check=True)
+    names = set()
+    for line in proc.stdout.splitlines():
+        f = line.split("\t")
+        if len(f) < 11:
+            continue
+        seq, cigar = f[9], f[5]
+        query_len = len(seq)
+        if query_len == 0 or cigar == "*":
+            continue
+        aligned = aligned_bases_from_cigar(cigar)
+        nm = 0
+        for tag in f[11:]:
+            if tag.startswith("NM:i:"):
+                nm = int(tag.split(":", 2)[2])
+                break
+        aligned_fraction = aligned / query_len if query_len else 0.0
+        identity = (aligned - nm) / aligned if aligned else 0.0
+        if aligned_fraction >= min_aligned_fraction and identity >= min_identity:
+            names.add(f[0])
+    return names
+
+
+def extract_templates(bam: Path, names: set, out_r1: Path, out_r2: Path, out_single: Path,
+                       threads: int, tmp_prefix: Path) -> None:
+    """Pulls the given read names (+ their mates, however the mate mapped) out of `bam`
+    into paired/single FASTQs -- a Python port of ITSME's extract_templates_from_bam."""
+    out_r1.parent.mkdir(parents=True, exist_ok=True)
+    if not names:
+        for p in (out_r1, out_r2, out_single):
+            p.write_bytes(b"")
+        return
+    names_file = Path(f"{tmp_prefix}.names.txt")
+    names_file.write_text("\n".join(sorted(names)) + "\n")
+    selected_bam = Path(f"{tmp_prefix}.selected.bam")
+    run_cmd(["samtools", "view", "-@", str(threads), "-b", "-F", "2304", "-N", str(names_file),
+             "-o", str(selected_bam), str(bam)])
+    other_fq = Path(f"{tmp_prefix}.other.fastq.gz")
+    single_fq = Path(f"{tmp_prefix}.singleton.fastq.gz")
+    collate = ["samtools", "collate", "-@", str(threads), "-u", "-O", str(selected_bam)]
+    fastq = ["samtools", "fastq", "-@", str(threads), "-c", "1", "-n",
+             "-1", str(out_r1), "-2", str(out_r2), "-0", str(other_fq), "-s", str(single_fq), "-"]
+    run_pipeline([collate, fastq], log_file=Path(f"{tmp_prefix}.fastq.log"))
+    with open(out_single, "wb") as out_fh:
+        for p in (other_fq, single_fq):
+            if p.exists() and p.stat().st_size > 0:
+                out_fh.write(p.read_bytes())
+    if not out_single.exists():
+        out_single.write_bytes(b"")
+    for p in (selected_bam, other_fq, single_fq, names_file):
+        p.unlink(missing_ok=True)
+
+
+def make_frontier_baits(fastq_paths, out_fasta: Path, word_size: int, entropy: float,
+                         bbtools_memory: str, log_file: Path) -> None:
+    """Converts a pool of recruited reads into a bait FASTA (dropping low-complexity
+    sequence via BBDuk's entropy filter) to seed the next round's exact-kmer frontier scan."""
+    raw = out_fasta.with_suffix(".unfiltered.fasta")
+    tag = 0
+    with open(raw, "w") as out_fh:
+        for fq in fastq_paths:
+            if not fq or not Path(fq).exists() or Path(fq).stat().st_size == 0:
+                continue
+            tag += 1
+            opener = gzip.open if str(fq).endswith((".gz", ".bgz")) else open
+            with opener(fq, "rt") as fh:
+                record = 0
+                for i, line in enumerate(fh):
+                    mod = i % 4
+                    if mod == 0:
+                        stripped = line[1:].strip()
+                        record += 1
+                        name = stripped.split()[0] if stripped else str(record)
+                        out_fh.write(f">bait{tag:02d}|{record:09d}|{name}\n")
+                    elif mod == 1:
+                        out_fh.write(line.strip().upper() + "\n")
+    run_cmd(["bbduk.sh", f"-Xmx{bbtools_memory}", f"in={raw}", f"out={out_fasta}",
+             "overwrite=t", f"minlen={word_size}", f"entropy={entropy}",
+             "entropywindow=50", "entropyk=5"], log_file=log_file)
+    raw.unlink(missing_ok=True)
+    if not out_fasta.exists() or out_fasta.stat().st_size == 0:
+        raise RuntimeError(f"No frontier sequences survived bait preparation; inspect {log_file}")
+
+
+def scan_raw_with_baits(bait_fasta: Path, r1: Path, r2: Path, word_size: int,
+                         min_word_hits: int, bbtools_memory: str, threads: int,
+                         log_file: Path) -> set:
+    """Exact-kmer scan of the ORIGINAL raw reads against a bait FASTA (BBDuk), returning
+    template names with at least `min_word_hits` exact word matches -- cheap compared to
+    another bowtie2 pass, and how the frontier extends beyond direct alignment recruitment."""
+    cmd = ["bbduk.sh", f"-Xmx{bbtools_memory}", f"in1={r1}", f"in2={r2}", "outm=stdout.fq",
+           f"ref={bait_fasta}", f"k={word_size}", "hdist=0", f"minkmerhits={min_word_hits}",
+           "mm=f", "rcomp=t", f"t={threads}", "overwrite=t", "ordered=f"]
+    with open(log_file, "w") as lf:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=lf, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"BBDuk frontier scan failed ({proc.returncode}); inspect {log_file}")
+    names = set()
+    for i, line in enumerate(proc.stdout.splitlines()):
+        if i % 4 == 0 and len(line) > 1:
+            name = re.sub(r"/[12]$", "", line[1:].split()[0])
+            if name:
+                names.add(name)
+    return names
+
+
+def combine_fastqs(output: Path, inputs) -> None:
+    """Concatenates gzip FASTQs by raw byte concatenation (a valid multi-member gzip stream,
+    same trick ITSME/`cat *.gz` rely on -- avoids a decompress/recompress round trip)."""
+    with open(output, "wb") as out_fh:
+        for p in inputs:
+            if p and Path(p).exists() and Path(p).stat().st_size > 0:
+                out_fh.write(Path(p).read_bytes())
+    if not output.exists():
+        output.write_bytes(b"")
+
+
+def run_spades_targeted(r1: Path, r2: Path, single: Path, outdir: Path, threads: int,
+                         memory_gb: int, mode: str, kmers: str, log_file: Path) -> Path:
+    """Runs spades.py (metaSPAdes if mode == 'meta') on a small recruited read pool.
+    Returns the path to contigs.fasta."""
+    pairs = count_fastq_reads(r1)
+    singles = count_fastq_reads(single)
+    if pairs == 0 and singles == 0:
+        raise RuntimeError("No recruited reads remain for reassembly.")
+    cmd = ["spades.py", "--only-assembler", "-o", str(outdir), "-t", str(threads), "-m", str(memory_gb)]
+    if pairs > 0:
+        cmd += ["-1", str(r1), "-2", str(r2)]
+    if singles > 0:
+        cmd += ["-s", str(single)]
+    if mode == "meta":
+        if pairs == 0:
+            raise RuntimeError("metaSPAdes (--reassemble-mode meta) requires paired reads.")
+        cmd += ["--meta"]
+    if kmers != "auto":
+        cmd += ["-k", kmers]
+    run_cmd(cmd, log_file=log_file)
+    contigs = outdir / "contigs.fasta"
+    if not contigs.exists():
+        raise RuntimeError(f"SPAdes did not produce {contigs}; inspect {log_file}")
+    return contigs
+
+
+def run_unicycler_and_pilon(r1: Path, r2: Path, single: Path, workdir: Path,
+                            threads: int, unicycler_mode: str) -> tuple:
+    """Attempt graph circularization with Unicycler, then polish with Pilon.
+
+    Unicycler performs the circularization attempt from the recruited read pool. Pilon
+    does not circularize; it remaps the same reads to the Unicycler assembly and corrects
+    bases/indels. The caller can retain the SPAdes assembly if this optional refinement
+    fails, and can retain the Unicycler assembly if only Pilon fails.
+    """
+    pairs = count_fastq_reads(r1)
+    singles = count_fastq_reads(single)
+    if pairs == 0 and singles == 0:
+        return None, "spades", 0
+
+    unicycler_dir = workdir / "unicycler"
+    cmd = [
+        "unicycler", "-o", str(unicycler_dir), "--threads", str(threads),
+        "--mode", unicycler_mode,
+    ]
+    if pairs:
+        cmd += ["-1", str(r1), "-2", str(r2)]
+    if singles:
+        cmd += ["-s", str(single)]
+    try:
+        run_cmd(cmd, log_file=workdir / "unicycler.log")
+    except RuntimeError as exc:
+        log.warning("Unicycler circularization failed (%s); retaining focused SPAdes output.", exc)
+        return None, "spades", 0
+
+    unicycler_assembly = unicycler_dir / "assembly.fasta"
+    if not unicycler_assembly.exists() or unicycler_assembly.stat().st_size == 0:
+        log.warning("Unicycler produced no assembly; retaining focused SPAdes output.")
+        return None, "spades", 0
+    circular_count = sum(
+        1 for line in unicycler_assembly.read_text().splitlines()
+        if line.startswith(">") and "circular=true" in line.lower()
+    )
+
+    polish_dir = workdir / "pilon"
+    polish_dir.mkdir(parents=True, exist_ok=True)
+    index_prefix = polish_dir / "unicycler_index"
+    bam = polish_dir / "reads_to_unicycler.sorted.bam"
+    try:
+        build_bowtie2_index(
+            unicycler_assembly, index_prefix, threads, polish_dir / "bowtie2-build.log",
+        )
+        bt2 = [
+            "bowtie2", "--very-sensitive", "-p", str(threads), "-x", str(index_prefix),
+        ]
+        if pairs:
+            bt2 += ["-1", str(r1), "-2", str(r2)]
+        if singles:
+            bt2 += ["-U", str(single)]
+        run_pipeline(
+            [bt2, ["samtools", "sort", "-@", str(threads), "-o", str(bam), "-"]],
+            log_file=polish_dir / "bowtie2.log",
+        )
+        run_cmd(["samtools", "index", "-@", str(threads), str(bam)])
+        run_cmd([
+            "pilon", "--genome", str(unicycler_assembly), "--frags", str(bam),
+            "--output", "pilon_polished", "--outdir", str(polish_dir),
+            "--threads", str(threads), "--fix", "all",
+        ], log_file=workdir / "pilon.log")
+    except RuntimeError as exc:
+        log.warning("Pilon polishing failed (%s); retaining the Unicycler assembly.", exc)
+        return unicycler_assembly, "unicycler", circular_count
+
+    polished = polish_dir / "pilon_polished.fasta"
+    if not polished.exists() or polished.stat().st_size == 0:
+        log.warning("Pilon produced no polished FASTA; retaining the Unicycler assembly.")
+        return unicycler_assembly, "unicycler", circular_count
+    return polished, "pilon", circular_count
+
+
+def reassemble_one_bin(bin_fasta: Path, bin_name: str, rank: str, r1_raw: Path, r2_raw: Path,
+                        competitive_bam: Path, seed_names: set, blocked_seed_names: set,
+                        outdir: Path, threads: int,
+                        trimmomatic_folder: Path, qc_quality: int, qc_minlen: int,
+                        flash_max_overlap: int, max_rounds: int, word_size: int,
+                        min_word_hits: int,
+                        bait_min_entropy: float, max_round_growth: float,
+                        max_accepted_fraction: float, min_new_templates: int, min_growth: float,
+                        bbtools_memory: str, spades_mode: str, spades_memory_gb: int,
+                        kmers: str, circularize: bool, unicycler_mode: str) -> Path:
+    """Runs one bin through seed-and-extend recruitment + reassembly. Returns the path to
+    the reassembled contigs FASTA, or None if recruitment/reassembly didn't produce one."""
+    workdir = outdir / "reassembly" / rank / bin_name
+    seed_dir, recruit_dir = workdir / "seed", workdir / "recruitment"
+    for d in (seed_dir, recruit_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    total_templates = count_fastq_reads(r1_raw)
+    accepted_names = set(seed_names)
+    if not accepted_names:
+        log.warning("Bin '%s' (%s): no reads won competitive seed mapping; skipping reassembly.",
+                    bin_name, rank)
+        return None
+    accepted_count = len(accepted_names)
+    accepted_fraction = accepted_count / total_templates if total_templates else 0.0
+
+    metrics_path = workdir / "recruitment.tsv"
+    metrics_rows = [
+        ["round", "frontier_templates", "candidate_templates", "new_templates",
+         "accepted_total", "growth_fraction", "accepted_fraction", "decision"],
+        [0, accepted_count, accepted_count, accepted_count, accepted_count,
+         "NA", f"{accepted_fraction:.8f}", "seed"],
+    ]
+
+    seed_raw_r1 = seed_dir / "accepted_raw_R1.fastq.gz"
+    seed_raw_r2 = seed_dir / "accepted_raw_R2.fastq.gz"
+    seed_raw_single = seed_dir / "accepted_raw_single.fastq.gz"
+    extract_templates(competitive_bam, accepted_names, seed_raw_r1, seed_raw_r2, seed_raw_single,
+                       threads, seed_dir / "extract")
+    log.info("Bin '%s' (%s): competitive seed mapping assigned %d/%d templates (%.4f); running QC.",
+              bin_name, rank, accepted_count, total_templates, accepted_fraction)
+    seed_r1, seed_r2, seed_single = run_qc(
+        seed_raw_r1, seed_raw_r2, workdir / "qc" / "seed", threads,
+        trimmomatic_cmd="trimmomatic", trimmomatic_folder=trimmomatic_folder,
+        flash_cmd="flash", flash_max_overlap=flash_max_overlap, pigz_cmd="pigz",
+        qc_quality=qc_quality, qc_minlen=qc_minlen, keep_tmp=False,
+    )
+    for p in (seed_raw_r1, seed_raw_r2, seed_raw_single):
+        p.unlink(missing_ok=True)
+    assembly_r1_files, assembly_r2_files, assembly_single_files = [seed_r1], [seed_r2], [seed_single]
+
+    stop_reason = "extension disabled (--reassemble-max-rounds 0)"
+    rounds_accepted = 0
+    if max_rounds > 0:
+        frontier_names = accepted_names
+        frontier_baits = recruit_dir / "round_00_frontier_baits.fasta"
+        make_frontier_baits([seed_r1, seed_r2, seed_single], frontier_baits, word_size,
+                             bait_min_entropy, bbtools_memory, recruit_dir / "round_00_bait_filter.log")
+
+        stop_reason = "maximum recruitment rounds reached"
+        for round_n in range(1, max_rounds + 1):
+            round_dir = recruit_dir / f"round_{round_n:02d}"
+            round_dir.mkdir(parents=True, exist_ok=True)
+            frontier_count_this_round = len(frontier_names)
+
+            candidate_names = scan_raw_with_baits(
+                frontier_baits, r1_raw, r2_raw, word_size, min_word_hits, bbtools_memory,
+                threads, round_dir / "bbduk.log",
+            )
+            # Never let frontier extension steal a template that competitive seed mapping
+            # assigned to another bin. Previously unassigned reads remain eligible to bridge
+            # outward from this bin's newest frontier.
+            new_names = candidate_names - accepted_names - blocked_seed_names
+            growth = (len(new_names) / accepted_count) if accepted_count else 0.0
+            proposed_count = accepted_count + len(new_names)
+            proposed_fraction = proposed_count / total_templates if total_templates else 0.0
+
+            if growth > max_round_growth:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                      len(new_names), accepted_count, f"{growth:.8f}",
+                                      f"{accepted_fraction:.8f}", "rejected_growth"])
+                stop_reason = f"round-{round_n} growth {growth:.4f} exceeded {max_round_growth}; recruitment rejected"
+                log.warning("Bin '%s' (%s): %s.", bin_name, rank, stop_reason)
+                break
+            if proposed_fraction > max_accepted_fraction:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                      len(new_names), accepted_count, f"{growth:.8f}",
+                                      f"{accepted_fraction:.8f}", "rejected_total_fraction"])
+                stop_reason = (f"round-{round_n} accepted fraction {proposed_fraction:.4f} exceeded "
+                                f"{max_accepted_fraction}; recruitment rejected")
+                log.warning("Bin '%s' (%s): %s.", bin_name, rank, stop_reason)
+                break
+            if not new_names:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names), 0,
+                                      accepted_count, "0.00000000", f"{accepted_fraction:.8f}",
+                                      "converged"])
+                stop_reason = "no new templates were recruited"
+                break
+
+            accepted_names = accepted_names | new_names
+            accepted_count = proposed_count
+            accepted_fraction = proposed_fraction
+            rounds_accepted += 1
+
+            raw_r1 = round_dir / "new_raw_R1.fastq.gz"
+            raw_r2 = round_dir / "new_raw_R2.fastq.gz"
+            raw_single = round_dir / "new_raw_single.fastq.gz"
+            extract_templates(competitive_bam, new_names, raw_r1, raw_r2, raw_single, threads,
+                               round_dir / "extract")
+            log.info("Bin '%s' (%s): round %d QC of %d newly accepted templates.",
+                      bin_name, rank, round_n, len(new_names))
+            clean_r1, clean_r2, clean_single = run_qc(
+                raw_r1, raw_r2, round_dir / "qc", threads,
+                trimmomatic_cmd="trimmomatic", trimmomatic_folder=trimmomatic_folder,
+                flash_cmd="flash", flash_max_overlap=flash_max_overlap, pigz_cmd="pigz",
+                qc_quality=qc_quality, qc_minlen=qc_minlen, keep_tmp=False,
+            )
+            for p in (raw_r1, raw_r2, raw_single):
+                p.unlink(missing_ok=True)
+            assembly_r1_files.append(clean_r1)
+            assembly_r2_files.append(clean_r2)
+            assembly_single_files.append(clean_single)
+
+            metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                  len(new_names), accepted_count, f"{growth:.8f}",
+                                  f"{accepted_fraction:.8f}", "accepted"])
+            log.info("Bin '%s' (%s): round %d accepted %d new templates; total=%d, growth=%.4f.",
+                      bin_name, rank, round_n, len(new_names), accepted_count, growth)
+
+            frontier_names = new_names
+            frontier_baits = round_dir / "frontier_baits.fasta"
+            make_frontier_baits([clean_r1, clean_r2, clean_single], frontier_baits, word_size,
+                                 bait_min_entropy, bbtools_memory, round_dir / "bait_filter.log")
+
+            if len(new_names) < min_new_templates:
+                stop_reason = f"new-template count {len(new_names)} fell below {min_new_templates}"
+                break
+            if growth < min_growth:
+                stop_reason = f"growth {growth:.6f} fell below {min_growth}"
+                break
+    else:
+        log.info("Bin '%s' (%s): frontier extension disabled; assembling seed recruitment directly.",
+                  bin_name, rank)
+
+    log.info("Bin '%s' (%s): recruitment stopped (%s) after %d extension round(s); assembling.",
+              bin_name, rank, stop_reason, rounds_accepted)
+
+    final_r1 = workdir / "accepted_R1.fastq.gz"
+    final_r2 = workdir / "accepted_R2.fastq.gz"
+    final_single = workdir / "accepted_single.fastq.gz"
+    combine_fastqs(final_r1, assembly_r1_files)
+    combine_fastqs(final_r2, assembly_r2_files)
+    combine_fastqs(final_single, assembly_single_files)
+
+    with open(metrics_path, "w", newline="") as mf:
+        csv.writer(mf, delimiter="\t").writerows(metrics_rows)
+
+    spades_dir = workdir / "spades"
+    try:
+        contigs = run_spades_targeted(final_r1, final_r2, final_single, spades_dir, threads,
+                                       spades_memory_gb, spades_mode, kmers,
+                                       workdir / "spades.log")
+    except RuntimeError as exc:
+        log.warning("Bin '%s' (%s): reassembly SPAdes run failed (%s); keeping original bin contigs.",
+                    bin_name, rank, exc)
+        return None
+
+    chosen_contigs = contigs
+    chosen_stage = "spades"
+    circular_count = 0
+    if circularize:
+        refined, chosen_stage, circular_count = run_unicycler_and_pilon(
+            final_r1, final_r2, final_single, workdir, threads, unicycler_mode,
+        )
+        if refined is not None:
+            chosen_contigs = refined
+
+    with open(workdir / "assembly_stage.tsv", "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["selected_stage", "unicycler_circular_contigs", "selected_fasta"])
+        w.writerow([chosen_stage, circular_count, chosen_contigs])
+
+    reassembled = workdir / "reassembled.fasta"
+    shutil.copyfile(chosen_contigs, reassembled)
+    return reassembled
+
+
+def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads: int,
+                        anchors_by_bin: dict, trimmomatic_folder: Path, qc_quality: int, qc_minlen: int,
+                        flash_max_overlap: int, seed_score_min: str, min_read_aligned: float,
+                        min_read_identity: float, max_insert: int, max_rounds: int,
+                        word_size: int, min_word_hits: int, bait_min_entropy: float,
+                        max_round_growth: float, max_accepted_fraction: float,
+                        min_new_templates: int, min_growth: float, bbtools_memory: str,
+                        spades_mode: str, spades_memory_gb: int, kmers: str,
+                        min_bin_contigs_to_reassemble: int, include_unclassified: bool,
+                        circularize: bool, unicycler_mode: str) -> dict:
+    """Drives reassemble_one_bin() over every bin FASTA at each rank in `ranks`, and writes
+    a before/after comparison table (contig count, N50, total length) per rank.
+
+    Returns {rank: {bin_name: reassembled_fasta}} for successful reassemblies. Bins that
+    were skipped, failed, or recruited no reads are absent and can therefore fall back to
+    their original preliminary-bin FASTA during final-assembly consolidation.
+    """
+    successful = defaultdict(dict)
+    for r in ranks:
+        rank_dir = outdir / "bins" / r
+        all_bin_fastas = sorted(rank_dir.glob("*.fasta"))
+        if not all_bin_fastas:
+            continue
+        bin_fastas = [
+            p for p in all_bin_fastas
+            if p.name != "Unclassified.fasta" or include_unclassified
+        ]
+
+        # Map once against every mutually exclusive bin at this rank. Even bins that are
+        # not scheduled for reassembly remain in the index so their reads cannot be
+        # spuriously awarded to a different bin.
+        competitive_dir = outdir / "reassembly" / r / "competitive_seed"
+        competitive_dir.mkdir(parents=True, exist_ok=True)
+        combined_seed = competitive_dir / "all_bins.fasta"
+        ref_to_bin = build_competitive_seed_reference(
+            all_bin_fastas, combined_seed, anchors_by_bin=anchors_by_bin,
+        )
+        seed_index = competitive_dir / "all_bins_index"
+        build_bowtie2_index(
+            combined_seed, seed_index, threads, competitive_dir / "bowtie2-build.log",
+        )
+        competitive_bam = competitive_dir / "reads_to_all_bins.bam"
+        map_reads_to_index(
+            r1_raw, r2_raw, seed_index, competitive_bam, threads, seed_score_min,
+            max_insert, competitive_dir / "bowtie2.log", report_multiple=20,
+        )
+        assignments, passing_templates, ambiguous_templates = competitively_assign_templates(
+            competitive_bam, ref_to_bin, min_read_aligned, min_read_identity, threads,
+        )
+        all_seed_assigned = set().union(*assignments.values()) if assignments else set()
+        metrics_path = competitive_dir / "competitive_mapping.tsv"
+        with open(metrics_path, "w", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t")
+            w.writerow(["rank", "bin", "uniquely_assigned_templates"])
+            for bin_fasta in all_bin_fastas:
+                w.writerow([r, bin_fasta.stem, len(assignments.get(bin_fasta.stem, set()))])
+            w.writerow([r, "__PASSING_ALIGNMENTS__", passing_templates])
+            w.writerow([r, "__AMBIGUOUS_TIES_EXCLUDED__", ambiguous_templates])
+        log.info(
+            "Rank '%s': competitive seed mapping assigned %d/%d passing templates; "
+            "%d equal-score ties were excluded.",
+            r, sum(len(v) for v in assignments.values()), passing_templates,
+            ambiguous_templates,
+        )
+
+        summary_rows = []
+        for bin_fasta in bin_fastas:
+            bin_name = bin_fasta.stem
+            before = basic_assembly_stats(bin_fasta)
+            if before["num_contigs"] < min_bin_contigs_to_reassemble:
+                log.info("Bin '%s' (%s): only %d contig(s); skipping reassembly.",
+                          bin_name, r, before["num_contigs"])
+                continue
+            log.info("Reassembling bin '%s' (rank %s, %d contigs, %d bp)...",
+                      bin_name, r, before["num_contigs"], before["total_length_bp"])
+            try:
+                reassembled = reassemble_one_bin(
+                    bin_fasta, bin_name, r, r1_raw, r2_raw, competitive_bam,
+                    assignments.get(bin_name, set()),
+                    all_seed_assigned - assignments.get(bin_name, set()),
+                    outdir, threads, trimmomatic_folder,
+                    qc_quality, qc_minlen, flash_max_overlap, max_rounds, word_size,
+                    min_word_hits, bait_min_entropy, max_round_growth,
+                    max_accepted_fraction, min_new_templates, min_growth, bbtools_memory,
+                    spades_mode, spades_memory_gb, kmers, circularize, unicycler_mode,
+                )
+            except RuntimeError as exc:
+                log.warning("Bin '%s' (%s): reassembly failed (%s); keeping original bin untouched.",
+                            bin_name, r, exc)
+                reassembled = None
+            if reassembled is None:
+                continue
+            successful[r][bin_name] = reassembled
+            after = basic_assembly_stats(reassembled)
+            summary_rows.append({
+                "bin": bin_name, "rank": r,
+                "contigs_before": before["num_contigs"], "contigs_after": after["num_contigs"],
+                "total_length_before_bp": before["total_length_bp"],
+                "total_length_after_bp": after["total_length_bp"],
+                "N50_before": before["N50"], "N50_after": after["N50"],
+                "largest_contig_before_bp": before["largest_contig_bp"],
+                "largest_contig_after_bp": after["largest_contig_bp"],
+            })
+            log.info("Bin '%s' (%s): %d -> %d contigs, N50 %d -> %d bp.",
+                      bin_name, r, before["num_contigs"], after["num_contigs"],
+                      before["N50"], after["N50"])
+
+        if not summary_rows:
+            continue
+        summary_path = outdir / "bins" / r / "reassembly_summary.tsv"
+        fields = ["bin", "rank", "contigs_before", "contigs_after",
+                  "total_length_before_bp", "total_length_after_bp",
+                  "N50_before", "N50_after", "largest_contig_before_bp", "largest_contig_after_bp"]
+        with open(summary_path, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t")
+            w.writeheader()
+            w.writerows(summary_rows)
+        log.info("Rank '%s': wrote reassembly comparison summary to %s", r, summary_path)
+    return {rank: dict(paths) for rank, paths in successful.items()}
+
+
+def choose_final_source_rank(ranks, reassemble_ranks, requested: str = "auto") -> str:
+    """Selects the single preliminary partition used to construct the consolidated final
+    assembly. A single source rank is essential: combining nested family/genus/species
+    reassemblies would represent the same original contigs and reads multiple times.
+
+    Auto mode prefers genus as a practical genome-oriented compromise, then species,
+    family, phylum, kingdom, superkingdom, and domain. The chosen rank must be both a
+    requested binning rank and one of the ranks actually sent through reassembly.
+    """
+    available = [r for r in ranks if r in reassemble_ranks]
+    if not available:
+        raise ValueError("No shared rank exists between --ranks and --reassemble-ranks.")
+    if requested and requested != "auto":
+        if requested not in available:
+            raise ValueError(
+                f"--final-source-rank '{requested}' must occur in both --ranks and "
+                f"--reassemble-ranks (available: {','.join(available)})."
+            )
+        return requested
+    for rank in ("genus", "species", "family", "phylum", "kingdom", "superkingdom", "domain"):
+        if rank in available:
+            return rank
+    return available[-1]
+
+
+def build_consolidated_final_assembly(outdir: Path, source_rank: str,
+                                      successful_reassemblies: dict) -> Path:
+    """Builds one nonredundant-by-partition final contig set from a preliminary rank.
+
+    For each preliminary bin at `source_rank`, a successful targeted reassembly replaces
+    that bin's original contigs. Skipped or failed bins contribute their original contigs.
+    The source rank partitions each retained initial contig exactly once, avoiding the
+    duplication that would result from pooling nested reassemblies across several ranks.
+
+    New globally unique FASTA identifiers are assigned and a provenance table records the
+    source bin, source type, source FASTA, and original/reassembled record identifier.
+    """
+    rank_dir = outdir / "bins" / source_rank
+    bin_fastas = sorted(rank_dir.glob("*.fasta"))
+    if not bin_fastas:
+        raise RuntimeError(
+            f"No preliminary bin FASTAs found at source rank '{source_rank}' in {rank_dir}."
+        )
+
+    final_assembly_dir = outdir / "final" / "assembly"
+    final_assembly_dir.mkdir(parents=True, exist_ok=True)
+    final_fasta = final_assembly_dir / "consolidated_contigs.fasta"
+    provenance_tsv = final_assembly_dir / "contig_provenance.tsv"
+
+    success_at_rank = successful_reassemblies.get(source_rank, {})
+    final_records = {}
+    provenance_rows = []
+    n_reassembled_bins = 0
+    n_fallback_bins = 0
+
+    for bin_fasta in bin_fastas:
+        bin_name = bin_fasta.stem
+        reassembled = success_at_rank.get(bin_name)
+        if reassembled and Path(reassembled).exists() and Path(reassembled).stat().st_size > 0:
+            source_fasta = Path(reassembled)
+            source_type = "reassembled"
+            n_reassembled_bins += 1
+        else:
+            source_fasta = bin_fasta
+            source_type = "original"
+            n_fallback_bins += 1
+
+        source_records = read_fasta(source_fasta)
+        safe_bin = sanitize(bin_name)
+        for record_n, (source_id, seq) in enumerate(source_records.items(), 1):
+            final_id = f"MH_{source_type}_{safe_bin}_{record_n:07d}"
+            # A repeated/stale filename should never collide, but guard explicitly so a
+            # final FASTA record can never be silently overwritten.
+            collision_n = 1
+            candidate = final_id
+            while candidate in final_records:
+                collision_n += 1
+                candidate = f"{final_id}_{collision_n}"
+            final_id = candidate
+            final_records[final_id] = seq
+            provenance_rows.append([
+                final_id, source_rank, bin_name, source_type, str(source_fasta), source_id,
+            ])
+
+    if not final_records:
+        raise RuntimeError("Final-assembly consolidation produced no contigs.")
+
+    write_fasta(final_fasta, final_records)
+    with open(provenance_tsv, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow([
+            "final_contig", "source_rank", "source_bin", "source_type",
+            "source_fasta", "source_record",
+        ])
+        w.writerows(provenance_rows)
+
+    log.info(
+        "Consolidated final assembly from rank '%s': %d contigs; %d reassembled bin(s), "
+        "%d original-fallback bin(s).",
+        source_rank, len(final_records), n_reassembled_bins, n_fallback_bins,
+    )
+    return final_fasta
 
 
 # --------------------------------------------------------------------------------------
@@ -938,24 +1714,26 @@ def summarize_bin_set(rank: str, rank_dir: Path, threads: int, skip_quast: bool,
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Taxonomically classify and bin metagenomic contigs (optionally starting "
-                     "from raw paired-end reads: QC + MEGAHIT -> Prodigal + DIAMOND + "
-                     "weighted-vote LCA-style classifier + QUAST/CheckM bin summaries).",
+        description="Assemble, classify, and bin metagenomic contigs. Whenever reads are supplied, "
+                    "the default is preliminary microbial retention -> competitive ITSME-style "
+                    "seed-and-extend "
+                    "reassembly -> consolidated final Prodigal/DIAMOND classification -> "
+                    "multirank bins with QUAST/CheckM summaries.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-i", "--input", type=Path, default=None,
-                    help="Input contigs FASTA file (skips QC/MEGAHIT entirely). "
-                         "Mutually exclusive with --r1/--r2.")
-    p.add_argument("-d", "--diamond-db", required=True, type=Path, help="Path to nr.dmnd (DIAMOND protein DB)")
+                    help="Optional input contigs FASTA. Use alone for classification/binning, or "
+                         "together with -1/-2 to use these contigs as the initial assembly and "
+                         "enable read recruitment without running MEGAHIT.")
+    p.add_argument("-1", "--r1", type=Path, default=None, help="Raw/forward paired-end FASTQ (R1)")
+    p.add_argument("-2", "--r2", type=Path, default=None, help="Raw/reverse paired-end FASTQ (R2)")
+    p.add_argument("-d", "--diamond-db", required=True, type=Path,
+                    help="Path to taxonomy-enabled nr-tax.dmnd (DIAMOND >=2.1.17)")
     p.add_argument("-o", "--outdir", required=True, type=Path, help="Output directory")
     p.add_argument("-t", "--threads", type=int, default=8)
-
-    reads = p.add_argument_group("Raw reads input (runs QC + MEGAHIT to build contigs first)")
-    reads.add_argument("--r1", type=Path, default=None, help="Raw/forward paired-end FASTQ (R1)")
-    reads.add_argument("--r2", type=Path, default=None, help="Raw/reverse paired-end FASTQ (R2)")
-    reads.add_argument("--skip-qc", action="store_true",
-                        help="Feed --r1/--r2 straight to MEGAHIT, skipping the Trimmomatic/FLASH QC step "
-                             "(--trim-polyg, if given, still runs).")
+    p.add_argument("--skip-qc", action="store_true",
+                    help="Feed -1/-2 straight to MEGAHIT, skipping the Trimmomatic/FLASH QC step "
+                         "(--trim-polyg, if given, still runs).")
 
     pg = p.add_argument_group("Poly-G trimming (fastp; optional, runs before everything else)")
     pg.add_argument("--trim-polyg", action="store_true",
@@ -964,25 +1742,20 @@ def parse_args(argv=None):
                           "dark/no-signal cycles get miscalled as 'G' -- Trimmomatic's adapter/quality "
                           "trimming doesn't reliably catch these. Turn this on if your reads are known "
                           "to have long poly-G tails.")
-    pg.add_argument("--fastp-cmd", default="fastp", help="fastp executable (only used with --trim-polyg)")
     pg.add_argument("--poly-g-min-len", type=int, default=10,
                      help="Minimum length of a 3' G-run to trim (fastp --poly_g_min_len, default 10)")
 
-    qc = p.add_argument_group("QC options (Trimmomatic + FLASH; used with --r1/--r2 unless --skip-qc)")
-    qc.add_argument("--trimmomatic-cmd", default="trimmomatic", help="Trimmomatic executable")
+    qc = p.add_argument_group("QC options (Trimmomatic + FLASH; used with -1/-2 unless --skip-qc)")
     qc.add_argument("--trimmomatic-folder", type=Path, default=None,
                      help="Path to the Trimmomatic install folder containing "
                           "adapters/TruSeq3-PE-2.fa (required unless --skip-qc)")
-    qc.add_argument("--flash-cmd", default="flash", help="FLASH executable")
     qc.add_argument("--flash-max-overlap", type=int, default=150)
-    qc.add_argument("--pigz-cmd", default="pigz", help="pigz executable (falls back to gzip if missing)")
     qc.add_argument("--qc-quality", type=int, default=20,
                      help="Trimmomatic SLIDINGWINDOW:4:<qc_quality> for all quality-trim passes")
     qc.add_argument("--qc-minlen", type=int, default=50, help="Trimmomatic MINLEN for quality-trim passes")
     qc.add_argument("--keep-qc-tmp", action="store_true", help="Keep intermediate QC files")
 
-    mh = p.add_argument_group("MEGAHIT options (used with --r1/--r2)")
-    mh.add_argument("--megahit-cmd", default="megahit", help="MEGAHIT executable")
+    mh = p.add_argument_group("MEGAHIT options (used with -1/-2)")
     mh.add_argument("--megahit-min-contig-len", type=int, default=None,
                      help="MEGAHIT --min-contig-len (default: MEGAHIT's own default, 200bp)")
     mh.add_argument("--megahit-extra", default=None,
@@ -993,12 +1766,6 @@ def parse_args(argv=None):
 
     p.add_argument("-e", "--evalue", type=float, default=1e-5, help="DIAMOND e-value cutoff")
     p.add_argument("--max-target-seqs", type=int, default=25, help="DIAMOND -k (hits kept per ORF)")
-
-    p.add_argument("--taxdump-dir", type=Path, default=None,
-                    help="Directory containing a local NCBI taxdump (nodes.dmp + names.dmp, "
-                         "e.g. an extracted taxdump.tar.gz). If given, taxonomy lookups use "
-                         "this directly -- no network access or ete3 sqlite build needed. "
-                         "Otherwise falls back to ete3.NCBITaxa (downloads its own copy).")
 
     p.add_argument("--ranks", default=",".join(BIN_RANKS_DEFAULT),
                     help="Comma-separated ranks to classify/bin at (default: genus,species). "
@@ -1018,6 +1785,15 @@ def parse_args(argv=None):
     p.add_argument("--exclude-unclassified-bins", action="store_true",
                     help="Do not write an Unclassified.fasta bin (default: include it)")
 
+    p.add_argument("--exclude-kingdoms", default=",".join(DEFAULT_EXCLUDED_KINGDOMS),
+                    help="Comma-separated Eukaryota kingdoms to drop from binning entirely "
+                         "(default: Metazoa,Viridiplantae -- removes host-animal/plant "
+                         "contamination while keeping Bacteria, Archaea, Fungi, and protists). "
+                         "Dropped contigs are written to "
+                         "<outdir>/classification/excluded_animal_plant_contamination.fasta "
+                         "and flagged in contig_classification.tsv, not silently discarded. "
+                         "Pass '' to disable this filter and keep everything.")
+
     p.add_argument("--reuse-prodigal", action="store_true",
                     help="Skip Prodigal if <outdir>/prodigal/proteins.faa already exists (reuse it).")
     p.add_argument("--reuse-diamond", action="store_true",
@@ -1029,8 +1805,111 @@ def parse_args(argv=None):
     p.add_argument("--skip-quast", action="store_true")
     p.add_argument("--skip-checkm", action="store_true")
 
+    rb = p.add_argument_group(
+        "Targeted bin reassembly (default whenever reads are supplied; competitive mapping, "
+        "frontier extension, focused SPAdes/metaSPAdes, Unicycler, and Pilon)"
+    )
+    rb_toggle = rb.add_mutually_exclusive_group()
+    rb_toggle.add_argument("--reassemble-bins", dest="reassemble_bins", action="store_true",
+                     help="Explicitly enable the default workflow used whenever -1/-2 are present: "
+                          "competitively map reads against all seed bins, exclude tied assignments, "
+                          "extend winning pools, run focused SPAdes/metaSPAdes, then attempt "
+                          "Unicycler circularization and Pilon polishing.")
+    rb_toggle.add_argument("--skip-reassembly", dest="reassemble_bins", action="store_false",
+                     help="Disable the default seed-and-extension/final-reclassification workflow "
+                          "and stop after preliminary classification, binning, and QUAST/CheckM. "
+                          "This is the implicit behavior only when contigs are supplied without reads.")
+    p.set_defaults(reassemble_bins=None)
+    rb.add_argument("--reassemble-ranks", default=None,
+                     help="Comma-separated subset of --ranks to reassemble. By default, only the "
+                          "automatically selected final source rank is reassembled (genus is "
+                          "preferred). Additional ranks are diagnostic and are not pooled into "
+                          "the consolidated final assembly. Each rank must also appear in --ranks.")
+    rb.add_argument("--final-source-rank", default="auto",
+                     help="Single preliminary rank whose mutually exclusive bins are used to "
+                          "construct the consolidated final assembly. Successful reassemblies "
+                          "replace their original bin contigs; skipped/failed bins fall back to "
+                          "the originals. Default 'auto' prefers genus, then species, family, "
+                          "phylum, kingdom, superkingdom, or domain. The rank must also occur in "
+                          "--reassemble-ranks when that option is given.")
+    rb.add_argument("--reassemble-min-bin-contigs", type=int, default=2,
+                     help="Skip reassembly for bins with fewer contigs than this -- nothing to "
+                          "gain from reassembling an already-single-contig bin (default 2).")
+    rb.add_argument("--reassemble-include-unclassified", action="store_true",
+                     help="Also attempt reassembly of the catch-all 'Unclassified' bin (default: "
+                          "skipped, since it's a mixed leftover pool, not one coherent genome).")
+    rb.add_argument("--anchor-db", action="append", default=[], metavar="BIN=FASTA",
+                     help="Optional external seed assigned to exactly one competing bin; repeatable. "
+                          "BIN is a bin FASTA stem, e.g. Escherichia_coli=reference.fasta.")
+    rb.add_argument("--reassemble-seed-score-min", default="G,20,8",
+                     help="Bowtie2 --score-min for the seed-recruitment mapping (default G,20,8).")
+    rb.add_argument("--reassemble-min-read-aligned", type=float, default=0.75,
+                     help="Minimum aligned fraction of a read for it to be recruited (default 0.75).")
+    rb.add_argument("--reassemble-min-read-identity", type=float, default=0.85,
+                     help="Minimum approximate identity for a recruited read (default 0.85).")
+    rb.add_argument("--reassemble-max-insert", type=int, default=1000,
+                     help="Maximum bowtie2 fragment length during recruitment (default 1000).")
+    rb.add_argument("--reassemble-max-rounds", type=int, default=5,
+                     help="Exact-kmer frontier-extension rounds after competitive seed "
+                          "recruitment (default 5; pass 0 to disable extension).")
+    rb.add_argument("--reassemble-word-size", type=int, default=31,
+                     help="Exact k-mer/word length for frontier extension (default 31; 15-31).")
+    rb.add_argument("--reassemble-min-word-hits", type=int, default=3,
+                     help="Minimum exact-word hits required to recruit a read during extension "
+                          "(default 3).")
+    rb.add_argument("--reassemble-bait-min-entropy", type=float, default=0.45,
+                     help="Excludes low-complexity bait sequence from frontier extension "
+                          "(default 0.45).")
+    rb.add_argument("--reassemble-max-round-growth", type=float, default=0.25,
+                     help="Reject an extension round if new/accepted exceeds this fraction -- "
+                          "guards against snowballing into an unrelated, similar-coverage genome "
+                          "(default 0.25).")
+    rb.add_argument("--reassemble-max-accepted-fraction", type=float, default=0.05,
+                     help="Reject an extension round if accepted/total-raw-reads would exceed "
+                          "this fraction (default 0.05).")
+    rb.add_argument("--reassemble-min-new-templates", type=int, default=10,
+                     help="Stop extension once a round recruits fewer new templates than this "
+                          "(default 10).")
+    rb.add_argument("--reassemble-min-growth", type=float, default=0.0001,
+                     help="Stop extension once round-over-round growth falls below this fraction "
+                          "(default 0.0001).")
+    rb.add_argument("--reassemble-bbtools-memory", default="16g",
+                     help="Java heap for BBDuk during frontier extension, e.g. 16g (default 16g).")
+    rb.add_argument("--reassemble-mode", choices=["standard", "meta"], default="meta",
+                     help="spades.py mode for the per-bin reassembly: 'meta' (metaSPAdes, "
+                          "default -- more forgiving of residual strain heterogeneity/uneven "
+                          "coverage in the recruited pool) or 'standard' (plain SPAdes, for a "
+                          "very clean single-strain recruitment).")
+    rb.add_argument("--reassemble-memory-gb", type=int, default=32,
+                     help="SPAdes memory limit in GB for each bin's reassembly (default 32).")
+    rb.add_argument("--reassemble-kmers", default="auto",
+                     help="SPAdes k-mer list or 'auto' (default auto).")
+    rb.add_argument("--skip-circularization", dest="circularize", action="store_false",
+                     help="Keep focused SPAdes/metaSPAdes output; skip the default Unicycler "
+                          "circularization attempt and Pilon polishing.")
+    rb.add_argument("--unicycler-mode", choices=["conservative", "normal", "bold"],
+                     default="normal", help="Unicycler bridging mode (default normal).")
+    p.set_defaults(circularize=True)
+
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
+
+
+def parse_anchor_specs(specs) -> dict:
+    """Parse repeatable ``BIN=FASTA`` anchors for competitive seed mapping."""
+    anchors = defaultdict(list)
+    for spec in specs or []:
+        if "=" not in spec:
+            raise ValueError(f"--anchor-db must be BIN=FASTA, got: {spec}")
+        raw_bin, raw_path = spec.split("=", 1)
+        bin_name = sanitize(raw_bin.strip())
+        anchor_path = Path(raw_path.strip())
+        if not raw_bin.strip() or not raw_path.strip():
+            raise ValueError(f"--anchor-db must be BIN=FASTA, got: {spec}")
+        if not anchor_path.is_file():
+            raise ValueError(f"Anchor FASTA does not exist: {anchor_path}")
+        anchors[bin_name].append(anchor_path)
+    return dict(anchors)
 
 
 def main(argv=None):
@@ -1038,17 +1917,40 @@ def main(argv=None):
     setup_logging(args.verbose)
 
     using_reads = args.r1 is not None or args.r2 is not None
-    if using_reads and args.input is not None:
-        log.error("Pass either -i/--input OR --r1/--r2, not both.")
-        sys.exit(1)
+    using_contigs = args.input is not None
     if using_reads and (args.r1 is None or args.r2 is None):
-        log.error("Both --r1 and --r2 are required together.")
+        log.error("Both -1 and -2 are required together.")
         sys.exit(1)
-    if not using_reads and args.input is None:
-        log.error("Provide either -i/--input (pre-assembled contigs) or --r1/--r2 (raw paired FASTQs).")
+    if not using_reads and not using_contigs:
+        log.error("Provide contigs (-i), paired reads (-1/-2), or both.")
         sys.exit(1)
-    if using_reads and not args.skip_qc and args.trimmomatic_folder is None:
+
+    # Seed-and-extension is the default whenever reads are available. Contigs-only
+    # mode implicitly disables it unless the user explicitly requested it, which is an
+    # error because no reads exist to recruit.
+    reassembly_was_explicit = args.reassemble_bins is True
+    if args.reassemble_bins is None:
+        args.reassemble_bins = using_reads
+    if reassembly_was_explicit and not using_reads:
+        log.error("--reassemble-bins requires paired reads (-1/-2); contigs alone cannot extend.")
+        sys.exit(1)
+
+    reads_only = using_reads and not using_contigs
+    if reads_only and not args.skip_qc and args.trimmomatic_folder is None:
         log.error("--trimmomatic-folder is required for QC (or pass --skip-qc to bypass QC).")
+        sys.exit(1)
+    if args.reassemble_bins and args.trimmomatic_folder is None:
+        log.error("Seed-and-extension is enabled by default whenever reads are supplied and requires "
+                  "--trimmomatic-folder because every recruited batch is QC processed. "
+                  "Provide the folder or pass --skip-reassembly.")
+        sys.exit(1)
+    if args.reassemble_bins and not (15 <= args.reassemble_word_size <= 31):
+        log.error("--reassemble-word-size must be between 15 and 31.")
+        sys.exit(1)
+    try:
+        anchors_by_bin = parse_anchor_specs(args.anchor_db)
+    except ValueError as exc:
+        log.error("%s", exc)
         sys.exit(1)
 
     ranks = [r.strip() for r in args.ranks.split(",") if r.strip()]
@@ -1056,6 +1958,34 @@ def main(argv=None):
         if r not in WANTED_RANKS:
             log.error("Unsupported rank '%s'. Supported: %s", r, WANTED_RANKS)
             sys.exit(1)
+    reassemble_ranks = []
+    final_source_rank = None
+    if args.reassemble_bins:
+        if args.reassemble_ranks:
+            reassemble_ranks = [r.strip() for r in args.reassemble_ranks.split(",") if r.strip()]
+        else:
+            try:
+                auto_source = choose_final_source_rank(ranks, ranks, args.final_source_rank)
+            except ValueError as exc:
+                log.error("%s", exc)
+                sys.exit(1)
+            reassemble_ranks = [auto_source]
+        for r in reassemble_ranks:
+            if r not in ranks:
+                log.error("--reassemble-ranks '%s' was not classified/binned (--ranks was '%s').",
+                          r, args.ranks)
+                sys.exit(1)
+        try:
+            final_source_rank = choose_final_source_rank(
+                ranks, reassemble_ranks, args.final_source_rank,
+            )
+        except ValueError as exc:
+            log.error("%s", exc)
+            sys.exit(1)
+        log.info(
+            "Seed-and-extension enabled at rank(s) %s; consolidated final assembly source rank: %s.",
+            reassemble_ranks, final_source_rank,
+        )
 
     outdir = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
@@ -1067,28 +1997,41 @@ def main(argv=None):
 
     if using_reads:
         if args.trim_polyg:
-            which_or_die(args.fastp_cmd)
-        if not args.skip_qc:
-            which_or_die(args.trimmomatic_cmd)
-            which_or_die(args.flash_cmd)
-        which_or_die(args.megahit_cmd)
-    if not reuse_prodigal:
+            which_or_die("fastp")
+        if reads_only and not args.skip_qc:
+            which_or_die("trimmomatic")
+            which_or_die("flash")
+        if reads_only:
+            which_or_die("megahit")
+    if args.reassemble_bins or not reuse_prodigal:
         which_or_die("prodigal")
-    if not reuse_diamond:
+    if args.reassemble_bins or not reuse_diamond:
         which_or_die("diamond")
+        require_diamond_taxonomy_fields()
     if not args.skip_quast and shutil.which("quast.py") is None:
         log.warning("quast.py not on PATH; will use built-in assembly stats instead.")
     if not args.skip_checkm and shutil.which("checkm") is None:
         log.warning("checkm not on PATH; completeness/contamination will be NA.")
+    if args.reassemble_bins:
+        which_or_die("trimmomatic")
+        which_or_die("flash")
+        which_or_die("bowtie2")
+        which_or_die("bowtie2-build")
+        which_or_die("samtools")
+        which_or_die("bbduk.sh")
+        which_or_die("spades.py")
+        if args.circularize:
+            which_or_die("unicycler")
+            which_or_die("pilon")
 
     n_qc_steps = (
         (1 if using_reads and args.trim_polyg else 0)
-        + (1 if using_reads and not args.skip_qc else 0)
-        + (1 if using_reads else 0)
+        + (1 if reads_only and not args.skip_qc else 0)
+        + (1 if reads_only else 0)
     )
-    steps = StepCounter(n_qc_steps + 5)
+    steps = StepCounter(n_qc_steps + (11 if args.reassemble_bins else 5))
 
-    # 0a/0b/0c. Poly-G trim + QC + MEGAHIT assembly (raw-reads mode only)
+    # 0a/0b/0c. Poly-G may prepare reads in either read mode; QC+MEGAHIT are reads-only.
     assembly_fasta = args.input
     if using_reads:
         r1_in, r2_in = args.r1, args.r2
@@ -1096,41 +2039,48 @@ def main(argv=None):
             steps.next("Trimming poly-G tails (fastp)...")
             r1_in, r2_in = trim_poly_g(
                 r1_in, r2_in, outdir / "polyg", args.threads,
-                args.fastp_cmd, args.poly_g_min_len,
+                poly_g_min_len=args.poly_g_min_len,
             )
 
-        if not args.skip_qc:
-            steps.next("Running QC (Trimmomatic adapter/quality trim + FLASH merge)...")
-            r1_final, r2_final, u_final = run_qc(
-                r1_in, r2_in, outdir / "qc", args.threads,
-                args.trimmomatic_cmd, args.trimmomatic_folder,
-                args.flash_cmd, args.flash_max_overlap, args.pigz_cmd,
-                args.qc_quality, args.qc_minlen, keep_tmp=args.keep_qc_tmp,
+        if reads_only:
+            if not args.skip_qc:
+                steps.next("Running QC (Trimmomatic adapter/quality trim + FLASH merge)...")
+                r1_final, r2_final, u_final = run_qc(
+                    r1_in, r2_in, outdir / "qc", args.threads,
+                    trimmomatic_cmd="trimmomatic", trimmomatic_folder=args.trimmomatic_folder,
+                    flash_cmd="flash", flash_max_overlap=args.flash_max_overlap, pigz_cmd="pigz",
+                    qc_quality=args.qc_quality, qc_minlen=args.qc_minlen,
+                    keep_tmp=args.keep_qc_tmp,
+                )
+            else:
+                r1_final, r2_final, u_final = r1_in, r2_in, None
+
+            steps.next("Running MEGAHIT assembly...")
+            assembly_fasta = run_megahit(
+                r1_final, r2_final, u_final, outdir / "megahit", args.threads,
+                min_contig_len=args.megahit_min_contig_len, extra_args=args.megahit_extra,
             )
+            log.info("MEGAHIT assembly: %s", assembly_fasta)
         else:
-            r1_final, r2_final, u_final = r1_in, r2_in, None
+            log.info(
+                "Using supplied contigs as the initial assembly; reads are reserved for "
+                "competitive seed-and-extension."
+            )
 
-        steps.next("Running MEGAHIT assembly...")
-        assembly_fasta = run_megahit(
-            r1_final, r2_final, u_final, outdir / "megahit", args.threads,
-            args.megahit_cmd, args.megahit_min_contig_len, args.megahit_extra,
-        )
-        log.info("MEGAHIT assembly: %s", assembly_fasta)
-
-    # 1. Prodigal
+    # 1. Preliminary Prodigal
     if reuse_prodigal:
-        steps.next(f"Reusing existing Prodigal output: {faa}")
+        steps.next(f"Reusing preliminary Prodigal output: {faa}")
     else:
-        steps.next("Running Prodigal...")
+        steps.next("Running preliminary Prodigal...")
         faa, _gff = run_prodigal(assembly_fasta, outdir / "prodigal", mode=args.prodigal_mode)
     orf_to_contig = parse_orf_to_contig(faa)
     log.info("Predicted %d ORFs.", len(orf_to_contig))
 
-    # 2. DIAMOND
+    # 2. Preliminary DIAMOND
     if reuse_diamond:
-        steps.next(f"Reusing existing DIAMOND output: {hits_tsv}")
+        steps.next(f"Reusing preliminary DIAMOND output: {hits_tsv}")
     else:
-        steps.next(f"Running DIAMOND blastp vs {args.diamond_db}...")
+        steps.next(f"Running preliminary DIAMOND blastp vs {args.diamond_db}...")
         hits_tsv = run_diamond(
             faa, args.diamond_db, outdir / "diamond", args.threads, args.evalue,
             args.max_target_seqs,
@@ -1138,20 +2088,43 @@ def main(argv=None):
     hits_by_orf = parse_diamond_hits(hits_tsv)
     log.info("Got hits for %d/%d ORFs.", len(hits_by_orf), len(orf_to_contig))
 
-    # 3. Classification
-    steps.next(f"Classifying contigs (bitscore-weighted vote at ranks: {ranks})...")
+    # 3. Preliminary classification and microbial-contig retention
+    # "domain" and "kingdom" are always classified internally (even if not in --ranks) so
+    # the animal/plant-contamination filter below can always run; they're only written as
+    # bins if you actually asked for them in --ranks.
+    internal_ranks = ranks + [r for r in ("domain", "kingdom") if r not in ranks]
+    steps.next(f"Preliminary contig classification/retention at ranks: {internal_ranks}...")
     contig_seqs = read_fasta(assembly_fasta)
-    taxlookup = TaxonomyLookup(taxdump_dir=args.taxdump_dir)
     classifications = classify_all_contigs(
-        list(contig_seqs.keys()), orf_to_contig, hits_by_orf, taxlookup, ranks,
+        list(contig_seqs.keys()), orf_to_contig, hits_by_orf, internal_ranks,
         args.bitscore_range, args.max_hits_per_orf, args.min_support,
     )
-    write_classification_table(classifications, ranks, outdir / "classification" / "contig_classification.tsv")
 
-    # 4. Binning
-    steps.next("Writing bin FASTA files...")
+    exclude_kingdoms = [k.strip() for k in args.exclude_kingdoms.split(",") if k.strip()]
+    classifications_for_binning, excluded_ids = split_excluded_eukaryotes(classifications, exclude_kingdoms)
+    preliminary_excluded_path = outdir / "classification" / "excluded_animal_plant_contamination.fasta"
+    preliminary_excluded_path.unlink(missing_ok=True)
+    if excluded_ids:
+        log.info(
+            "Excluding %d contig(s) classified as %s (host-animal/plant contamination).",
+            len(excluded_ids), exclude_kingdoms,
+        )
+        excluded_records = {cid: contig_seqs[cid] for cid in excluded_ids if cid in contig_seqs}
+        (outdir / "classification").mkdir(parents=True, exist_ok=True)
+        write_fasta(
+            preliminary_excluded_path,
+            excluded_records,
+        )
+
+    write_classification_table(
+        classifications, internal_ranks, outdir / "classification" / "contig_classification.tsv",
+        excluded_ids=excluded_ids,
+    )
+
+    # 4. Preliminary binning (excluded contigs never become seed bins)
+    steps.next("Writing preliminary seed-bin FASTA files...")
     membership = bin_contigs(
-        contig_seqs, classifications, ranks, outdir / "bins",
+        contig_seqs, classifications_for_binning, ranks, outdir / "bins",
         include_unclassified=not args.exclude_unclassified_bins,
     )
     if args.min_bin_contigs > 1 or args.min_bin_length > 0:
@@ -1165,10 +2138,110 @@ def main(argv=None):
             include_unclassified=not args.exclude_unclassified_bins,
         )
 
-    # 5. Per-bin-set summaries
-    steps.next("Summarizing bins (QUAST contiguity + CheckM completeness/contamination)...")
-    for r in ranks:
-        summarize_bin_set(r, outdir / "bins" / r, args.threads, args.skip_quast, args.skip_checkm)
+    # 5. Default targeted seed-and-extension reassembly, then a complete final pass.
+    if args.reassemble_bins:
+        assembler_label = "metaSPAdes" if args.reassemble_mode == "meta" else "SPAdes"
+        steps.next(f"Targeted bin reassembly at ranks {reassemble_ranks} "
+                   f"(competitive seed-and-extend + focused {assembler_label}"
+                   f"{' + Unicycler/Pilon' if args.circularize else ''})...")
+        successful_reassemblies = run_bin_reassembly(
+            outdir, reassemble_ranks, r1_in, r2_in, args.threads, anchors_by_bin,
+            args.trimmomatic_folder, args.qc_quality, args.qc_minlen, args.flash_max_overlap,
+            args.reassemble_seed_score_min, args.reassemble_min_read_aligned,
+            args.reassemble_min_read_identity, args.reassemble_max_insert,
+            args.reassemble_max_rounds, args.reassemble_word_size, args.reassemble_min_word_hits,
+            args.reassemble_bait_min_entropy, args.reassemble_max_round_growth,
+            args.reassemble_max_accepted_fraction, args.reassemble_min_new_templates,
+            args.reassemble_min_growth, args.reassemble_bbtools_memory, args.reassemble_mode,
+            args.reassemble_memory_gb, args.reassemble_kmers,
+            args.reassemble_min_bin_contigs, args.reassemble_include_unclassified,
+            args.circularize, args.unicycler_mode,
+        )
+
+        steps.next(f"Consolidating final assembly from preliminary rank '{final_source_rank}'...")
+        final_assembly_fasta = build_consolidated_final_assembly(
+            outdir, final_source_rank, successful_reassemblies,
+        )
+
+        # 6. Final Prodigal and DIAMOND pass on the consolidated assembly.
+        steps.next("Running final Prodigal on consolidated contigs...")
+        final_faa, _final_gff = run_prodigal(
+            final_assembly_fasta, outdir / "final" / "prodigal", mode=args.prodigal_mode,
+        )
+        final_orf_to_contig = parse_orf_to_contig(final_faa)
+        log.info("Final assembly: predicted %d ORFs.", len(final_orf_to_contig))
+
+        steps.next(f"Running final DIAMOND blastp vs {args.diamond_db}...")
+        final_hits_tsv = run_diamond(
+            final_faa, args.diamond_db, outdir / "final" / "diamond", args.threads,
+            args.evalue, args.max_target_seqs,
+        )
+        final_hits_by_orf = parse_diamond_hits(final_hits_tsv)
+        log.info(
+            "Final assembly: got hits for %d/%d ORFs.",
+            len(final_hits_by_orf), len(final_orf_to_contig),
+        )
+
+        # 7. Reclassify and reapply the animal/plant filter because frontier extension
+        # can introduce contigs whose taxonomy differs from the preliminary seed bin.
+        steps.next(f"Final contig classification/retention at ranks: {internal_ranks}...")
+        final_contig_seqs = read_fasta(final_assembly_fasta)
+        final_classifications = classify_all_contigs(
+            list(final_contig_seqs.keys()), final_orf_to_contig, final_hits_by_orf,
+            internal_ranks, args.bitscore_range, args.max_hits_per_orf,
+            args.min_support,
+        )
+        final_classifications_for_binning, final_excluded_ids = split_excluded_eukaryotes(
+            final_classifications, exclude_kingdoms,
+        )
+        final_classification_dir = outdir / "final" / "classification"
+        final_classification_dir.mkdir(parents=True, exist_ok=True)
+        final_excluded_path = final_classification_dir / "excluded_animal_plant_contamination.fasta"
+        final_excluded_path.unlink(missing_ok=True)
+        if final_excluded_ids:
+            log.info(
+                "Final pass: excluding %d contig(s) classified as %s.",
+                len(final_excluded_ids), exclude_kingdoms,
+            )
+            final_excluded_records = {
+                cid: final_contig_seqs[cid]
+                for cid in final_excluded_ids if cid in final_contig_seqs
+            }
+            write_fasta(final_excluded_path, final_excluded_records)
+        write_classification_table(
+            final_classifications, internal_ranks,
+            final_classification_dir / "contig_classification.tsv",
+            excluded_ids=final_excluded_ids,
+        )
+
+        # 8. Final multirank bins and quality assessment.
+        steps.next("Writing final taxonomic bin FASTA files...")
+        final_bins_dir = outdir / "final" / "bins"
+        final_membership = bin_contigs(
+            final_contig_seqs, final_classifications_for_binning, ranks, final_bins_dir,
+            include_unclassified=not args.exclude_unclassified_bins,
+        )
+        if args.min_bin_contigs > 1 or args.min_bin_length > 0:
+            filter_small_bins(
+                final_contig_seqs, final_membership, ranks, final_bins_dir,
+                args.min_bin_contigs, args.min_bin_length,
+                include_unclassified=not args.exclude_unclassified_bins,
+            )
+
+        steps.next("Assessing final bins with QUAST and CheckM...")
+        for r in ranks:
+            summarize_bin_set(
+                r, final_bins_dir / r, args.threads, args.skip_quast, args.skip_checkm,
+            )
+        log.info("Final classified and assessed bins: %s", final_bins_dir)
+    else:
+        # With contigs alone, or with --skip-reassembly, the preliminary assembly is the
+        # final assembly and receives the one requested quality-assessment pass.
+        steps.next("Assessing bins with QUAST and CheckM (reassembly disabled)...")
+        for r in ranks:
+            summarize_bin_set(
+                r, outdir / "bins" / r, args.threads, args.skip_quast, args.skip_checkm,
+            )
 
     log.info("Done. Results in %s", outdir)
 

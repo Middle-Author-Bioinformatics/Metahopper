@@ -1,124 +1,137 @@
 # MetaHopper
 
-End-to-end pipeline for taxonomic classification and binning of metagenomic contigs, starting from either raw paired-end FASTQs or an already-assembled contigs FASTA -- with an optional targeted reassembly module for pulling fragmented, low-abundance genomes (e.g. host-restricted symbionts) back together.
+**Metagenome assembly, microbial-contig retention, taxonomic binning, and targeted extension**
 
-```
-R1.fastq, R2.fastq  (raw paired-end reads; optional -- skip straight to contigs.fasta)
-    -> [optional] fastp poly-G trimming (--trim-polyg)
-    -> QC: Trimmomatic (adapter clip + quality trim) + FLASH (merge overlapping pairs)
-    -> MEGAHIT assembly
-contigs.fasta
-    -> Prodigal (ORF/gene prediction, meta mode)
-    -> DIAMOND blastp vs. a DIAMOND protein database (nr.dmnd or similar)
-    -> per-ORF top hits -> per-contig taxonomic classification
-    -> drop host-animal/plant contamination (Metazoa/Viridiplantae, configurable)
-    -> bin FASTA files at genus / species level (or whatever --ranks you ask for)
-    -> per-bin-set summary.tsv (QUAST contiguity + CheckM completeness/contamination)
-    -> [optional] targeted per-bin reassembly (--reassemble-bins): recruit raw reads
-       back onto each bin's own contigs, extend recruitment with exact-kmer frontier
-       scans, reassemble the recruited pool alone with SPAdes/metaSPAdes, report a
-       before/after contiguity comparison
+MetaHopper accepts paired reads, assembled contigs, or both. It builds or uses a complete metagenome assembly, predicts proteins with Prodigal, and classifies contigs against the taxonomy-enabled `nr-tax.dmnd` DIAMOND database. Animal and plant contigs are separated by default, while microbial contigs are retained and organized into domain-, phylum-, family-, genus-, and species-level bins.
+
+When reads are available, MetaHopper automatically uses the classified bins as seeds for targeted read recruitment. Reads map competitively across all bins, ambiguous ties are excluded, and guarded exact-k-mer extension attempts to walk beyond the original contigs. Recruited reads are assembled with SPAdes/metaSPAdes, passed through Unicycler for graph resolution and possible circularization, and polished with Pilon. The refined assembly is then completely reclassified and assessed with QUAST and CheckM.
+
+```mermaid
+flowchart LR
+    A[Reads, contigs, or both] --> B[Full assembly]
+    B --> C[Prodigal and nr-tax.dmnd]
+    C --> D[Microbial taxonomic bins]
+    D --> E[Competitive seed extension]
+    E --> F[SPAdes, Unicycler, and Pilon]
+    F --> G[Final bins, QUAST, and CheckM]
 ```
 
+Seed-and-extension is enabled by default whenever paired reads are supplied. Contigs-only runs stop after classification, binning, and quality assessment because no reads are available for extension.
 
-## Why
+## Input behavior
 
-Classifying a *contig* from many *ORF* hits is the same problem CAT/BAT, MEGAN's LCA, and Kraken-style consensus callers solve. MetaHopper's approach:
-
-1. For each ORF, keep the DIAMOND hits within `--bitscore-range` (default 90%) of that ORF's best bitscore -- a "bit-score competitive set," not just the single top hit.
-2. Each kept hit's organism name is parsed straight out of its `stitle` (the trailing `[Genus species]`, standard NCBI nr header format), resolved to a full NCBI lineage, and contributes its bitscore as a vote for every taxon in that lineage.
-3. Votes are tallied independently at each requested rank. A taxon wins a rank only if its share of the total weighted vote clears `--min-support` (default 0.5, i.e. a majority; set to `0` for a pure plurality/"most votes wins" call). Otherwise the contig is `Unclassified` at that rank.
-
-Because organism names come from `stitle`, **no `--taxonmap`/`--taxonnodes` embedding is required in the DIAMOND database** -- any `nr.dmnd` built with a plain `diamond makedb --in nr.faa` works.
-
-## Usage
-
-From raw paired-end reads:
-
-```bash
-MetaHopper.v2.py --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \
-  --trimmomatic-folder /path/to/Trimmomatic-0.39 \
-  -d /path/to/nr.dmnd -o metahop_out -t 16 \
-  --taxdump-dir /path/to/taxdump \
-  --ranks domain,phylum,family,genus,species
-```
-
-From an existing assembly:
-
-```bash
-MetaHopper.v2.py -i contigs.fasta -d /path/to/nr.dmnd -o metahop_out -t 16 \
-  --taxdump-dir /path/to/taxdump
-```
-
-With targeted bin reassembly, to pull fragmented low-abundance/symbiont genomes back together after the initial binning pass:
-
-```bash
-MetaHopper.v2.py --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \
-  --trimmomatic-folder /path/to/Trimmomatic-0.39 \
-  -d /path/to/nr.dmnd -o metahop_out -t 16 \
-  --taxdump-dir /path/to/taxdump \
-  --ranks genus,species \
-  --reassemble-bins --reassemble-ranks genus,species
-```
-
-Run `MetaHopper.v2.py --help` for the full option list (QC/MEGAHIT tuning, `--min-support`, `--min-bin-contigs`/`--min-bin-length` to collapse small/noisy bins, `--reuse-prodigal`/`--reuse-diamond` to re-classify at a different rank without re-running the expensive steps, the full `--reassemble-*` group, etc.).
-
-## Targeted bin reassembly (`--reassemble-bins`)
-
-Whole-metagenome co-assembly (MEGAHIT) tends to fragment low-abundance or fast-diverging genomes -- especially host-restricted symbionts (*Wolbachia*, *Rickettsia*, etc.) that share conserved genes/k-mers with the rest of the community and rarely have a close enough reference genome to assemble against directly.
-
-Instead of requiring a reference, this module uses each bin's **own already-classified contigs** as the seed:
-
-1. Raw reads are mapped back onto that bin's contigs with `bowtie2 --very-sensitive-local`.
-2. Confidently-mapping read pairs (+ their mates, however the mate aligned) are recruited.
-3. Recruitment is optionally extended with cheap exact-kmer "frontier" scans (BBDuk) to catch divergent regions the initial contigs missed entirely -- guarded by growth-rate and accepted-fraction stop conditions so it can't snowball into an unrelated, similar-coverage genome.
-4. The resulting small, mostly-single-organism read pool is QC'd and reassembled alone with SPAdes/metaSPAdes.
-
-A subset-only assembly graph is far simpler than the whole-community graph, so it can often resolve tangles (shared genes, similar-coverage strains) that fragmented the original bin. An optional `--anchor-db` (repeatable) lets you add external reference sequences -- a related genome, conserved marker genes -- as supplementary seeds, useful for recruiting reads from genome regions the current fragmented bin has zero contigs for at all.
-
-This **does not overwrite** the original bin FASTA. It writes a separate reassembled contig set plus a before/after comparison so you can judge whether it actually helped:
-
-```
-<outdir>/reassembly/<rank>/<bin>/reassembled.fasta
-<outdir>/reassembly/<rank>/<bin>/recruitment.tsv       (per-round recruitment metrics)
-<outdir>/bins/<rank>/reassembly_summary.tsv            (contigs/N50/length, before vs. after)
-```
-
-**Caveat:** this maps the *entire* raw read set against each bin's contigs, once per bin, so with many bins across multiple ranks it can get slow and disk-heavy. Use `--reassemble-ranks` and `--reassemble-min-bin-contigs` to narrow scope to the bins that actually look fragmented.
+| Input | Behavior |
+|---|---|
+| Paired reads only | QC → MEGAHIT assembly → classification → seed extension → focused reassembly → final classification and assessment |
+| Contigs plus paired reads | Uses the supplied contigs, skips MEGAHIT, and uses the reads for seed extension and refinement |
+| Contigs only | Classifies, retains, bins, and assesses the supplied assembly; no extension or circularization |
 
 ## Requirements
 
-**Only if starting from raw reads (`--r1`/`--r2`):**
-- [Trimmomatic](http://www.usadellab.org/cms/?page=trimmomatic) (skip with `--skip-qc`)
-- [FLASH](https://ccb.jhu.edu/software/FLASH/) (skip with `--skip-qc`)
-- [pigz](https://zlib.net/pigz/) (falls back to `gzip` if missing)
-- [fastp](https://github.com/OpenGene/fastp) (only with `--trim-polyg`)
-- [MEGAHIT](https://github.com/voutcn/megahit)
+MetaHopper uses Python 3, Prodigal, DIAMOND ≥2.1.17, MEGAHIT, Bowtie2, Samtools, BBMap/BBDuk, SPAdes, Unicycler, Pilon, Trimmomatic, FLASH2, QUAST, and CheckM. fastp is optional for poly-G trimming.
 
-**Always:**
-- [Prodigal](https://github.com/hyattpd/Prodigal)
-- [DIAMOND](https://github.com/bbuchfink/diamond)
-- [QUAST](https://github.com/ablab/quast) (optional; falls back to a built-in N50/L50/GC calculator if missing or `--skip-quast`)
-- [CheckM](https://github.com/Ecogenomics/CheckM) `lineage_wf` (optional; skipped with a warning if missing or `--skip-checkm`)
+Create and activate an environment:
 
-**Only with `--reassemble-bins`:**
-- [bowtie2](https://github.com/BenLangmead/bowtie2) (`bowtie2` + `bowtie2-build`)
-- [samtools](https://github.com/samtools/samtools) (needs `samtools view -N` support)
-- [BBMap](https://sourceforge.net/projects/bbmap/) (`bbduk.sh`)
-- [SPAdes](https://github.com/ablab/spades) (`spades.py`)
-- Trimmomatic + FLASH (same as above -- required even if `--skip-qc` was used for the main assembly, since recruited reads always get QC'd)
+```bash
+mamba create -n metahopper \
+    -c conda-forge \
+    -c bioconda \
+    python prodigal diamond megahit bowtie2 samtools bbmap spades \
+    unicycler pilon trimmomatic flash2 fastp pigz quast checkm-genome \
+    --yes
 
-**Taxonomy lookups** -- pick one:
-- `--taxdump-dir <dir>`: a local NCBI taxdump (`nodes.dmp` + `names.dmp`, e.g. an extracted [`taxdump.tar.gz`](https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz)). Fast, offline, no extra Python dependency. **Recommended.**
-- Otherwise falls back to `ete3.NCBITaxa`, which downloads and builds its own local sqlite taxonomy db on first use (`pip install ete3 six`) -- requires outbound internet access.
+mamba activate metahopper
+chmod +x MetaHopper.v2.py
+```
 
-## Files
+## Build `nr-tax.dmnd`
 
-- `MetaHopper.v2.py` -- the current pipeline (raw reads or contigs in, classification + binning out, optional targeted bin reassembly)
-- `MetaHopper.py` -- earlier version, kept for reference
-- `MetaHopper_contigs_only.py` -- stripped-down variant that only accepts an already-assembled `contigs.fasta` (no raw-read QC/MEGAHIT support)
-- `full_lineage.py` -- standalone helper: expand an NCBI taxid to its complete ranked lineage (domain through species/strain) from a local taxdump, e.g. for inspecting `staxids` pulled from a taxonomy-embedded DIAMOND database
+MetaHopper requires a taxonomy-enabled NCBI nr database. Download a compatible set of:
 
-## License
+- `nr.gz`
+- `prot.accession2taxid.FULL.gz`
+- `nodes.dmp`
+- `names.dmp`
 
-Add a license of your choice (e.g. MIT) before publishing.
+Build the database:
+
+```bash
+diamond makedb \
+    --in nr.gz \
+    --db nr-tax \
+    --taxonmap prot.accession2taxid.FULL.gz \
+    --taxonnodes nodes.dmp \
+    --taxonnames names.dmp \
+    --threads 24
+```
+
+This creates `nr-tax.dmnd`. The accession-to-taxid mapping, hierarchical NCBI taxonomy, and scientific names are baked into the database, so MetaHopper does not require a separate taxdump directory or `ete3` at runtime.
+
+## Quick start
+
+### Paired reads only
+
+```bash
+./MetaHopper.v2.py \
+    -1 sample_R1.fastq.gz \
+    -2 sample_R2.fastq.gz \
+    --trimmomatic-folder /path/to/Trimmomatic-0.39 \
+    -d /path/to/nr-tax.dmnd \
+    -o metahopper_sample \
+    --ranks domain,phylum,family,genus,species \
+    -t 24
+```
+
+### Existing contigs plus paired reads
+
+```bash
+./MetaHopper.v2.py \
+    -i assembly.fasta \
+    -1 sample_R1.fastq.gz \
+    -2 sample_R2.fastq.gz \
+    --trimmomatic-folder /path/to/Trimmomatic-0.39 \
+    -d /path/to/nr-tax.dmnd \
+    -o metahopper_refined \
+    --ranks domain,phylum,family,genus,species \
+    -t 24
+```
+
+### Existing contigs only
+
+```bash
+./MetaHopper.v2.py \
+    -i assembly.fasta \
+    -d /path/to/nr-tax.dmnd \
+    -o metahopper_contigs \
+    --ranks domain,phylum,family,genus,species \
+    -t 24
+```
+
+## Important behavior
+
+- Metazoa and Viridiplantae contigs are excluded from microbial bins by default and written to a separate FASTA.
+- DIAMOND protein hits are combined across all ORFs using a rank-specific, bitscore-weighted consensus.
+- Competitive seed mapping assigns each template to one uniquely best-scoring bin; equal-score ties are excluded.
+- BBDuk extension uses newly recruited reads to walk outward, with growth safeguards to prevent runaway recruitment.
+- Unicycler attempts graph resolution and circularization; Pilon polishes the resulting sequence.
+- Failed or skipped refinements fall back to the original preliminary-bin contigs.
+- Refined contigs receive a new Prodigal/DIAMOND classification before final bins are created.
+- `--skip-reassembly` disables read recruitment and the second classification pass.
+
+## Primary outputs
+
+```text
+<output>/
+├── classification/contig_classification.tsv
+├── bins/<rank>/<taxon>.fasta
+├── reassembly/<rank>/competitive_seed/competitive_mapping.tsv
+├── reassembly/<rank>/<bin>/reassembled.fasta
+├── final/assembly/consolidated_contigs.fasta
+├── final/assembly/contig_provenance.tsv
+├── final/classification/contig_classification.tsv
+└── final/bins/<rank>/summary.tsv
+```
+
+The `final/` directory is produced when seed-and-extension runs. In contigs-only mode, `bins/<rank>/` contains the assessed final bins.
+
+Run `./MetaHopper.v2.py --help` for all classification, recruitment, assembly, and filtering options.
