@@ -113,10 +113,18 @@ EXTERNAL TOOLS REQUIRED ON $PATH
     samtools                 (needs `samtools view -N`)
     bbduk.sh (BBMap)         https://sourceforge.net/projects/bbmap/
     unicycler                https://github.com/rrwick/Unicycler   (default assembler for
-                              the expanded per-bin read pools)
-    spades.py                https://github.com/ablab/spades       (required either way --
-                              Unicycler drives SPAdes internally; also used directly by
-                              --assembler spades and by the Unicycler fallback)
+                              the expanded per-bin read pools). Like CheckM it does NOT
+                              have to be on $PATH: bioconda's recipe pins python
+                              >=3.10,<3.11, which conflicts with CheckM/QUAST builds on
+                              an older interpreter, so `unicycler` is also looked for via
+                              conda/mamba/micromamba in the environments named by
+                              --unicycler-env (default: unicycler, then unicycler_env).
+                              Use --unicycler-cmd to name an invocation explicitly.
+    spades.py                https://github.com/ablab/spades       (Unicycler drives
+                              SPAdes internally, so it must exist in whichever
+                              environment Unicycler runs in. It is additionally required
+                              in *this* environment only for --assembler spades or the
+                              Unicycler fallback, which is on by default.)
     pilon                    https://github.com/broadinstitute/pilon  (skip --skip-polish)
     trimmomatic, flash       (same as above -- required even if --skip-qc was used for the
                               main assembly, since recruited reads always get QC'd)
@@ -1780,19 +1788,20 @@ def run_quast_multi(bin_fastas: dict, outdir: Path, threads: int, quast_cmd: str
 
 
 CHECKM_DEFAULT_ENVS = ["checkm", "checkm_env"]
+UNICYCLER_DEFAULT_ENVS = ["unicycler", "unicycler_env"]
 CONDA_LAUNCHERS = ["conda", "mamba", "micromamba"]
 
 
-def _probe_checkm(argv, timeout: int = 300) -> bool:
-    """Return True when ``argv`` can actually launch CheckM.
+def _probe_tool(argv, probe_args, timeout: int = 300) -> bool:
+    """Return True when ``argv`` can actually launch the tool.
 
-    ``checkm -h`` is cheap, needs no reference data, and exits 0, so it is a safe probe.
-    Anything else (missing env, missing package, broken activation) fails here instead of
-    part-way through a lineage workflow.
+    The probe is a help/version call: cheap, needs no reference data, and exits 0. A
+    missing environment, missing package, or broken activation fails here rather than
+    part-way through a long workflow.
     """
     try:
         proc = subprocess.run(
-            [*argv, "-h"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            [*argv, *probe_args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -1800,64 +1809,93 @@ def _probe_checkm(argv, timeout: int = 300) -> bool:
     return proc.returncode == 0
 
 
-def resolve_checkm_runner(checkm_cmd: str = None, env_names=None) -> list:
-    """Find a working CheckM invocation, including inside a separate conda environment.
+def resolve_env_command(tool: str, explicit_cmd: str = None, env_names=None,
+                        probe_args=("-h",), label: str = None,
+                        install_hint: str = "", quiet: bool = False) -> list:
+    """Find a working invocation of ``tool``, including inside a separate conda env.
 
-    CheckM is almost always installed in its own environment because it pins an old
-    Python together with pplacer and HMMER, so requiring it on the main $PATH is the
-    usual reason completeness/contamination silently comes back NA. Resolution order:
+    Bioinformatics tools routinely cannot share one environment: CheckM pins an old
+    Python alongside pplacer and HMMER, and bioconda's Unicycler pins python
+    >=3.10,<3.11. Requiring everything on a single $PATH is therefore the most common
+    reason a stage silently degrades or refuses to start. Resolution order:
 
-      1. an explicit ``--checkm-cmd`` (may itself be a full ``conda run ...`` string);
-      2. plain ``checkm`` on $PATH;
-      3. ``<launcher> run -n <env> checkm`` for each launcher in conda/mamba/micromamba
-         and each environment in ``--checkm-env`` (default: checkm, then checkm_env).
+      1. an explicit command string (which may itself be a full ``conda run ...`` line);
+      2. the bare executable on $PATH;
+      3. ``<launcher> run -n <env> <tool>`` for each launcher in
+         conda/mamba/micromamba and each environment in ``env_names``.
 
     Returns the argv prefix to use, or None if nothing works.
     """
-    env_names = list(env_names or CHECKM_DEFAULT_ENVS)
+    label = label or tool
+    env_names = list(env_names or [])
+    warn = log.info if quiet else log.warning
 
-    if checkm_cmd:
-        argv = shlex.split(checkm_cmd)
-        if shutil.which(argv[0]) is not None and _probe_checkm(argv):
-            log.info("Using CheckM via --checkm-cmd: %s", " ".join(argv))
+    if explicit_cmd:
+        argv = shlex.split(explicit_cmd)
+        if shutil.which(argv[0]) is not None and _probe_tool(argv, probe_args):
+            log.info("Using %s via explicit command: %s", label, " ".join(argv))
             return argv
-        log.warning(
-            "--checkm-cmd '%s' did not launch CheckM; falling back to autodetection.",
-            checkm_cmd,
-        )
+        warn("Explicit %s command '%s' did not launch; falling back to autodetection.",
+             label, explicit_cmd)
 
-    if shutil.which("checkm") is not None and _probe_checkm(["checkm"]):
-        log.info("Using CheckM found directly on $PATH.")
-        return ["checkm"]
+    if shutil.which(tool) is not None and _probe_tool([tool], probe_args):
+        log.info("Using %s found directly on $PATH.", label)
+        return [tool]
 
     launchers = [name for name in CONDA_LAUNCHERS if shutil.which(name) is not None]
     if not launchers:
-        log.warning(
-            "CheckM is not on $PATH and no conda/mamba/micromamba launcher was found, "
-            "so environments %s cannot be tried.", env_names,
-        )
+        warn("%s is not on $PATH and no conda/mamba/micromamba launcher was found, "
+             "so environments %s cannot be tried.", label, env_names)
         return None
 
     for env_name in env_names:
         for launcher in launchers:
-            # --no-capture-output keeps CheckM's own progress output flowing into our log
-            # file; without it conda buffers everything until the process exits.
+            # --no-capture-output keeps the tool's own progress output flowing into our
+            # log file; without it conda buffers everything until the process exits.
             argv = [launcher, "run", "-n", env_name]
             if launcher == "conda":
                 argv.append("--no-capture-output")
-            argv.append("checkm")
-            if _probe_checkm(argv):
-                log.info("Using CheckM from the '%s' environment via %s.", env_name, launcher)
+            argv.append(tool)
+            if _probe_tool(argv, probe_args):
+                log.info("Using %s from the '%s' environment via %s.",
+                         label, env_name, launcher)
                 return argv
-            log.debug("CheckM not usable via: %s", " ".join(argv))
+            log.debug("%s not usable via: %s", label, " ".join(argv))
 
-    log.warning(
-        "Could not launch CheckM. Tried $PATH and environments %s via %s. "
-        "Create one with e.g. `conda create -n checkm -c bioconda -c conda-forge "
-        "checkm-genome`, or point --checkm-cmd at a working invocation.",
-        env_names, "/".join(launchers),
-    )
+    warn("Could not launch %s. Tried $PATH and environments %s via %s. %s",
+         label, env_names, "/".join(launchers), install_hint)
     return None
+
+
+def resolve_checkm_runner(checkm_cmd: str = None, env_names=None) -> list:
+    """Locate CheckM, on $PATH or in its own conda environment."""
+    return resolve_env_command(
+        "checkm", checkm_cmd, env_names or CHECKM_DEFAULT_ENVS, probe_args=("-h",),
+        label="CheckM",
+        install_hint=(
+            "Create one with e.g. `conda create -n checkm -c bioconda -c conda-forge "
+            "checkm-genome`, or point --checkm-cmd at a working invocation."
+        ),
+    )
+
+
+def resolve_unicycler_runner(unicycler_cmd: str = None, env_names=None) -> list:
+    """Locate Unicycler, on $PATH or in its own conda environment.
+
+    bioconda's unicycler recipe pins python >=3.10,<3.11 and spades >=4.0.0, so it often
+    cannot be installed beside CheckM/QUAST builds that need an older interpreter. Giving
+    it a dedicated environment avoids upgrading the interpreter under everything else.
+    """
+    return resolve_env_command(
+        "unicycler", unicycler_cmd, env_names or UNICYCLER_DEFAULT_ENVS,
+        probe_args=("--version",), label="Unicycler",
+        install_hint=(
+            "bioconda's unicycler needs python >=3.10,<3.11, so it usually needs its own "
+            "environment: `conda create -n unicycler -c bioconda -c conda-forge "
+            "unicycler` (that also brings in the spades >=4 it drives). Alternatively "
+            "point --unicycler-cmd at a working invocation, or use --assembler spades."
+        ),
+    )
 
 
 def _checkm_bin_extension(bin_dir: Path) -> str:
@@ -2431,7 +2469,7 @@ def count_circular_contigs(assembly: Path) -> int:
 def run_unicycler_assembly(r1: Path, r2: Path, single: Path, workdir: Path, threads: int,
                             unicycler_mode: str, kmers: str = "auto",
                             min_fasta_length: int = 100,
-                            extra_args: str = None) -> tuple:
+                            extra_args: str = None, unicycler_argv=None) -> tuple:
     """Assemble one bin's recruited read pool with Unicycler.
 
     Unicycler is the primary assembler for focused per-bin reassembly. It drives SPAdes
@@ -2451,7 +2489,8 @@ def run_unicycler_assembly(r1: Path, r2: Path, single: Path, workdir: Path, thre
     workdir.mkdir(parents=True, exist_ok=True)
     unicycler_dir = workdir / "unicycler"
     cmd = [
-        "unicycler", "-o", str(unicycler_dir), "--threads", str(threads),
+        *(unicycler_argv or ["unicycler"]),
+        "-o", str(unicycler_dir), "--threads", str(threads),
         "--mode", unicycler_mode, "--min_fasta_length", str(min_fasta_length),
     ]
     if pairs:
@@ -2529,7 +2568,7 @@ def assemble_recruited_pool(r1: Path, r2: Path, single: Path, workdir: Path, thr
                              assembler: str, unicycler_mode: str, kmers: str,
                              unicycler_extra: str, spades_mode: str, spades_memory_gb: int,
                              spades_fallback: bool, polish: bool,
-                             bin_label: str) -> tuple:
+                             bin_label: str, unicycler_argv=None) -> tuple:
     """Assemble one bin's expanded read pool, then optionally polish it.
 
     Returns ``(assembly_path, provenance_label, circular_contig_count)``. The provenance
@@ -2543,7 +2582,7 @@ def assemble_recruited_pool(r1: Path, r2: Path, single: Path, workdir: Path, thr
     if assembler == "unicycler":
         assembly, circular_count = run_unicycler_assembly(
             r1, r2, single, workdir, threads, unicycler_mode, kmers=kmers,
-            extra_args=unicycler_extra,
+            extra_args=unicycler_extra, unicycler_argv=unicycler_argv,
         )
         source = "unicycler" if assembly else None
         if assembly is None and spades_fallback:
@@ -2593,7 +2632,7 @@ def reassemble_one_bin(bin_fasta: Path, bin_name: str, rank: str, r1_raw: Path, 
                         bbtools_memory: str, assembler: str, spades_mode: str,
                         spades_memory_gb: int, kmers: str, polish: bool,
                         unicycler_mode: str, unicycler_extra: str = None,
-                        spades_fallback: bool = True) -> Path:
+                        spades_fallback: bool = True, unicycler_argv=None) -> Path:
     """Runs one bin through seed-and-extend recruitment + reassembly. Returns the path to
     the reassembled contigs FASTA, or None if recruitment/reassembly didn't produce one.
 
@@ -2750,6 +2789,7 @@ def reassemble_one_bin(bin_fasta: Path, bin_name: str, rank: str, r1_raw: Path, 
         unicycler_extra=unicycler_extra, spades_mode=spades_mode,
         spades_memory_gb=spades_memory_gb, spades_fallback=spades_fallback,
         polish=polish, bin_label=f"{bin_name} ({rank})",
+        unicycler_argv=unicycler_argv,
     )
     if chosen_contigs is None:
         log.warning("Bin '%s' (%s): focused reassembly produced nothing; keeping the "
@@ -2779,7 +2819,7 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                         assembler: str, spades_mode: str, spades_memory_gb: int, kmers: str,
                         min_bin_contigs_to_reassemble: int, include_unclassified: bool,
                         polish: bool, unicycler_mode: str, unicycler_extra: str = None,
-                        spades_fallback: bool = True,
+                        spades_fallback: bool = True, unicycler_argv=None,
                         seed_excluded_ids: set = None) -> dict:
     """Drives reassemble_one_bin() over every bin FASTA at each rank in `ranks`, and writes
     a before/after comparison table (contig count, N50, total length) per rank.
@@ -2858,7 +2898,7 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                     min_word_hits, bait_min_entropy, max_round_growth,
                     max_accepted_fraction, min_new_templates, min_growth, bbtools_memory,
                     assembler, spades_mode, spades_memory_gb, kmers, polish,
-                    unicycler_mode, unicycler_extra, spades_fallback,
+                    unicycler_mode, unicycler_extra, spades_fallback, unicycler_argv,
                 )
             except RuntimeError as exc:
                 log.warning("Bin '%s' (%s): reassembly failed (%s); keeping original bin untouched.",
@@ -3214,6 +3254,14 @@ def parse_args(argv=None):
                           "--reassemble-mode) and skips bridging/circularisation.")
     rb.add_argument("--unicycler-mode", choices=["conservative", "normal", "bold"],
                      default="normal", help="Unicycler bridging mode (default normal).")
+    rb.add_argument("--unicycler-cmd", default=None,
+                     help="Explicit Unicycler invocation, e.g. 'unicycler' or "
+                          "'conda run -n unicycler unicycler'. Autodetected when omitted.")
+    rb.add_argument("--unicycler-env", default=",".join(UNICYCLER_DEFAULT_ENVS),
+                     help="Comma-separated conda/mamba/micromamba environment names to "
+                          "search for unicycler when it is not on $PATH (default: "
+                          f"{','.join(UNICYCLER_DEFAULT_ENVS)}). bioconda's unicycler "
+                          "pins python >=3.10,<3.11, so it commonly needs its own env.")
     rb.add_argument("--unicycler-extra", default=None,
                      help="Extra arguments passed verbatim to unicycler, e.g. "
                           "\"--min_component_size 500\".")
@@ -3412,14 +3460,29 @@ def main(argv=None):
         which_or_die("bowtie2")
         which_or_die("bowtie2-build")
         which_or_die("samtools")
+    unicycler_argv = None
     if args.reassemble_bins:
         which_or_die("trimmomatic")
         which_or_die("flash")
         which_or_die("bbduk.sh")
-        # Unicycler drives spades.py internally, so SPAdes is required either way.
-        which_or_die("spades.py")
+        # spades.py is only needed in *this* environment when we call it ourselves. When
+        # Unicycler runs from its own environment it uses the SPAdes installed there.
+        if args.assembler == "spades" or args.spades_fallback:
+            which_or_die("spades.py")
         if args.assembler == "unicycler":
-            which_or_die("unicycler")
+            unicycler_env_names = [
+                e.strip() for e in str(args.unicycler_env).split(",") if e.strip()
+            ]
+            unicycler_argv = resolve_unicycler_runner(
+                args.unicycler_cmd, unicycler_env_names,
+            )
+            if unicycler_argv is None:
+                log.error(
+                    "Unicycler is the default per-bin assembler but could not be "
+                    "launched. Install it (see the hint above), pass --unicycler-cmd, "
+                    "or switch to --assembler spades."
+                )
+                sys.exit(1)
         if args.polish:
             which_or_die("pilon")
 
@@ -3610,6 +3673,7 @@ def main(argv=None):
             args.reassemble_memory_gb, args.reassemble_kmers,
             args.reassemble_min_bin_contigs, args.reassemble_include_unclassified,
             args.polish, args.unicycler_mode, args.unicycler_extra, args.spades_fallback,
+            unicycler_argv,
             seed_excluded_ids=None,
         )
 
