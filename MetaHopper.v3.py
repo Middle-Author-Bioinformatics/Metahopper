@@ -138,33 +138,159 @@ EXAMPLES
       -o metatax_out \\
       -t 16
 
-OUTPUT LAYOUT
+DEFAULT BEHAVIOUR (no optional flags)
 -------------------------------------------------------
-  <outdir>/
-    qc/proteins... (Trimmomatic + FLASH intermediates; only with --r1/--r2 and no --skip-qc)
-    megahit/final.contigs.fa, megahit.log            (only with --r1/--r2)
-    prodigal/proteins.faa, genes.gff
-    diamond/hits.tsv
-    classification/contig_classification.tsv
-    classification/excluded_eukaryotic_like_gene_density.fasta  (when triage quarantines any)
-    classification/excluded_animal_plant_contamination.fasta  (only if --exclude-kingdoms
-                                                                 dropped anything)
-    bins/genus/<taxon>.fasta ... bin_membership.tsv        (preliminary seed bins)
-    reassembly/<rank>/<bin>/reassembled.fasta, recruitment.tsv, assembly_stage.tsv
-    final/assembly/consolidated_contigs.fasta, contig_provenance.tsv
-    final/prodigal/proteins.faa, genes.gff
-    final/diamond/hits.tsv
-    final/classification/contig_classification.tsv
-    final/classification/bin_refinement.tsv, refinement_outliers.fasta   (step 9)
-    final/classification/coverage/reads_to_contigs.sorted.bam            (step 9)
-    final/binarena/binarena_input.tsv                                    (step 9; load
-                                                                          this in BinaRena)
-    final/binarena/kmer_{4,5,6}.{pca,tsne,umap}.tsv        (per-k intermediates)
-    final/bins/<rank>/<taxon>.fasta, bin_membership.tsv, summary.tsv
+  With -1/-2 (reads present), everything below is ON by default:
+    poly-G trimming            OFF   (opt in with --trim-polyg)
+    Trimmomatic + FLASH QC     ON    (reads-only mode; --skip-qc to bypass)
+    MEGAHIT co-assembly        ON    (reads-only mode)
+    Prodigal, -p meta          ON
+    gene-density triage        ON    (--skip-contig-triage)
+    DIAMOND blastp, e 1e-5     ON    (-k 25, --bitscore-range 0.9, --min-support 0.5)
+    Metazoa/Viridiplantae drop ON    (--exclude-kingdoms)
+    binning ranks              genus,species   (--ranks; class/order are not supported)
+    seed-and-extension         ON    (--skip-reassembly to stop after preliminary bins)
+    frontier extension rounds  5     (--reassemble-max-rounds 0 disables extension only)
+    per-bin assembler          Unicycler  (--assembler spades for metaSPAdes instead)
+    Pilon polishing            ON    (--skip-polish)
+    SPAdes fallback            ON    (--no-spades-fallback)
+    step-9 GC/coverage refine  ON    (--skip-bin-refinement; needs reads either way)
+    step-9 BinaRena staging    ON    (--skip-binarena), k = 4,5,6, PCA + t-SNE + UMAP
+    QUAST                      ON    (--skip-quast falls back to built-in N50/L50/GC)
+    CheckM                     ON    (--skip-checkm; autodetected on $PATH, else via
+                                      conda/mamba/micromamba envs checkm, checkm_env)
 
-  With --skip-reassembly (or contigs alone) step 9 has no consolidated assembly to work
-  on, so it runs on the preliminary assembly and writes to classification/ and binarena/
-  directly instead of under final/.
+  With -i alone (contigs, no reads) seed-and-extension and GC/coverage refinement are
+  implicitly off -- there are no reads to recruit or to derive depth from -- so the run
+  stops after classification, binning, BinaRena composition columns, and QUAST/CheckM.
+
+OUTPUT LAYOUT (exact)
+-------------------------------------------------------
+Shown for a full default run: reads + contigs, seed-and-extension enabled.
+Entries marked [cond] are only created when that condition holds.
+
+  <outdir>/
+    polyg/                                         [--trim-polyg]
+      polyg_trimmed_1.fastq, polyg_trimmed_2.fastq
+      fastp_polyg.html, fastp_polyg.json, fastp_polyg.log
+    qc/                                            [reads-only mode, no --skip-qc]
+      notcombined.final_1P.gz                      <- QC'd R1 handed to MEGAHIT
+      notcombined.final_2P.gz                      <- QC'd R2
+      unpaired.fq.gz                               <- FLASH-merged + orphaned singletons
+      qc.log
+    megahit/                                       [reads-only mode]
+      final.contigs.fa                             <- preliminary assembly
+      megahit.log
+    prodigal/
+      proteins.faa, genes.gff, prodigal.log
+      proteins.prokaryotic_candidates.faa          [triage quarantined >=1 contig]
+    diamond/
+      hits.tsv, diamond.log
+    classification/
+      contig_classification.tsv
+      excluded_eukaryotic_like_gene_density.fasta   [triage quarantined >=1 contig]
+      excluded_animal_plant_contamination.fasta     [kingdom filter dropped >=1 contig]
+    bins/                                          <- PRELIMINARY seed bins
+      <rank>/                                      one directory per --ranks entry
+        <Taxon>.fasta                              one per taxon called at that rank
+        Unclassified.fasta                         [unless --exclude-unclassified-bins]
+        bin_membership.tsv
+        reassembly_summary.tsv                     [>=1 bin at this rank was reassembled]
+                                                   before/after contigs, N50, length
+    reassembly/
+      <rank>/
+        competitive_seed/
+          all_bins.fasta                           every seed bin in ONE reference
+          all_bins_index.*.bt2
+          reads_to_all_bins.bam
+          competitive_mapping.tsv                  per-bin template assignments, ties
+          bowtie2-build.log, bowtie2.log
+        <bin>/
+          seed/
+            accepted_raw_R1.fastq.gz, accepted_raw_R2.fastq.gz
+            accepted_raw_single.fastq.gz
+            extract.fastq.log
+          qc/seed/                                 QC of the competitively mapped pool
+          recruitment/
+            round_00_frontier_baits.fasta, round_00_bait_filter.log
+            round_01/ ... round_NN/                one per accepted extension round
+              bbduk.log
+              new_raw_R1.fastq.gz, new_raw_R2.fastq.gz, new_raw_single.fastq.gz
+              extract.fastq.log
+              qc/                                  QC of that round's new reads
+              frontier_baits.fasta, bait_filter.log
+          accepted_R1.fastq.gz, accepted_R2.fastq.gz, accepted_single.fastq.gz
+                                                   <- the full expanded read pool
+          unicycler/assembly.fasta, unicycler.log
+          pilon/                                   [unless --skip-polish]
+            pilon_polished.fasta
+            assembly_index.*.bt2, reads_to_assembly.sorted.bam
+            bowtie2-build.log, bowtie2.log
+          pilon.log                                [unless --skip-polish]
+          spades/contigs.fasta, spades.log         [--assembler spades, or fallback fired]
+          assembly_stage.tsv                       which assembler won, circular contigs
+          recruitment.tsv                          per-round growth and stop reason
+          reassembled.fasta                        <- selected result for this bin
+    final/
+      assembly/
+        consolidated_contigs.fasta                 <- reassembled bins + unchanged rest.
+                                                   Contigs are renamed
+                                                   MH_reassembled_<bin>_<7 digits> or
+                                                   MH_original_<bin>_<7 digits>, so all
+                                                   final/ tables key on the NEW names.
+        contig_provenance.tsv                      new name -> source rank, bin,
+                                                   original/reassembled, source FASTA,
+                                                   original record name
+      prodigal/
+        proteins.faa, genes.gff, prodigal.log
+        proteins.prokaryotic_candidates.faa        [final triage quarantined >=1 contig]
+      diamond/
+        hits.tsv, diamond.log
+      classification/
+        contig_classification.tsv                  taxonomy + GC + depth + triage +
+                                                   refinement, per contig
+        bin_refinement.tsv                         STEP 9: GC/log2-depth centers, deltas,
+                                                   thresholds, per-contig verdict
+        refinement_outliers.fasta                  [step 9 demoted >=1 contig]
+        excluded_eukaryotic_like_gene_density.fasta [final triage quarantined >=1]
+        excluded_animal_plant_contamination.fasta   [final kingdom filter dropped >=1]
+        coverage/                                  STEP 9 remapping of the COMPLETE
+                                                   read set to the consolidated assembly
+          contigs_index.*.bt2
+          reads_to_contigs.sorted.bam
+          bowtie2-build.log, bowtie2.log
+      binarena/                                    STEP 9 [unless --skip-binarena]
+        binarena_input.tsv                         <-- LOAD THIS FILE IN BinaRena
+        kmer_4.pca.tsv, kmer_4.tsne.tsv, kmer_4.umap.tsv
+        kmer_5.pca.tsv, kmer_5.tsne.tsv, kmer_5.umap.tsv
+        kmer_6.pca.tsv, kmer_6.tsne.tsv, kmer_6.umap.tsv
+      bins/                                        <- FINAL bins; assess these
+        <rank>/
+          <Taxon>.fasta, Unclassified.fasta
+          bin_membership.tsv
+          quast_out/                               [unless --skip-quast]
+            transposed_report.tsv, quast.log
+          checkm_out/                              [unless --skip-checkm]
+            checkm_results.tsv, checkm.log
+            lineage/                               CheckM's own working tree
+          summary.tsv                              <-- per bin: contigs, length, N50, L50,
+                                                   GC, completeness, contamination, strain
+                                                   heterogeneity, marker lineage, markers
+
+  binarena_input.tsv columns, in order:
+    ID  length  GC  coverage  covered_fraction  coding_density  n_cds
+    taxon_<rank> (one per --ranks entry)
+    bin  taxon_support  triage  refinement_status
+    gc_outlier  coverage_outlier  joint_outlier  retained
+    4PC1 4PC2 4tsne1 4tsne2 4UM1 4UM2   5PC1 ... 5UM2   6PC1 ... 6UM2
+
+  With --skip-reassembly, or with contigs and no reads, there is no consolidated
+  assembly, so step 9 and quality assessment run on the preliminary assembly and write
+  to the top level instead of under final/:
+    classification/bin_refinement.tsv, refinement_outliers.fasta, coverage/
+    binarena/binarena_input.tsv, kmer_*.tsv
+    bins/<rank>/quast_out/, checkm_out/, summary.tsv
+  In that case final/ and reassembly/ are never created.
 """
 
 import argparse
@@ -3316,8 +3442,12 @@ def main(argv=None):
     )
     refinement_steps = 1 if refinement_enabled else 0
     binarena_steps = 0 if args.skip_binarena else 1
+    # Fixed steps: 4 preliminary (Prodigal, DIAMOND, classify, bin) plus, when
+    # seed-and-extension runs, 7 more (reassembly, consolidation, final Prodigal, final
+    # DIAMOND, final classification, final bins, quality assessment); otherwise 1 more
+    # (quality assessment). Refinement and BinaRena staging add one step each.
     steps = StepCounter(
-        n_qc_steps + (10 if args.reassemble_bins else 5) + refinement_steps + binarena_steps
+        n_qc_steps + (11 if args.reassemble_bins else 5) + refinement_steps + binarena_steps
     )
 
     # 0a/0b/0c. Poly-G may prepare reads in either read mode; QC+MEGAHIT are reads-only.
