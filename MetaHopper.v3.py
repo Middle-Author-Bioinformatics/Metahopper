@@ -204,7 +204,9 @@ Entries marked [cond] are only created when that condition holds.
         Unclassified.fasta                         [unless --exclude-unclassified-bins]
         bin_membership.tsv
         reassembly_summary.tsv                     [>=1 bin at this rank was reassembled]
-                                                   before/after contigs, N50, length
+                                                   before/after contigs, N50, length,
+                                                   recovered_fraction, and outcome
+                                                   (accepted / rejected_length_loss)
     reassembly/
       <rank>/
         competitive_seed/
@@ -241,7 +243,10 @@ Entries marked [cond] are only created when that condition holds.
           reassembled.fasta                        <- selected result for this bin
     final/
       assembly/
-        consolidated_contigs.fasta                 <- reassembled bins + unchanged rest.
+        consolidated_contigs.fasta                 <- accepted reassemblies REPLACE their
+                                                   bin's original contigs; skipped,
+                                                   failed, and length-loss-rejected bins
+                                                   contribute their originals instead.
                                                    Contigs are renamed
                                                    MH_reassembled_<bin>_<7 digits> or
                                                    MH_original_<bin>_<7 digits>, so all
@@ -894,7 +899,22 @@ def parse_diamond_hits(hits_tsv: Path) -> dict:
 
 def classify_contig(orf_ids, hits_by_orf: dict, ranks,
                      bitscore_range: float = 0.9, max_hits_per_orf: int = 5,
-                     min_support: float = 0.5) -> dict:
+                     min_support: float = 0.5,
+                     support_denominator: str = "all") -> dict:
+    """Bitscore-weighted vote per rank, tallied independently at each rank.
+
+    ``support_denominator`` controls what the winning taxon's weight is divided by:
+
+      "all"   -- every kept hit's bitscore, whether or not that hit carries a name at
+                 this rank. This is the historical behaviour. It systematically deflates
+                 support at fine ranks, because a large share of NR entries have a genus
+                 but no species-rank name ("Wolbachia sp.", environmental entries, etc.),
+                 and those hits enlarge the denominator while contributing to no species.
+      "named" -- only hits that actually carry a name at this rank. Support then answers
+                 "among the hits that could vote at this rank, how dominant is the
+                 winner?", which is usually what you want when comparing ranks. It makes
+                 species-level calls considerably more permissive, so it is opt-in.
+    """
     rank_weights = {r: defaultdict(float) for r in ranks}
     total_weight = {r: 0.0 for r in ranks}
     n_orfs_with_hits = 0
@@ -912,8 +932,9 @@ def classify_contig(orf_ids, hits_by_orf: dict, ranks,
             n_orfs_with_hits += 1
         for h in kept:
             for r in ranks:
-                total_weight[r] += h.bitscore
                 names = h.lineage.get(r, ())
+                if names or support_denominator == "all":
+                    total_weight[r] += h.bitscore
                 if names:
                     per_name_weight = h.bitscore / len(names)
                     for name in names:
@@ -935,7 +956,8 @@ def classify_contig(orf_ids, hits_by_orf: dict, ranks,
 
 
 def classify_all_contigs(contig_ids, orf_to_contig, hits_by_orf, ranks,
-                          bitscore_range, max_hits_per_orf, min_support) -> dict:
+                          bitscore_range, max_hits_per_orf, min_support,
+                          support_denominator="all") -> dict:
     contig_to_orfs = defaultdict(list)
     for orf_id, contig_id in orf_to_contig.items():
         contig_to_orfs[contig_id].append(orf_id)
@@ -944,7 +966,8 @@ def classify_all_contigs(contig_ids, orf_to_contig, hits_by_orf, ranks,
     for i, contig_id in enumerate(contig_ids, 1):
         orfs = contig_to_orfs.get(contig_id, [])
         classifications[contig_id] = classify_contig(
-            orfs, hits_by_orf, ranks, bitscore_range, max_hits_per_orf, min_support
+            orfs, hits_by_orf, ranks, bitscore_range, max_hits_per_orf, min_support,
+            support_denominator,
         )
         if i % 500 == 0:
             log.info("Classified %d/%d contigs...", i, len(contig_ids))
@@ -2820,6 +2843,7 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                         min_bin_contigs_to_reassemble: int, include_unclassified: bool,
                         polish: bool, unicycler_mode: str, unicycler_extra: str = None,
                         spades_fallback: bool = True, unicycler_argv=None,
+                        min_recovered_fraction: float = 0.5,
                         seed_excluded_ids: set = None) -> dict:
     """Drives reassemble_one_bin() over every bin FASTA at each rank in `ranks`, and writes
     a before/after comparison table (contig count, N50, total length) per rank.
@@ -2906,8 +2930,42 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                 reassembled = None
             if reassembled is None:
                 continue
-            successful[r][bin_name] = reassembled
             after = basic_assembly_stats(reassembled)
+
+            # A focused reassembly is only an improvement if it still represents the
+            # genome. Unicycler deliberately prunes low-depth contigs (--depth_filter
+            # 0.25), small graph components and short dead ends (both 1 kb), which is
+            # right for an isolate but can delete most of an unevenly covered symbiont
+            # bin. Because consolidation REPLACES a bin's original contigs with its
+            # reassembly, an over-pruned result would silently shrink the final genome,
+            # so reject it here and let the original contigs stand.
+            recovered = (
+                after["total_length_bp"] / before["total_length_bp"]
+                if before["total_length_bp"] else 0.0
+            )
+            accepted = recovered >= min_recovered_fraction
+            if accepted:
+                successful[r][bin_name] = reassembled
+                log.info(
+                    "Bin '%s' (%s): %d -> %d contigs, N50 %d -> %d bp, length %d -> %d bp "
+                    "(%.1f%% recovered).",
+                    bin_name, r, before["num_contigs"], after["num_contigs"],
+                    before["N50"], after["N50"], before["total_length_bp"],
+                    after["total_length_bp"], 100.0 * recovered,
+                )
+            else:
+                log.warning(
+                    "Bin '%s' (%s): reassembly recovered only %.1f%% of the original "
+                    "%d bp (%d bp in %d contigs), below "
+                    "--reassemble-min-recovered-fraction %.2f. KEEPING THE ORIGINAL "
+                    "CONTIGS for the final assembly. The reassembly is still at %s for "
+                    "inspection; loosen Unicycler's pruning with e.g. --unicycler-extra "
+                    "\"--depth_filter 0.1 --min_component_size 200 "
+                    "--min_dead_end_size 200\", or lower this threshold to accept it.",
+                    bin_name, r, 100.0 * recovered, before["total_length_bp"],
+                    after["total_length_bp"], after["num_contigs"],
+                    min_recovered_fraction, reassembled,
+                )
             summary_rows.append({
                 "bin": bin_name, "rank": r,
                 "contigs_before": before["num_contigs"], "contigs_after": after["num_contigs"],
@@ -2916,17 +2974,17 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                 "N50_before": before["N50"], "N50_after": after["N50"],
                 "largest_contig_before_bp": before["largest_contig_bp"],
                 "largest_contig_after_bp": after["largest_contig_bp"],
+                "recovered_fraction": f"{recovered:.4f}",
+                "outcome": "accepted" if accepted else "rejected_length_loss",
             })
-            log.info("Bin '%s' (%s): %d -> %d contigs, N50 %d -> %d bp.",
-                      bin_name, r, before["num_contigs"], after["num_contigs"],
-                      before["N50"], after["N50"])
 
         if not summary_rows:
             continue
         summary_path = outdir / "bins" / r / "reassembly_summary.tsv"
         fields = ["bin", "rank", "contigs_before", "contigs_after",
                   "total_length_before_bp", "total_length_after_bp",
-                  "N50_before", "N50_after", "largest_contig_before_bp", "largest_contig_after_bp"]
+                  "N50_before", "N50_after", "largest_contig_before_bp",
+                  "largest_contig_after_bp", "recovered_fraction", "outcome"]
         with open(summary_path, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t")
             w.writeheader()
@@ -3120,6 +3178,14 @@ def parse_args(argv=None):
     p.add_argument("--bitscore-range", type=float, default=0.9,
                     help="Keep hits within this fraction of an ORF's best bitscore (default 0.9)")
     p.add_argument("--max-hits-per-orf", type=int, default=5)
+    p.add_argument("--support-denominator", choices=["all", "named"], default="all",
+                    help="What --min-support is measured against at each rank. 'all' "
+                         "(default, historical) divides the winning taxon's bitscore by "
+                         "that of every kept hit, including hits with no name at that "
+                         "rank -- which deflates species-level support because many NR "
+                         "entries have a genus but no species. 'named' divides by only "
+                         "the hits that can vote at that rank, giving many more "
+                         "species-level calls.")
     p.add_argument("--min-support", type=float, default=0.5,
                     help="Minimum bitscore-weighted vote share required to assign a taxon at a "
                          "rank (0.5 = majority). Use 0 for a pure plurality/'most votes wins' call.")
@@ -3278,6 +3344,13 @@ def parse_args(argv=None):
                           "residual strain heterogeneity/uneven coverage) or 'standard'.")
     rb.add_argument("--reassemble-memory-gb", type=int, default=32,
                      help="SPAdes memory limit in GB for each bin's reassembly (default 32).")
+    rb.add_argument("--reassemble-min-recovered-fraction", type=float, default=0.5,
+                     help="Reject a bin's reassembly, and keep its original contigs in "
+                          "the consolidated assembly, when the reassembly retains less "
+                          "than this fraction of the bin's original total length "
+                          "(default 0.5). Guards against Unicycler's low-depth/dead-end "
+                          "pruning silently shrinking an unevenly covered genome. Pass 0 "
+                          "to always accept the reassembly.")
     rb.add_argument("--reassemble-kmers", default="auto",
                      help="k-mer list or 'auto' (default auto). Passed to unicycler "
                           "--kmers or spades.py -k depending on --assembler.")
@@ -3602,6 +3675,7 @@ def main(argv=None):
     classifications = classify_all_contigs(
         list(contig_seqs.keys()), orf_to_contig, hits_by_orf, internal_ranks,
         args.bitscore_range, args.max_hits_per_orf, args.min_support,
+        args.support_denominator,
     )
 
     exclude_kingdoms = [k.strip() for k in args.exclude_kingdoms.split(",") if k.strip()]
@@ -3673,7 +3747,7 @@ def main(argv=None):
             args.reassemble_memory_gb, args.reassemble_kmers,
             args.reassemble_min_bin_contigs, args.reassemble_include_unclassified,
             args.polish, args.unicycler_mode, args.unicycler_extra, args.spades_fallback,
-            unicycler_argv,
+            unicycler_argv, args.reassemble_min_recovered_fraction,
             seed_excluded_ids=None,
         )
 
@@ -3734,7 +3808,7 @@ def main(argv=None):
         final_classifications = classify_all_contigs(
             list(final_contig_seqs.keys()), final_orf_to_contig, final_hits_by_orf,
             internal_ranks, args.bitscore_range, args.max_hits_per_orf,
-            args.min_support,
+            args.min_support, args.support_denominator,
         )
         final_triage_retained = {
             contig_id: result for contig_id, result in final_classifications.items()
