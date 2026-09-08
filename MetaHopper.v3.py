@@ -563,6 +563,28 @@ def trim_poly_g(r1: Path, r2: Path, outdir: Path, threads: int,
 # Step 0b: QC (Trimmomatic + FLASH) -- optional, only for raw-reads (--r1/--r2) input
 # --------------------------------------------------------------------------------------
 
+def trimmomatic_se_if_reads(trimmomatic_cmd: str, threads: int, fq_in: Path,
+                            fq_out: Path, qc_quality: int, qc_minlen: int,
+                            log_file: Path, what: str) -> Path:
+    """Quality-trim a single-end FASTQ, tolerating an empty input.
+
+    Trimmomatic SE exits 1 with "Error: Unable to detect quality encoding" when handed a
+    zero-read FASTQ, because it samples the file to guess phred33 vs phred64 and finds
+    nothing to sample. That is a routine outcome, not a failure: a library with heavy
+    adapter read-through can leave "Reverse Only Surviving: 0", so Trimmomatic PE writes
+    an empty <base>_2U, and FLASH can likewise merge nothing. Writing an empty output and
+    moving on keeps a normal library from aborting the whole sample.
+    """
+    if count_fastq_reads(fq_in) == 0:
+        log.info("No %s to quality-trim (%s is empty); skipping this Trimmomatic pass.",
+                 what, fq_in.name)
+        fq_out.write_bytes(b"")
+        return fq_out
+    run_cmd([trimmomatic_cmd, "SE", "-threads", str(threads), str(fq_in), str(fq_out),
+             f"SLIDINGWINDOW:4:{qc_quality}", f"MINLEN:{qc_minlen}"], log_file=log_file)
+    return fq_out
+
+
 def run_qc(r1: Path, r2: Path, outdir: Path, threads: int,
            trimmomatic_cmd: str, trimmomatic_folder: Path,
            flash_cmd: str, flash_max_overlap: int, pigz_cmd: str,
@@ -592,9 +614,10 @@ def run_qc(r1: Path, r2: Path, outdir: Path, threads: int,
 
     # 2. Quality-trim the reads that lost their mate during adapter clipping
     u1_qt, u2_qt = Path(f"{u1}.qual_trimmed"), Path(f"{u2}.qual_trimmed")
-    for u_in, u_out in ((u1, u1_qt), (u2, u2_qt)):
-        run_cmd([trimmomatic_cmd, "SE", "-threads", str(threads), str(u_in), str(u_out),
-                 f"SLIDINGWINDOW:4:{qc_quality}", f"MINLEN:{qc_minlen}"], log_file=log_file)
+    for u_in, u_out, what in ((u1, u1_qt, "forward-only orphans"),
+                              (u2, u2_qt, "reverse-only orphans")):
+        trimmomatic_se_if_reads(trimmomatic_cmd, threads, u_in, u_out,
+                                qc_quality, qc_minlen, log_file, what)
 
     # 3. Merge overlapping pairs
     run_cmd([
@@ -608,16 +631,22 @@ def run_qc(r1: Path, r2: Path, outdir: Path, threads: int,
 
     # 4. Quality-trim the merged fragments
     merged_final = outdir / "merged.final.fastq"
-    run_cmd([trimmomatic_cmd, "SE", "-threads", str(threads), str(merged), str(merged_final),
-             f"SLIDINGWINDOW:4:{qc_quality}", f"MINLEN:{qc_minlen}"], log_file=log_file)
+    trimmomatic_se_if_reads(trimmomatic_cmd, threads, merged, merged_final,
+                            qc_quality, qc_minlen, log_file, "FLASH-merged fragments")
 
     # 5. Quality-trim the pairs FLASH couldn't merge
     nc_base = outdir / "notcombined.final"
-    run_cmd([trimmomatic_cmd, "PE", "-threads", str(threads), str(nc1), str(nc2),
-             "-baseout", str(nc_base), f"SLIDINGWINDOW:4:{qc_quality}", f"MINLEN:{qc_minlen}"],
-            log_file=log_file)
     nc_p1, nc_u1 = Path(f"{nc_base}_1P"), Path(f"{nc_base}_1U")
     nc_p2, nc_u2 = Path(f"{nc_base}_2P"), Path(f"{nc_base}_2U")
+    if count_fastq_reads(nc1) == 0 or count_fastq_reads(nc2) == 0:
+        # FLASH merged every pair, so there is nothing left to quality-trim as pairs.
+        log.info("FLASH left no unmerged pairs; skipping the paired quality-trim pass.")
+        for path in (nc_p1, nc_u1, nc_p2, nc_u2):
+            path.write_bytes(b"")
+    else:
+        run_cmd([trimmomatic_cmd, "PE", "-threads", str(threads), str(nc1), str(nc2),
+                 "-baseout", str(nc_base), f"SLIDINGWINDOW:4:{qc_quality}",
+                 f"MINLEN:{qc_minlen}"], log_file=log_file)
 
     # 6. Pool every orphan/singleton/merged read into one unpaired file
     unpaired = outdir / "unpaired.fq"
@@ -1249,6 +1278,26 @@ def bin_contigs(contig_seqs: dict, classifications: dict, ranks, outdir: Path,
             if taxon == "Unclassified" and not include_unclassified:
                 continue
             bins[sanitize(taxon)].append(contig_id)
+        # Remove bin FASTAs left over from a previous run with different parameters.
+        # Without this, a re-run whose taxon set changed (a different --min-support,
+        # --max-hits-per-orf, --ranks, or a reused DIAMOND table) leaves orphaned
+        # <Taxon>.fasta files sitting beside the current ones. Their contigs are also
+        # written into the new bins, so the directory listing double-counts sequence and
+        # no longer matches bin_membership.tsv. Only *.fasta bin files are considered:
+        # tables and tool subdirectories (quast_out/, checkm_out/) are left alone.
+        current = {f"{bin_name}.fasta" for bin_name in bins}
+        stale = sorted(
+            p for p in rank_dir.glob("*.fasta")
+            if p.is_file() and p.name not in current
+        )
+        if stale:
+            log.warning(
+                "Rank '%s': removing %d stale bin FASTA(s) from a previous run: %s",
+                r, len(stale), ", ".join(p.name for p in stale),
+            )
+            for p in stale:
+                p.unlink(missing_ok=True)
+
         for bin_name, contig_ids in bins.items():
             records = {cid: contig_seqs[cid] for cid in contig_ids if cid in contig_seqs}
             write_fasta(rank_dir / f"{bin_name}.fasta", records)
