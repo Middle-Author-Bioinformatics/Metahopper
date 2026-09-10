@@ -19,12 +19,36 @@ Files read (all optional)
     bins/<rank>/reassembly_summary.tsv
     final/assembly/contig_provenance.tsv
 
-The BinaRena tab is an interactive canvas scatter: choose any two numeric columns as
-axes (GC, coverage, and every k-mer PCA/t-SNE/UMAP axis), colour by any categorical
-column, lasso-select contigs, and assign the selection to a named sub-bin. Sub-bin
-assignments download as a TSV, which this same script turns back into FASTA files:
+The BinaRena tab is an interactive canvas scatter. Choose any two numeric columns as
+axes (GC, coverage, and every k-mer PCA/t-SNE/UMAP axis) and colour by any categorical
+column, then lasso contigs and assign the selection to a named sub-bin.
+
+    Axis scaling   Each axis has an independent scale: cube root, square root, linear,
+                   square, cube, or log10. Powers are applied as sign(v)*|v|^p so that
+                   ordination axes, which straddle zero, transform symmetrically rather
+                   than folding. log10 keeps only positive values and reports how many
+                   points it hid. Tick labels always read in the column's original
+                   units; only the positions are transformed.
+
+    Search         Substring match over the contig name and every categorical column.
+                   Comma-separated terms are OR'd ("Wolbachia, Symbiopectobacterium")
+                   and a leading '-' excludes ("-Unclassified"). It filters rather than
+                   highlights, so a lasso only ever picks up what is currently visible.
+
+Sub-bins can be exported two ways. "Download manual_bins.tsv" writes the assignment
+table, which this same script turns back into FASTA on the server:
 
     metahopper_report.py -i metahop_out --apply-split manual_bins.tsv
+
+Or select the run's contig FASTA in the report and "Write FASTA per sub-bin" produces
+the sequences directly in the browser -- one .fasta for a single sub-bin, a .zip for
+several. The file is read locally with the File API in 8 MB chunks and never uploaded,
+so a multi-GB assembly streams without being held in memory. Sequences are deliberately
+not embedded in the HTML, which is what keeps the report small. Record names are matched
+on the first whitespace-delimited token, so MEGAHIT- and Unicycler-decorated headers work
+unchanged; note that a final/ run renames contigs, so it needs
+final/assembly/consolidated_contigs.fasta. Gzipped FASTA cannot be read in the browser --
+use --apply-split for that.
 
 Only the Python standard library is used, and the HTML has no external dependencies, so
 the report works offline and on an air-gapped cluster.
@@ -358,7 +382,23 @@ def build_scatter(layout: RunLayout, min_length: int, max_points: int,
         "trimmed": trimmed,
         "minLength": min_length,
         "source": str(layout.binarena),
+        "fastaHint": fasta_hint(layout),
     }
+
+
+def fasta_hint(layout: RunLayout) -> str:
+    """The contig FASTA whose record names match the BinaRena table's IDs.
+
+    A final/ run renames every contig to MH_<origin>_<bin>_<n>, so only the consolidated
+    assembly matches; a preliminary run's IDs are the assembler's own names.
+    """
+    default = layout.default_contigs()
+    if default:
+        return str(default)
+    partition = layout.bin_fasta_partition()
+    if partition:
+        return f"the bin FASTAs under {layout.bins_dir} (select them all)"
+    return ""
 
 
 # ------------------------------------------------------------------ split application
@@ -591,6 +631,42 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       if (n === cur) o.selected = true; sel.appendChild(o);
     });
   }
+  // BinaRena-style axis scaling: signed powers from a cube root up to a cube, plus log.
+  // Powers are applied as sign(v)*|v|^p so that ordination axes, which are centred on
+  // zero and half negative, transform symmetrically instead of collapsing.
+  var SCALES = [['cbrt', 'cube root', 1 / 3, 'cube root'],
+                ['sqrt', 'square root', 0.5, 'sqrt'],
+                ['lin', 'linear', 1, ''],
+                ['sq', 'square', 2, 'squared'],
+                ['cube', 'cube', 3, 'cubed'],
+                ['log', 'log10 (positive only)', 0, 'log10']];
+  function scaleOf(id){
+    var v = el(id).value;
+    for (var k = 0; k < SCALES.length; k++) if (SCALES[k][0] === v) return SCALES[k];
+    return SCALES[2];
+  }
+  function tf(v, sc){
+    if (v === null) return null;
+    if (sc[0] === 'log') return v > 0 ? Math.log(v) / Math.LN10 : null;
+    if (sc[2] === 1) return v;
+    return (v < 0 ? -1 : 1) * Math.pow(Math.abs(v), sc[2]);
+  }
+  function inv(t, sc){
+    if (sc[0] === 'log') return Math.pow(10, t);
+    if (sc[2] === 1) return t;
+    return (t < 0 ? -1 : 1) * Math.pow(Math.abs(t), 1 / sc[2]);
+  }
+  function scaleOpts(sel){
+    sel.innerHTML = '';
+    SCALES.forEach(function(sc){
+      var o = document.createElement('option');
+      o.value = sc[0]; o.textContent = sc[1];
+      if (sc[0] === 'lin') o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+  scaleOpts(el('xs')); scaleOpts(el('ys'));
+
   opts(el('x'), S.numericNames, S.defaultX);
   opts(el('y'), S.numericNames, S.defaultY);
   opts(el('c'), S.categoricalNames, S.defaultColor);
@@ -601,16 +677,55 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   function num(name){ return S.numeric[name] || []; }
   function catOf(name){ return S.categorical[name]; }
 
+  // Lazily built lowercase search key per contig: its id plus every categorical value.
+  var HAY = null;
+  function haystack(){
+    if (HAY) return HAY;
+    HAY = new Array(N);
+    var cats = S.categoricalNames.map(catOf).filter(Boolean);
+    for (var i = 0; i < N; i++){
+      var parts = [S.ids[i]];
+      for (var c = 0; c < cats.length; c++) parts.push(cats[c].levels[cats[c].codes[i]]);
+      HAY[i] = parts.join(' ').toLowerCase();
+    }
+    return HAY;
+  }
+  // "a, b" keeps rows matching a OR b; a leading '-' on a term excludes instead.
+  function parseQuery(raw){
+    var inc = [], exc = [];
+    (raw || '').toLowerCase().split(',').forEach(function(t){
+      t = t.trim();
+      if (!t) return;
+      if (t.charAt(0) === '-'){ if (t.length > 1) exc.push(t.slice(1)); }
+      else inc.push(t);
+    });
+    return (inc.length || exc.length) ? {inc: inc, exc: exc} : null;
+  }
+  var TX = null, TY = null, nHiddenByScale = 0;
+
   function rebuild(){
     var xs = num(el('x').value), ys = num(el('y').value);
+    var xsc = scaleOf('xs'), ysc = scaleOf('ys');
     var bf = el('bf').value, bc = catOf('bin');
     var minL = parseFloat(el('ml').value) || 0;
     var lens = num('length');
+    var q = parseQuery(el('q').value), hay = q ? haystack() : null;
+    TX = new Array(N); TY = new Array(N);
+    nHiddenByScale = 0;
     view = [];
     for (var i = 0; i < N; i++){
       if (xs[i] === null || ys[i] === null) continue;
       if (minL && lens.length && lens[i] !== null && lens[i] < minL) continue;
       if (bf !== '*' && bc && bc.levels[bc.codes[i]] !== bf) continue;
+      if (q){
+        var h = hay[i], ok = q.inc.length === 0, j;
+        for (j = 0; j < q.inc.length && !ok; j++) if (h.indexOf(q.inc[j]) >= 0) ok = true;
+        if (ok) for (j = 0; j < q.exc.length; j++) if (h.indexOf(q.exc[j]) >= 0){ ok = false; break; }
+        if (!ok) continue;
+      }
+      var tx = tf(xs[i], xsc), ty = tf(ys[i], ysc);
+      if (tx === null || ty === null){ nHiddenByScale++; continue; }   // log of <= 0
+      TX[i] = tx; TY[i] = ty;
       view.push(i);
     }
     draw();
@@ -636,8 +751,8 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     cv.width = w * dpr; cv.height = h * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    var xs = num(el('x').value), ys = num(el('y').value);
-    ex = extent(xs, view); ey = extent(ys, view);
+    var xsc = scaleOf('xs'), ysc = scaleOf('ys');
+    ex = extent(TX, view); ey = extent(TY, view);
     var pw = w - M.l - M.r, ph = h - M.t - M.b;
     sx = function(v){ return M.l + (v - ex[0]) / (ex[1] - ex[0]) * pw; };
     sy = function(v){ return M.t + ph - (v - ey[0]) / (ey[1] - ey[0]) * ph; };
@@ -652,13 +767,15 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       ctx.moveTo(sx(vx), M.t); ctx.lineTo(sx(vx), M.t + ph); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(M.l, sy(vy)); ctx.lineTo(M.l + pw, sy(vy)); ctx.stroke();
       ctx.fillStyle = '#63757f'; ctx.textAlign = 'center';
-      ctx.fillText(fmt(vx), sx(vx), M.t + ph + 15);
-      ctx.textAlign = 'right'; ctx.fillText(fmt(vy), M.l - 6, sy(vy) + 3);
+      ctx.fillText(fmt(inv(vx, xsc)), sx(vx), M.t + ph + 15);
+      ctx.textAlign = 'right'; ctx.fillText(fmt(inv(vy, ysc)), M.l - 6, sy(vy) + 3);
     }
     ctx.textAlign = 'center'; ctx.fillStyle = '#16222b'; ctx.font = '600 12px system-ui';
-    ctx.fillText(el('x').value, M.l + pw / 2, h - 8);
+    var xlab = el('x').value + (xsc[3] ? '  [' + xsc[3] + ']' : '');
+    var ylab = el('y').value + (ysc[3] ? '  [' + ysc[3] + ']' : '');
+    ctx.fillText(xlab, M.l + pw / 2, h - 8);
     ctx.save(); ctx.translate(17, M.t + ph / 2); ctx.rotate(-Math.PI / 2);
-    ctx.fillText(el('y').value, 0, 0); ctx.restore();
+    ctx.fillText(ylab, 0, 0); ctx.restore();
     // points
     var cat = catOf(el('c').value), lens = num('length');
     var maxL = 1;
@@ -671,7 +788,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       var r = 2.2 + 5.5 * Math.sqrt(L / maxL);
       var col = sub[id] !== undefined ? SPAL[order.indexOf(sub[id]) % SPAL.length]
               : (cat ? PAL[cat.codes[i] % PAL.length] : '#2E75B6');
-      ctx.beginPath(); ctx.arc(sx(xs[i]), sy(ys[i]), r, 0, 6.2832);
+      ctx.beginPath(); ctx.arc(sx(TX[i]), sy(TY[i]), r, 0, 6.2832);
       ctx.fillStyle = col; ctx.globalAlpha = selected.has(id) ? 1 : 0.72; ctx.fill();
       if (selected.has(id)){
         ctx.globalAlpha = 1; ctx.strokeStyle = '#16222b'; ctx.lineWidth = 1.8; ctx.stroke();
@@ -721,7 +838,8 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       if (gc.length && gc[i] !== null){ gsum += gc[i]; gn++; }
       if (cov.length && cov[i] !== null){ csum += cov[i]; cn++; }
     });
-    el('shown').textContent = view.length + ' of ' + S.nShown + ' plotted contigs';
+    el('shown').textContent = view.length + ' of ' + S.nShown + ' plotted contigs' +
+      (nHiddenByScale ? ' (' + nHiddenByScale + ' hidden: not positive on a log axis)' : '');
     el('selinfo').innerHTML = n === 0 ? '<span class="note">Drag on the plot to lasso contigs.</span>'
       : '<b>' + n + '</b> selected &middot; ' + (bp / 1e6).toFixed(3) + ' Mb' +
         (gn ? ' &middot; GC ' + (gsum / gn).toFixed(1) + '%' : '') +
@@ -752,6 +870,8 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       d.appendChild(x); host.appendChild(d);
     });
     el('exp').disabled = !order.length;
+    var faSel = el('fa') && el('fa').files && el('fa').files.length;
+    if (el('expfa')) el('expfa').disabled = !(order.length && faSel);
   }
 
   function inPoly(px, py, poly){
@@ -772,9 +892,9 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     drag = true; lasso = [pos(e)]; });
   cv.addEventListener('mousemove', function(e){
     if (drag){ lasso.push(pos(e)); draw(); return; }
-    var p = pos(e), xs = num(el('x').value), ys = num(el('y').value), best = -1, bd = 81;
+    var p = pos(e), best = -1, bd = 81;
     for (var k = 0; k < view.length; k++){
-      var i = view[k], dx = sx(xs[i]) - p[0], dy = sy(ys[i]) - p[1], d = dx * dx + dy * dy;
+      var i = view[k], dx = sx(TX[i]) - p[0], dy = sy(TY[i]) - p[1], d = dx * dx + dy * dy;
       if (d < bd){ bd = d; best = i; }
     }
     if (best < 0){ tip.style.display = 'none'; return; }
@@ -794,11 +914,10 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     if (!drag) return;
     drag = false;
     if (lasso && lasso.length > 2){
-      var xs = num(el('x').value), ys = num(el('y').value);
       if (!e.shiftKey) selected.clear();
       for (var k = 0; k < view.length; k++){
         var i = view[k];
-        if (inPoly(sx(xs[i]), sy(ys[i]), lasso)) selected.add(S.ids[i]);
+        if (inPoly(sx(TX[i]), sy(TY[i]), lasso)) selected.add(S.ids[i]);
       }
     }
     lasso = null; draw();
@@ -825,7 +944,177 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     a.href = URL.createObjectURL(blob); a.download = 'manual_bins.tsv';
     document.body.appendChild(a); a.click(); a.remove();
   };
-  ['x','y','c','bf','ml'].forEach(function(id){ el(id).onchange = rebuild; });
+  // ---------------------------------------------------------------- FASTA export
+  // Sequences are never embedded in this file -- a whole assembly would be far too
+  // large -- so the user points us at the FASTA on disk and we read it locally with
+  // the File API. Nothing leaves the machine.
+  var CRC = (function(){
+    var t = new Int32Array(256);
+    for (var n = 0; n < 256; n++){
+      var c = n;
+      for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c;
+    }
+    return function(bytes){
+      var c = -1;
+      for (var i = 0; i < bytes.length; i++) c = t[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+      return (c ^ -1) >>> 0;
+    };
+  })();
+
+  // Minimal STORE-only ZIP writer, so several FASTA files can come down as one archive
+  // without pulling in a compression library.
+  function makeZip(files){
+    var enc = new TextEncoder(), parts = [], central = [], offset = 0;
+    function u16(v){ return [v & 0xFF, (v >>> 8) & 0xFF]; }
+    function u32(v){ return [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF]; }
+    files.forEach(function(f){
+      var name = enc.encode(f.name), body = enc.encode(f.text), crc = CRC(body);
+      var local = [].concat(u32(0x04034B50), u16(20), u16(0), u16(0), u16(0), u16(0),
+                            u32(crc), u32(body.length), u32(body.length),
+                            u16(name.length), u16(0));
+      parts.push(new Uint8Array(local), name, body);
+      central.push([].concat(u32(0x02014B50), u16(20), u16(20), u16(0), u16(0), u16(0),
+                             u16(0), u32(crc), u32(body.length), u32(body.length),
+                             u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0),
+                             u32(offset)));
+      central[central.length - 1].nameBytes = name;
+      offset += local.length + name.length + body.length;
+    });
+    var cdStart = offset, cdSize = 0;
+    central.forEach(function(c){
+      parts.push(new Uint8Array(c), c.nameBytes);
+      cdSize += c.length + c.nameBytes.length;
+    });
+    parts.push(new Uint8Array([].concat(u32(0x06054B50), u16(0), u16(0),
+      u16(files.length), u16(files.length), u32(cdSize), u32(cdStart), u16(0))));
+    return new Blob(parts, {type: 'application/zip'});
+  }
+
+  function download(blob, name){
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
+  // Streams a FASTA in chunks, keeping only the wanted records, so a multi-GB assembly
+  // never has to sit in memory at once. Record names are the first whitespace-delimited
+  // token, matching how MEGAHIT and Unicycler decorate their headers.
+  function readFastaSubset(file, wanted, onSeq, onDone, onErr){
+    var CHUNK = 8 << 20, pos = 0, tail = '', keep = false, name = null, buf = [];
+    function flush(){
+      if (keep && name !== null) onSeq(name, buf.join(''));
+      buf = []; keep = false; name = null;
+    }
+    function handleLine(line){
+      if (line.charAt(0) === '>'){
+        flush();
+        name = line.slice(1).split(/[\s]/)[0];
+        keep = wanted.has(name);
+      } else if (keep){
+        buf.push(line.trim());
+      }
+    }
+    function step(){
+      if (pos >= file.size){
+        tail.split('\n').forEach(function(l){ if (l !== '') handleLine(l); });
+        flush(); onDone(); return;
+      }
+      var slice = file.slice(pos, Math.min(pos + CHUNK, file.size));
+      pos += CHUNK;
+      var fr = new FileReader();
+      fr.onerror = function(){ onErr('Could not read ' + file.name); };
+      fr.onload = function(){
+        var text = tail + fr.result, lines = text.split('\n');
+        tail = lines.pop();                       // may be a partial line
+        for (var i = 0; i < lines.length; i++){
+          var l = lines[i];
+          if (l !== '' && l !== '\r') handleLine(l.charAt(l.length - 1) === '\r' ? l.slice(0, -1) : l);
+        }
+        el('fastat').textContent = 'Reading ' + file.name + '... ' +
+          Math.min(100, Math.round(100 * pos / file.size)) + '%';
+        setTimeout(step, 0);                      // yield so the UI stays responsive
+      };
+      fr.readAsText(slice);
+    }
+    step();
+  }
+
+  function wrap(seq){
+    var out = [];
+    for (var i = 0; i < seq.length; i += 70) out.push(seq.slice(i, i + 70));
+    return out.join('\n');
+  }
+
+  el('fa').onchange = function(){
+    el('expfa').disabled = !(this.files && this.files.length && order.length);
+    el('fastat').textContent = this.files && this.files.length
+      ? this.files.length + ' file(s) selected.' : '';
+  };
+
+  el('expfa').onclick = function(){
+    var files = Array.prototype.slice.call(el('fa').files || []);
+    if (!files.length){ alert('Choose the contig FASTA first.'); return; }
+    if (files.some(function(f){ return /\.gz$/i.test(f.name); })){
+      el('fastat').textContent = 'Gzipped FASTA cannot be read in the browser. ' +
+        'Decompress it, or use --apply-split on the server.';
+      return;
+    }
+    var wanted = new Set(Object.keys(sub));
+    var seqs = {}, found = 0, bytes = 0;
+    el('expfa').disabled = true;
+    var fi = 0;
+    function nextFile(){
+      if (fi >= files.length){ finish(); return; }
+      var f = files[fi++];
+      readFastaSubset(f, wanted, function(name, seq){
+        if (seqs[name] === undefined){ seqs[name] = seq; found++; bytes += seq.length; }
+      }, nextFile, function(msg){
+        el('fastat').textContent = msg; el('expfa').disabled = false;
+      });
+    }
+    function finish(){
+      if (!found){
+        el('fastat').innerHTML = '<b>No matching records.</b> None of the ' + wanted.size +
+          ' assigned contig names were found in the selected file(s). This usually means ' +
+          'the wrong FASTA was chosen &mdash; a <code>final/</code> run needs ' +
+          '<code>consolidated_contigs.fasta</code>, whose records are renamed ' +
+          '<code>MH_...</code>.';
+        el('expfa').disabled = false; return;
+      }
+      var byBin = {};
+      Object.keys(sub).forEach(function(id){
+        if (seqs[id] === undefined) return;
+        (byBin[sub[id]] = byBin[sub[id]] || []).push(id);
+      });
+      var out = [];
+      order.forEach(function(label){
+        var ids = byBin[label];
+        if (!ids || !ids.length) return;
+        var safe = label.replace(/[^A-Za-z0-9._-]/g, '_');
+        var text = ids.map(function(id){ return '>' + id + '\n' + wrap(seqs[id]); }).join('\n') + '\n';
+        out.push({name: safe + '.fasta', text: text});
+      });
+      if (!out.length){ el('fastat').textContent = 'Nothing to write.';
+                        el('expfa').disabled = false; return; }
+      if (out.length === 1) download(new Blob([out[0].text], {type: 'text/plain'}), out[0].name);
+      else download(makeZip(out), 'manual_bins_fasta.zip');
+      var missing = wanted.size - found;
+      el('fastat').innerHTML = 'Wrote ' + out.length + ' FASTA file(s), ' + found +
+        ' contigs, ' + (bytes / 1e6).toFixed(2) + ' Mb.' +
+        (missing > 0 ? ' <b>' + missing + ' assigned contig(s) were not found</b> in the ' +
+         'selected file(s) and were skipped.' : '');
+      el('expfa').disabled = false;
+    }
+    nextFile();
+  };
+
+  ['x','y','c','bf','ml','xs','ys'].forEach(function(id){ el(id).onchange = rebuild; });
+  var qt = null;
+  el('q').addEventListener('input', function(){
+    clearTimeout(qt); qt = setTimeout(rebuild, 160);   // debounce so typing stays smooth
+  });
   window.addEventListener('resize', function(){ if (view.length) draw(); });
   rebuild();
 })();
@@ -979,13 +1268,19 @@ def render_binarena(scatter):
                 f'<code>--max-points</code> or <code>--min-length</code> to change this.</p>')
     return f"""
 <div class="card">
-  <div class="grid" style="margin-bottom:13px">
+  <div class="grid" style="margin-bottom:11px">
     <div><label for="x">X axis</label><select id="x"></select></div>
+    <div><label for="xs">X scale</label><select id="xs"></select></div>
     <div><label for="y">Y axis</label><select id="y"></select></div>
+    <div><label for="ys">Y scale</label><select id="ys"></select></div>
+  </div>
+  <div class="grid" style="margin-bottom:13px">
     <div><label for="c">Colour by</label><select id="c"></select></div>
     <div><label for="bf">Restrict to bin</label><select id="bf"></select></div>
     <div><label for="ml">Min contig length</label>
       <input id="ml" type="number" value="{scatter['minLength']}" step="500" min="0"></div>
+    <div style="grid-column:span 2"><label for="q">Search</label>
+      <input id="q" type="search" placeholder="contig name or taxon; comma-separated = OR; -term excludes"></div>
   </div>
   <div class="plotwrap">
     <div>
@@ -1011,7 +1306,17 @@ def render_binarena(scatter):
       <div class="row" style="margin-top:12px">
         <button class="p" id="exp" disabled>Download manual_bins.tsv</button>
       </div>
-      <p class="note" style="margin-top:12px">Then turn the TSV into FASTA files:</p>
+      <h2 style="margin-top:18px">Download FASTA</h2>
+      <p class="note">Pick the contig FASTA so the sequences can be written here in the
+         browser. Nothing is uploaded.</p>
+      <p class="note" style="margin-top:6px">Expected:<br><code>{esc(scatter['fastaHint']) or 'no assembly FASTA found in this run'}</code></p>
+      <input id="fa" type="file" multiple accept=".fasta,.fa,.fna,.fasta.gz,.fa.gz,.txt"
+             style="margin-top:8px">
+      <div class="row" style="margin-top:10px">
+        <button class="p" id="expfa" disabled>Write FASTA per sub-bin</button>
+      </div>
+      <p class="note" id="fastat" style="margin-top:9px"></p>
+      <p class="note" style="margin-top:12px">Or do it from the TSV on the server:</p>
       <p><code>metahopper_report.py -i &lt;outdir&gt; --apply-split manual_bins.tsv</code></p>
     </div>
   </div>
