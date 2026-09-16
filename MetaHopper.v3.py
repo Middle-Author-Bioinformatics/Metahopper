@@ -289,6 +289,72 @@ Entries marked [cond] are only created when that condition holds.
           summary.tsv                              <-- per bin: contigs, length, N50, L50,
                                                    GC, completeness, contamination, strain
                                                    heterogeneity, marker lineage, markers
+    metahopper_report.html                       <-- OPEN THIS. Interactive report over
+                                                   the whole run: overview, sortable bin
+                                                   table, and a BinaRena tab that plots
+                                                   binarena_input.tsv and can lasso a
+                                                   bin into sub-bins. Written last,
+                                                   [unless --skip-report]. Requires
+                                                   metahopper_report.py beside this
+                                                   script or on PATH.
+
+  Restarting an interrupted run
+  -----------------------------
+  Every stage writes its results before the next begins, so a killed run can be resumed
+  from whatever is already on disk. --resume works it out for you:
+
+    MetaHopper.v3.py --resume -o <outdir>
+
+  It inspects the output directory, logs an inventory of what each stage left behind,
+  and restarts at the first stage that is not finished. Specifically it will:
+
+    - read run_manifest.json (written at the start of every run) to recover -1/-2/-d
+      and --trimmomatic-folder, so they need not be repeated;
+    - feed polyg/polyg_trimmed_{1,2}.fastq back in and skip fastp;
+    - feed megahit/final.contigs.fa back in as -i, which skips QC and MEGAHIT;
+    - set --reuse-prodigal and --reuse-diamond when those outputs are intact;
+    - set --resume-reassembly, which reuses the competitive seed BAM and skips bins that
+      already have a reassembled.fasta.
+
+  Anything explicitly given on the command line wins over what is detected, so
+  `--resume -o out -i other_contigs.fasta` uses your contigs.
+
+  Truncation is checked rather than assumed. A process killed mid-write normally leaves
+  a partial final line, so text outputs must end in a newline, hits.tsv's last row must
+  have all its fields, FASTQ tails must still parse as whole 4-line records, and gzipped
+  QC output is fully decompressed to prove the stream is not cut short. A stage whose
+  output fails its check is reported 'partial' and redone instead of trusted. If key
+  parameters (--ranks, --min-support, --max-hits-per-orf) differ from the manifest, the
+  reused Prodigal and DIAMOND output is still valid but a warning notes that
+  classification will diverge from the earlier bins.
+
+  Runs made before --resume existed have no manifest; detection still works from the
+  output files, but pass -d (and --trimmomatic-folder, if reassembling) explicitly.
+
+  The equivalent manual form, if you would rather be explicit:
+
+    MetaHopper.v3.py -i <outdir>/megahit/final.contigs.fa \
+        -1 <outdir>/polyg/polyg_trimmed_1.fastq -2 <outdir>/polyg/polyg_trimmed_2.fastq \
+        -d nr-tax.dmnd -o <outdir> \
+        --reuse-prodigal --reuse-diamond --resume-reassembly
+
+  --resume-reassembly reuses <outdir>/reassembly/<rank>/competitive_seed/
+  reads_to_all_bins.bam rather than remapping every read against the seed bins, and
+  skips any bin that already has a non-empty reassembled.fasta. Reused bins are still
+  length-checked against --reassemble-min-recovered-fraction and still appear in
+  reassembly_summary.tsv, exactly as if they had just been built. Empty or truncated
+  files are not treated as reusable. Delete a bin's directory to force it to be redone.
+
+  Memory note: before the reassembly stage the preliminary DIAMOND hit table, ORF map,
+  contig sequences and contig metrics are released, because the stage then shells out to
+  bowtie2, BBDuk and Unicycler/SPAdes, which each want many GB. The hit table alone
+  costs roughly 6 MB of RAM per MB of hits.tsv.
+
+  With --inherit-reassembly-taxonomy, final/diamond/ is absent and every final/ taxonomy
+  column is a label inherited from the preliminary bin the contig was assembled out of,
+  not a vote over DIAMOND hits: <rank>_support is 1.0 for an inherited name and 0.0 for
+  Unclassified. A rank is inherited only when the source bin's preliminary contigs agree
+  on it unanimously, so ranks finer than --final-source-rank usually stay Unclassified.
 
   binarena_input.tsv columns, in order:
     ID  length  GC  coverage  covered_fraction  coding_density  n_cds
@@ -308,7 +374,9 @@ Entries marked [cond] are only created when that condition holds.
 
 import argparse
 import csv
+import gc
 import gzip
+import json
 import logging
 import math
 import os
@@ -318,7 +386,8 @@ import shutil
 import statistics
 import subprocess
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 
 # --------------------------------------------------------------------------------------
@@ -583,6 +652,292 @@ def trimmomatic_se_if_reads(trimmomatic_cmd: str, threads: int, fq_in: Path,
     run_cmd([trimmomatic_cmd, "SE", "-threads", str(threads), str(fq_in), str(fq_out),
              f"SLIDINGWINDOW:4:{qc_quality}", f"MINLEN:{qc_minlen}"], log_file=log_file)
     return fq_out
+
+
+# ------------------------------------------------------------------ resume detection
+
+def _tail(path: Path, n: int = 8192) -> bytes:
+    """Last n bytes of a file, without reading the rest of it."""
+    with open(path, "rb") as fh:
+        size = fh.seek(0, os.SEEK_END)
+        fh.seek(max(0, size - n))
+        return fh.read()
+
+
+def _nonempty(path) -> bool:
+    try:
+        return path is not None and Path(path).is_file() and Path(path).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def complete_text(path) -> bool:
+    """Non-empty and ending in a newline.
+
+    A process killed mid-write almost always leaves a partial final line, so this cheap
+    O(1) check catches the common truncation signature without reading the whole file.
+    It cannot detect a file that was cut exactly on a line boundary.
+    """
+    return _nonempty(path) and _tail(Path(path), 2).endswith(b"\n")
+
+
+def complete_fasta(path) -> bool:
+    if not complete_text(path):
+        return False
+    with open(path, "rb") as fh:
+        return fh.read(1) == b">"
+
+
+def complete_fastq(path) -> bool:
+    """Complete text whose trailing lines still parse as whole 4-line records."""
+    if not complete_text(path):
+        return False
+    lines = [l for l in _tail(Path(path)).split(b"\n") if l != b""]
+    if len(lines) < 4:
+        return True                      # too small to judge; the newline check stands
+    for i in range(len(lines) - 4, -1, -1):
+        if lines[i].startswith(b"@"):
+            rec = lines[i:i + 4]
+            return len(rec) == 4 and rec[2].startswith(b"+") and len(rec[1]) == len(rec[3])
+    return False
+
+
+def complete_tsv(path, min_fields: int) -> bool:
+    if not complete_text(path):
+        return False
+    lines = [l for l in _tail(Path(path)).split(b"\n") if l != b""]
+    return bool(lines) and len(lines[-1].split(b"\t")) >= min_fields
+
+
+def complete_gzip(path) -> bool:
+    """Fully decompress to confirm the stream is not truncated.
+
+    Unlike the text checks this is O(size), but a truncated gzip is otherwise
+    undetectable and silently loses reads, and re-running QC costs far more than the
+    seconds this takes.
+    """
+    if not _nonempty(path):
+        return False
+    try:
+        with gzip.open(path, "rb") as fh:
+            while fh.read(8 << 20):
+                pass
+        return True
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return False
+
+
+class RunState:
+    """What a previous run left in an output directory, stage by stage.
+
+    Detection is purely from files on disk, so it works on runs made by earlier versions
+    of this script. Each stage is 'complete' only if its outputs pass the corresponding
+    truncation check; anything questionable is reported as 'partial' and redone.
+    """
+
+    def __init__(self, outdir: Path, ranks):
+        self.outdir = Path(outdir)
+        self.ranks = list(ranks)
+        self.stages = {}
+        self.manifest = {}
+        self._detect()
+
+    def _add(self, name, status, detail, paths=None):
+        self.stages[name] = {"status": status, "detail": detail, "paths": paths or []}
+
+    def _detect(self):
+        o = self.outdir
+        manifest_path = o / "run_manifest.json"
+        if _nonempty(manifest_path):
+            try:
+                self.manifest = json.loads(manifest_path.read_text())
+            except ValueError:
+                self.manifest = {}
+
+        # poly-G trimming
+        g1, g2 = o / "polyg" / "polyg_trimmed_1.fastq", o / "polyg" / "polyg_trimmed_2.fastq"
+        if complete_fastq(g1) and complete_fastq(g2):
+            self._add("polyg", "complete", "trimmed read pair present", [g1, g2])
+        elif _nonempty(g1) or _nonempty(g2):
+            self._add("polyg", "partial", "trimmed reads truncated or unpaired")
+        else:
+            self._add("polyg", "absent", "not run")
+
+        # Trimmomatic/FLASH QC
+        qc = o / "qc"
+        q1, q2 = qc / "notcombined.final_1P.gz", qc / "notcombined.final_2P.gz"
+        qu = qc / "unpaired.fq.gz"
+        if all(_nonempty(p) for p in (q1, q2, qu)):
+            if all(complete_gzip(p) for p in (q1, q2, qu)):
+                self._add("qc", "complete", "QC read set intact", [q1, q2, qu])
+            else:
+                self._add("qc", "partial", "a QC gzip stream is truncated")
+        else:
+            self._add("qc", "absent", "not run")
+
+        # MEGAHIT
+        asm = o / "megahit" / "final.contigs.fa"
+        if complete_fasta(asm) and (o / "megahit" / "done").exists():
+            self._add("assembly", "complete", "MEGAHIT finished (done marker present)", [asm])
+        elif complete_fasta(asm):
+            self._add("assembly", "complete", "contigs present (no MEGAHIT done marker)", [asm])
+        elif _nonempty(asm):
+            self._add("assembly", "partial", "final.contigs.fa is truncated")
+        else:
+            self._add("assembly", "absent", "not run")
+
+        # Prodigal
+        faa, gff = o / "prodigal" / "proteins.faa", o / "prodigal" / "genes.gff"
+        if complete_fasta(faa) and complete_text(gff):
+            self._add("prodigal", "complete", "proteins and GFF present", [faa, gff])
+        elif _nonempty(faa) or _nonempty(gff):
+            self._add("prodigal", "partial", "Prodigal output truncated")
+        else:
+            self._add("prodigal", "absent", "not run")
+
+        # DIAMOND
+        hits = o / "diamond" / "hits.tsv"
+        if complete_tsv(hits, len(DIAMOND_FIELDS)):
+            self._add("diamond", "complete", "hit table present", [hits])
+        elif _nonempty(hits):
+            self._add("diamond", "partial", "hits.tsv truncated mid-record")
+        else:
+            self._add("diamond", "absent", "not run")
+
+        # preliminary bins
+        found = [r for r in self.ranks
+                 if complete_text(o / "bins" / r / "bin_membership.tsv")]
+        if found:
+            self._add("bins", "complete", f"bins written at {', '.join(found)}")
+        else:
+            self._add("bins", "absent", "not run")
+
+        # reassembly, per bin
+        reasm = o / "reassembly"
+        if reasm.is_dir():
+            done, total = 0, 0
+            for rank_dir in sorted(p for p in reasm.iterdir() if p.is_dir()):
+                for bin_dir in sorted(p for p in rank_dir.iterdir() if p.is_dir()):
+                    if bin_dir.name == "competitive_seed":
+                        continue
+                    total += 1
+                    if complete_fasta(bin_dir / "reassembled.fasta"):
+                        done += 1
+            bam = next(reasm.glob("*/competitive_seed/reads_to_all_bins.bam"), None)
+            bam_ok = _nonempty(bam)
+            detail = f"{done} bin(s) reassembled"
+            detail += "; seed mapping reusable" if bam_ok else "; seed mapping missing or empty"
+            self._add("reassembly", "complete" if done and done == total else "partial", detail)
+        else:
+            self._add("reassembly", "absent", "not run")
+
+        # final pass
+        ffaa = o / "final" / "prodigal" / "proteins.faa"
+        fgff = o / "final" / "prodigal" / "genes.gff"
+        if complete_fasta(ffaa) and complete_text(fgff):
+            self._add("final_prodigal", "complete", "final proteins present", [ffaa, fgff])
+        elif _nonempty(ffaa):
+            self._add("final_prodigal", "partial", "final Prodigal output truncated")
+        else:
+            self._add("final_prodigal", "absent", "not run")
+
+        fhits = o / "final" / "diamond" / "hits.tsv"
+        if complete_tsv(fhits, len(DIAMOND_FIELDS)):
+            self._add("final_diamond", "complete", "final hit table present", [fhits])
+        elif _nonempty(fhits):
+            self._add("final_diamond", "partial", "final hits.tsv truncated mid-record")
+        else:
+            self._add("final_diamond", "absent", "not run")
+
+    def status(self, name) -> str:
+        return self.stages.get(name, {}).get("status", "absent")
+
+    def done(self, name) -> bool:
+        return self.status(name) == "complete"
+
+    def log_inventory(self) -> None:
+        order = ["polyg", "qc", "assembly", "prodigal", "diamond", "bins",
+                 "reassembly", "final_prodigal", "final_diamond"]
+        log.info("Resume: inspected %s", self.outdir)
+        for name in order:
+            st = self.stages.get(name)
+            if not st:
+                continue
+            log.info("  %-15s %-9s %s", name, st["status"], st["detail"])
+
+
+def write_run_manifest(outdir: Path, args) -> None:
+    """Record the inputs so a later --resume can recover them without being told again."""
+    payload = {
+        "written": datetime.now().isoformat(timespec="seconds"),
+        "r1": str(args.r1) if args.r1 else None,
+        "r2": str(args.r2) if args.r2 else None,
+        "input": str(args.input) if args.input else None,
+        "diamond_db": str(args.diamond_db) if args.diamond_db else None,
+        "trimmomatic_folder": str(args.trimmomatic_folder) if args.trimmomatic_folder else None,
+        "ranks": args.ranks,
+        "min_support": args.min_support,
+        "max_hits_per_orf": args.max_hits_per_orf,
+        "trim_polyg": bool(args.trim_polyg),
+    }
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "run_manifest.json").write_text(json.dumps(payload, indent=2) + "\n")
+    except OSError as exc:
+        log.warning("Could not write run_manifest.json (%s); --resume will still work "
+                    "from the output files themselves.", exc)
+
+
+def apply_resume(args, state: RunState) -> None:
+    """Reconfigure args so the run restarts wherever the previous one stopped."""
+    state.log_inventory()
+    m = state.manifest
+
+    # Recover inputs the user did not repeat on the command line.
+    for attr in ("r1", "r2", "diamond_db", "trimmomatic_folder"):
+        if getattr(args, attr, None) is None and m.get(attr):
+            setattr(args, attr, Path(m[attr]))
+            log.info("Resume: took %s from run_manifest.json (%s).", attr, m[attr])
+    for key, attr in (("ranks", "ranks"), ("min_support", "min_support"),
+                      ("max_hits_per_orf", "max_hits_per_orf")):
+        if key in m and m[key] is not None and getattr(args, attr) != m[key]:
+            log.warning("Resume: --%s is %r now but was %r in the run being resumed. "
+                        "Reused DIAMOND and Prodigal output stays valid, but "
+                        "classification will differ from the earlier bins.",
+                        attr.replace("_", "-"), getattr(args, attr), m[key])
+
+    # Skip poly-G by feeding its output straight in.
+    if state.done("polyg"):
+        g1, g2 = state.stages["polyg"]["paths"]
+        args.r1, args.r2 = g1, g2
+        if args.trim_polyg:
+            args.trim_polyg = False
+            log.info("Resume: reusing poly-G trimmed reads; skipping fastp.")
+        else:
+            log.info("Resume: using existing poly-G trimmed reads as input.")
+
+    # Skip QC + MEGAHIT by supplying the finished assembly as contigs.
+    if state.done("assembly") and args.input is None:
+        args.input = state.stages["assembly"]["paths"][0]
+        log.info("Resume: using the existing assembly %s; skipping QC and MEGAHIT.",
+                 args.input)
+
+    if state.done("prodigal") and not args.reuse_prodigal:
+        args.reuse_prodigal = True
+        log.info("Resume: reusing preliminary Prodigal output.")
+    if state.done("diamond") and not args.reuse_diamond:
+        args.reuse_diamond = True
+        log.info("Resume: reusing the preliminary DIAMOND hit table.")
+    if state.status("reassembly") in ("complete", "partial") and not args.resume_reassembly:
+        args.resume_reassembly = True
+        log.info("Resume: resuming the reassembly stage (%s).",
+                 state.stages["reassembly"]["detail"])
+
+    for name, label in (("prodigal", "prodigal"), ("diamond", "diamond"),
+                        ("assembly", "assembly"), ("qc", "qc"), ("polyg", "polyg")):
+        if state.status(name) == "partial":
+            log.warning("Resume: %s output looks truncated (%s); it will be redone.",
+                        label, state.stages[name]["detail"])
 
 
 def run_qc(r1: Path, r2: Path, outdir: Path, threads: int,
@@ -2893,7 +3248,7 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                         polish: bool, unicycler_mode: str, unicycler_extra: str = None,
                         spades_fallback: bool = True, unicycler_argv=None,
                         min_recovered_fraction: float = 0.5,
-                        seed_excluded_ids: set = None) -> dict:
+                        seed_excluded_ids: set = None, resume: bool = False) -> dict:
     """Drives reassemble_one_bin() over every bin FASTA at each rank in `ranks`, and writes
     a before/after comparison table (contig count, N50, total length) per rank.
 
@@ -2924,14 +3279,21 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
             excluded_contig_ids=seed_excluded_ids,
         )
         seed_index = competitive_dir / "all_bins_index"
-        build_bowtie2_index(
-            combined_seed, seed_index, threads, competitive_dir / "bowtie2-build.log",
-        )
         competitive_bam = competitive_dir / "reads_to_all_bins.bam"
-        map_reads_to_index(
-            r1_raw, r2_raw, seed_index, competitive_bam, threads, seed_score_min,
-            max_insert, competitive_dir / "bowtie2.log", report_multiple=20,
-        )
+        # Mapping the entire read set against every seed bin is the single most expensive
+        # step in this stage, so --resume-reassembly reuses the BAM when one is already
+        # there. Template assignments are still re-derived from it, which is cheap.
+        if resume and competitive_bam.is_file() and competitive_bam.stat().st_size > 0:
+            log.info("Rank '%s': reusing the existing competitive seed mapping (%s).",
+                     r, competitive_bam)
+        else:
+            build_bowtie2_index(
+                combined_seed, seed_index, threads, competitive_dir / "bowtie2-build.log",
+            )
+            map_reads_to_index(
+                r1_raw, r2_raw, seed_index, competitive_bam, threads, seed_score_min,
+                max_insert, competitive_dir / "bowtie2.log", report_multiple=20,
+            )
         assignments, passing_templates, ambiguous_templates = competitively_assign_templates(
             competitive_bam, ref_to_bin, min_read_aligned, min_read_identity, threads,
         )
@@ -2959,24 +3321,31 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                 log.info("Bin '%s' (%s): only %d contig(s); skipping reassembly.",
                           bin_name, r, before["num_contigs"])
                 continue
-            log.info("Reassembling bin '%s' (rank %s, %d contigs, %d bp)...",
-                      bin_name, r, before["num_contigs"], before["total_length_bp"])
-            try:
-                reassembled = reassemble_one_bin(
-                    bin_fasta, bin_name, r, r1_raw, r2_raw, competitive_bam,
-                    assignments.get(bin_name, set()),
-                    all_seed_assigned - assignments.get(bin_name, set()),
-                    outdir, threads, trimmomatic_folder,
-                    qc_quality, qc_minlen, flash_max_overlap, max_rounds, word_size,
-                    min_word_hits, bait_min_entropy, max_round_growth,
-                    max_accepted_fraction, min_new_templates, min_growth, bbtools_memory,
-                    assembler, spades_mode, spades_memory_gb, kmers, polish,
-                    unicycler_mode, unicycler_extra, spades_fallback, unicycler_argv,
-                )
-            except RuntimeError as exc:
-                log.warning("Bin '%s' (%s): reassembly failed (%s); keeping original bin untouched.",
-                            bin_name, r, exc)
-                reassembled = None
+            finished = outdir / "reassembly" / r / bin_name / "reassembled.fasta"
+            if resume and finished.is_file() and finished.stat().st_size > 0:
+                log.info("Bin '%s' (%s): reassembled.fasta already present; reusing it.",
+                          bin_name, r)
+                reassembled = finished
+            else:
+                log.info("Reassembling bin '%s' (rank %s, %d contigs, %d bp)...",
+                          bin_name, r, before["num_contigs"], before["total_length_bp"])
+                try:
+                    reassembled = reassemble_one_bin(
+                        bin_fasta, bin_name, r, r1_raw, r2_raw, competitive_bam,
+                        assignments.get(bin_name, set()),
+                        all_seed_assigned - assignments.get(bin_name, set()),
+                        outdir, threads, trimmomatic_folder,
+                        qc_quality, qc_minlen, flash_max_overlap, max_rounds, word_size,
+                        min_word_hits, bait_min_entropy, max_round_growth,
+                        max_accepted_fraction, min_new_templates, min_growth,
+                        bbtools_memory, assembler, spades_mode, spades_memory_gb, kmers,
+                        polish, unicycler_mode, unicycler_extra, spades_fallback,
+                        unicycler_argv,
+                    )
+                except RuntimeError as exc:
+                    log.warning("Bin '%s' (%s): reassembly failed (%s); keeping original "
+                                "bin untouched.", bin_name, r, exc)
+                    reassembled = None
             if reassembled is None:
                 continue
             after = basic_assembly_stats(reassembled)
@@ -3065,6 +3434,122 @@ def choose_final_source_rank(ranks, reassemble_ranks, requested: str = "auto") -
         if rank in available:
             return rank
     return available[-1]
+
+
+def write_html_report(outdir: Path, min_length: int, max_points: int) -> Path:
+    """Render metahopper_report.html in the run directory.
+
+    metahopper_report.py is imported from beside this script (falling back to PATH and to
+    the current directory) and called in-process, so the report is generated without a
+    subprocess and without requiring the reporter to be installed. A failure here is
+    logged and swallowed: the run's actual results are already on disk, and a broken
+    report must not retroactively fail a finished pipeline.
+    """
+    import importlib.util
+
+    candidates = [Path(__file__).resolve().parent / "metahopper_report.py"]
+    on_path = shutil.which("metahopper_report.py")
+    if on_path:
+        candidates.append(Path(on_path))
+    candidates.append(Path.cwd() / "metahopper_report.py")
+    script = next((c for c in candidates if c.is_file()), None)
+    if script is None:
+        log.warning(
+            "metahopper_report.py not found next to %s or on PATH; skipping the HTML "
+            "report. Pass --skip-report to silence this.", Path(__file__).name,
+        )
+        return None
+
+    out_html = outdir / "metahopper_report.html"
+    try:
+        spec = importlib.util.spec_from_file_location("metahopper_report", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        layout = module.RunLayout(outdir, "auto")
+        opts = argparse.Namespace(
+            input=outdir, output=out_html, bin_set="auto", title=None,
+            min_length=min_length, max_points=max_points,
+            include_uncoordinated=False, no_fasta_stats=False,
+            apply_split=None, split_outdir=None, contigs=None,
+        )
+        out_html.write_text(module.build_report(layout, opts), encoding="utf-8")
+    except Exception as exc:
+        log.warning("Could not write the HTML report (%s: %s). The run itself is "
+                    "unaffected.", type(exc).__name__, exc)
+        return None
+    log.info("HTML report: %s", out_html)
+    return out_html
+
+
+def read_contig_provenance(provenance_tsv: Path) -> dict:
+    """final_contig -> source_bin, from the table build_consolidated_final_assembly wrote."""
+    provenance = {}
+    with open(provenance_tsv, newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            provenance[row["final_contig"]] = row["source_bin"]
+    return provenance
+
+
+def bin_consensus_lineages(classifications: dict, source_rank: str, ranks) -> dict:
+    """Per source-rank bin, the lineage its preliminary contigs agree on.
+
+    Every contig in a preliminary bin shares that bin's taxon at ``source_rank`` by
+    construction, but ranks above it are only implied, and ranks below it vary. So take a
+    length-agnostic plurality vote per rank across the bin's contigs, counting only
+    contigs that were actually classified at that rank, and keep the winner only when it
+    is unanimous among those. Anything short of unanimity stays Unclassified rather than
+    inventing a call the evidence does not support.
+    """
+    per_bin = defaultdict(lambda: defaultdict(Counter))
+    for result in classifications.values():
+        bin_name = result.get(source_rank, ("Unclassified", 0.0))[0]
+        if bin_name == "Unclassified":
+            continue
+        for rank in ranks:
+            taxon = result.get(rank, ("Unclassified", 0.0))[0]
+            if taxon != "Unclassified":
+                per_bin[bin_name][rank][taxon] += 1
+
+    lineages = {}
+    for bin_name, rank_counts in per_bin.items():
+        lineage = {}
+        for rank in ranks:
+            counts = rank_counts.get(rank)
+            if not counts:
+                lineage[rank] = "Unclassified"
+                continue
+            (taxon, n), = counts.most_common(1)
+            lineage[rank] = taxon if len(counts) == 1 else "Unclassified"
+        lineages[bin_name] = lineage
+    return lineages
+
+
+def inherit_classifications(final_contig_ids, provenance: dict, lineages: dict,
+                            orf_to_contig: dict, ranks) -> dict:
+    """Assign each consolidated contig the lineage of the bin it was assembled from.
+
+    Support is reported as 1.0 for an inherited name so downstream --min-support
+    comparisons behave, but these are provenance labels, not vote fractions.
+    """
+    n_orfs = Counter(orf_to_contig.values())
+    classifications = {}
+    n_inherited = 0
+    for contig_id in final_contig_ids:
+        bin_name = provenance.get(contig_id)
+        lineage = lineages.get(bin_name) if bin_name else None
+        result = {}
+        for rank in ranks:
+            taxon = (lineage or {}).get(rank, "Unclassified")
+            result[rank] = (taxon, 1.0 if taxon != "Unclassified" else 0.0)
+        if lineage:
+            n_inherited += 1
+        result["_n_orfs_total"] = n_orfs.get(contig_id, 0)
+        result["_n_orfs_with_hits"] = 0
+        classifications[contig_id] = result
+    log.info("Inherited a lineage for %d/%d consolidated contig(s) from %d source bin(s).",
+             n_inherited, len(final_contig_ids), len(lineages))
+    return classifications
 
 
 def build_consolidated_final_assembly(outdir: Path, source_rank: str,
@@ -3165,8 +3650,12 @@ def parse_args(argv=None):
                          "enable read recruitment without running MEGAHIT.")
     p.add_argument("-1", "--r1", type=Path, default=None, help="Raw/forward paired-end FASTQ (R1)")
     p.add_argument("-2", "--r2", type=Path, default=None, help="Raw/reverse paired-end FASTQ (R2)")
-    p.add_argument("-d", "--diamond-db", required=True, type=Path,
-                    help="Path to taxonomy-enabled nr-tax.dmnd (DIAMOND >=2.1.17)")
+    p.add_argument("-d", "--diamond-db", type=Path, default=None,
+                    help="Path to taxonomy-enabled nr-tax.dmnd (DIAMOND >=2.1.17). Optional "
+                         "only when every DIAMOND pass the run needs can be satisfied from "
+                         "existing output: omitting it implies --reuse-diamond, and a "
+                         "seed-and-extension run additionally needs "
+                         "--inherit-reassembly-taxonomy.")
     p.add_argument("-o", "--outdir", required=True, type=Path, help="Output directory")
     p.add_argument("-t", "--threads", type=int, default=8)
     p.add_argument("--skip-qc", action="store_true",
@@ -3258,6 +3747,21 @@ def parse_args(argv=None):
 
     p.add_argument("--reuse-prodigal", action="store_true",
                     help="Skip Prodigal if <outdir>/prodigal/proteins.faa already exists (reuse it).")
+    p.add_argument("--inherit-reassembly-taxonomy", action="store_true",
+                    help="Do not run the final DIAMOND pass on the consolidated assembly. "
+                         "Each consolidated contig instead inherits the lineage of the "
+                         "preliminary bin it came from, read from contig_provenance.tsv. "
+                         "Lets a seed-and-extension run finish with no DIAMOND database, "
+                         "but no longer detects contigs whose taxonomy changed during "
+                         "frontier extension, and cannot resolve ranks finer than the "
+                         "source rank. Compositional refinement still runs.")
+    p.add_argument("--skip-report", action="store_true",
+                    help="Do not write metahopper_report.html at the end of the run.")
+    p.add_argument("--report-min-length", type=int, default=1000,
+                    help="Minimum contig length plotted in the report's BinaRena tab "
+                         "(default 1000).")
+    p.add_argument("--report-max-points", type=int, default=25000,
+                    help="Maximum contigs embedded in the report scatter (default 25000).")
     p.add_argument("--reuse-diamond", action="store_true",
                     help="Skip DIAMOND if <outdir>/diamond/hits.tsv already exists (reuse it). "
                          "Combine with --reuse-prodigal and a new --ranks/--min-support to "
@@ -3321,6 +3825,19 @@ def parse_args(argv=None):
     rb.add_argument("--reassemble-min-bin-contigs", type=int, default=2,
                      help="Skip reassembly for bins with fewer contigs than this -- nothing to "
                           "gain from reassembling an already-single-contig bin (default 2).")
+    p.add_argument("--resume", action="store_true",
+                    help="Work out where a previous run in -o stopped by inspecting its "
+                         "output files, and restart from there. Implies the relevant "
+                         "--reuse-*/--resume-reassembly options, feeds an existing assembly "
+                         "and poly-G trimmed reads back in so QC and MEGAHIT are skipped, and "
+                         "recovers -1/-2/-d from run_manifest.json when they are not repeated. "
+                         "Outputs that look truncated are redone rather than trusted.")
+    rb.add_argument("--resume-reassembly", action="store_true",
+                     help="Reuse finished reassembly work under <outdir>/reassembly: skip any "
+                          "bin that already has a non-empty reassembled.fasta, and reuse an "
+                          "existing competitive_seed/reads_to_all_bins.bam instead of "
+                          "remapping every read against the seed bins. For restarting a run "
+                          "that was killed part way through the reassembly stage.")
     rb.add_argument("--reassemble-include-unclassified", action="store_true",
                      help="Also attempt reassembly of the catch-all 'Unclassified' bin (default: "
                           "skipped, since it's a mixed leftover pool, not one coherent genome).")
@@ -3460,6 +3977,19 @@ def main(argv=None):
     args = parse_args(argv)
     setup_logging(args.verbose)
 
+    if args.resume:
+        if not args.outdir.is_dir():
+            log.error("--resume needs an existing output directory; %s does not exist.",
+                      args.outdir)
+            sys.exit(1)
+        resume_state = RunState(
+            args.outdir,
+            [r.strip() for r in args.ranks.split(",") if r.strip()],
+        )
+        apply_resume(args, resume_state)
+    else:
+        resume_state = None
+
     using_reads = args.r1 is not None or args.r2 is not None
     using_contigs = args.input is not None
     if using_reads and (args.r1 is None or args.r2 is None):
@@ -3547,6 +4077,7 @@ def main(argv=None):
 
     outdir = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
+    write_run_manifest(outdir, args)
 
     faa = outdir / "prodigal" / "proteins.faa"
     gff = outdir / "prodigal" / "genes.gff"
@@ -3555,7 +4086,46 @@ def main(argv=None):
         and (args.skip_contig_triage or gff.exists())
     )
     hits_tsv = outdir / "diamond" / "hits.tsv"
+    # Omitting -d is only viable by reusing what is already on disk, so treat it as an
+    # implicit --reuse-diamond/--reuse-prodigal rather than failing on a missing flag.
+    if args.diamond_db is None and (hits_tsv.exists() or faa.exists()):
+        if not args.reuse_diamond and hits_tsv.exists():
+            log.info("No -d given and %s exists; enabling --reuse-diamond.", hits_tsv)
+            args.reuse_diamond = True
+            reuse_diamond = True
+        if not args.reuse_prodigal and faa.exists():
+            log.info("No -d given and %s exists; enabling --reuse-prodigal.", faa)
+            args.reuse_prodigal = True
+            reuse_prodigal = faa.exists() and (args.skip_contig_triage or gff.exists())
     reuse_diamond = args.reuse_diamond and hits_tsv.exists()
+
+    # A run needs the database for the preliminary pass unless that pass is reused, and
+    # for the final pass unless taxonomy is inherited. Decide before doing any work.
+    needs_db_prelim = not reuse_diamond
+    needs_db_final = args.reassemble_bins and not args.inherit_reassembly_taxonomy
+    if args.diamond_db is None:
+        if needs_db_prelim:
+            reason = (f"{hits_tsv} does not exist" if not hits_tsv.exists()
+                      else "--reuse-diamond was not given")
+            log.error(
+                "-d/--diamond-db is required: the preliminary DIAMOND pass has to run "
+                "because %s.", reason,
+            )
+            sys.exit(1)
+        if needs_db_final:
+            log.error(
+                "-d/--diamond-db is required: the preliminary pass can be reused from %s, "
+                "but seed-and-extension reassembly classifies the *consolidated* assembly, "
+                "whose contigs are new sequences absent from that table. Either supply -d, "
+                "or add --inherit-reassembly-taxonomy to have each consolidated contig "
+                "inherit its preliminary bin's lineage instead.", hits_tsv,
+            )
+            sys.exit(1)
+        log.info("Running without a DIAMOND database; every DIAMOND pass is satisfied "
+                 "from existing output.")
+    if args.inherit_reassembly_taxonomy and not args.reassemble_bins:
+        log.info("--inherit-reassembly-taxonomy has no effect without seed-and-extension "
+                 "reassembly; ignoring it.")
 
     if using_reads:
         if args.trim_polyg:
@@ -3567,7 +4137,7 @@ def main(argv=None):
             which_or_die("megahit")
     if args.reassemble_bins or not reuse_prodigal:
         which_or_die("prodigal")
-    if args.reassemble_bins or not reuse_diamond:
+    if needs_db_prelim or needs_db_final:
         which_or_die("diamond")
         require_diamond_taxonomy_fields()
     if not args.skip_quast and shutil.which("quast.py") is None:
@@ -3627,12 +4197,18 @@ def main(argv=None):
     )
     refinement_steps = 1 if refinement_enabled else 0
     binarena_steps = 0 if args.skip_binarena else 1
+    report_steps = 0 if args.skip_report else 1
+    # Inheriting taxonomy replaces the final DIAMOND pass and the final classification
+    # pass with a single inheritance step.
+    inherit_taxonomy = args.reassemble_bins and args.inherit_reassembly_taxonomy
+    inherit_savings = 1 if inherit_taxonomy else 0
     # Fixed steps: 4 preliminary (Prodigal, DIAMOND, classify, bin) plus, when
     # seed-and-extension runs, 7 more (reassembly, consolidation, final Prodigal, final
     # DIAMOND, final classification, final bins, quality assessment); otherwise 1 more
     # (quality assessment). Refinement and BinaRena staging add one step each.
     steps = StepCounter(
-        n_qc_steps + (11 if args.reassemble_bins else 5) + refinement_steps + binarena_steps
+        n_qc_steps + (11 if args.reassemble_bins else 5) + refinement_steps
+        + binarena_steps + report_steps - inherit_savings
     )
 
     # 0a/0b/0c. Poly-G may prepare reads in either read mode; QC+MEGAHIT are reads-only.
@@ -3713,6 +4289,28 @@ def main(argv=None):
             args.max_target_seqs,
         )
     hits_by_orf = parse_diamond_hits(hits_tsv)
+    if reuse_diamond:
+        # Reused hits are only meaningful if they came from these same ORFs. A stale table
+        # from a different assembly would otherwise classify silently against nothing.
+        overlap = sum(1 for orf_id in hits_by_orf if orf_id in orf_to_contig)
+        if not hits_by_orf or overlap == 0:
+            log.error(
+                "Reused DIAMOND table %s shares no ORF names with the %d ORFs predicted "
+                "from %s. It was almost certainly produced from a different assembly. "
+                "Delete it and rerun with -d, or point -o at the matching run directory.",
+                hits_tsv, len(orf_to_contig), assembly_fasta,
+            )
+            sys.exit(1)
+        frac = overlap / len(hits_by_orf)
+        if frac < 0.5:
+            log.warning(
+                "Only %d/%d ORFs in the reused DIAMOND table (%.0f%%) match the current "
+                "ORF predictions; results may be based on a partly stale table.",
+                overlap, len(hits_by_orf), 100 * frac,
+            )
+        else:
+            log.info("Reused DIAMOND table matches current ORFs (%d/%d).",
+                     overlap, len(hits_by_orf))
     log.info("Got hits for %d/%d ORFs.", len(hits_by_orf), len(orf_to_contig))
 
     # 3. Preliminary classification and microbial-contig retention
@@ -3776,6 +4374,20 @@ def main(argv=None):
 
     # 5. Default targeted seed-and-extension reassembly, then a complete final pass.
     if args.reassemble_bins:
+        # Everything below re-reads what it needs from disk, and the reassembly stage
+        # shells out to bowtie2, BBDuk, Unicycler/SPAdes and Pilon, each of which wants
+        # many GB. Holding the preliminary DIAMOND hits and the whole preliminary
+        # assembly in this process for the duration is what turns a large metagenome into
+        # an out-of-memory kill, so drop them here. `classifications` is kept because
+        # --inherit-reassembly-taxonomy still needs it.
+        freed = []
+        for name in ("hits_by_orf", "orf_to_contig", "contig_seqs", "contig_metrics"):
+            if name in locals():
+                freed.append(name)
+        del hits_by_orf, orf_to_contig, contig_seqs, contig_metrics
+        gc.collect()
+        log.info("Released preliminary %s before the reassembly stage to free memory.",
+                 ", ".join(freed))
         if args.assembler == "unicycler":
             assembler_label = "Unicycler"
         else:
@@ -3797,7 +4409,7 @@ def main(argv=None):
             args.reassemble_min_bin_contigs, args.reassemble_include_unclassified,
             args.polish, args.unicycler_mode, args.unicycler_extra, args.spades_fallback,
             unicycler_argv, args.reassemble_min_recovered_fraction,
-            seed_excluded_ids=None,
+            seed_excluded_ids=None, resume=args.resume_reassembly,
         )
 
         steps.next(f"Consolidating final assembly from preliminary rank '{final_source_rank}'...")
@@ -3834,31 +4446,55 @@ def main(argv=None):
                 "Final gene-density triage quarantined %d contig(s) before DIAMOND.",
                 len(final_triage_excluded_ids),
             )
-        final_diamond_query_faa = write_candidate_proteins(
-            final_faa, final_orf_to_contig, final_triage_excluded_ids,
-            outdir / "final" / "prodigal" / "proteins.prokaryotic_candidates.faa",
-        )
+        reuse_final = resume_state is not None
+        if reuse_final and resume_state.done("final_prodigal"):
+            log.info("Resume: reusing final Prodigal output %s.", final_faa)
+        if not inherit_taxonomy:
+            final_diamond_query_faa = write_candidate_proteins(
+                final_faa, final_orf_to_contig, final_triage_excluded_ids,
+                outdir / "final" / "prodigal" / "proteins.prokaryotic_candidates.faa",
+            )
         log.info("Final assembly: predicted %d ORFs.", len(final_orf_to_contig))
 
-        steps.next(f"Running final DIAMOND blastp vs {args.diamond_db}...")
-        final_hits_tsv = run_diamond(
-            final_diamond_query_faa, args.diamond_db, outdir / "final" / "diamond", args.threads,
-            args.evalue, args.max_target_seqs,
-        )
-        final_hits_by_orf = parse_diamond_hits(final_hits_tsv)
-        log.info(
-            "Final assembly: got hits for %d/%d ORFs.",
-            len(final_hits_by_orf), len(final_orf_to_contig),
-        )
+        if inherit_taxonomy:
+            # 7a. No database available: take each consolidated contig's lineage from the
+            # preliminary bin it was assembled out of. This cannot notice a contig whose
+            # taxonomy changed during frontier extension -- the compositional refinement
+            # pass below is the only remaining check on that.
+            steps.next(
+                f"Inheriting taxonomy from preliminary '{final_source_rank}' bins "
+                f"(no final DIAMOND pass)..."
+            )
+            provenance = read_contig_provenance(
+                outdir / "final" / "assembly" / "contig_provenance.tsv"
+            )
+            lineages = bin_consensus_lineages(
+                classifications, final_source_rank, internal_ranks,
+            )
+            final_classifications = inherit_classifications(
+                list(final_contig_seqs.keys()), provenance, lineages,
+                final_orf_to_contig, internal_ranks,
+            )
+        else:
+            steps.next(f"Running final DIAMOND blastp vs {args.diamond_db}...")
+            final_hits_tsv = run_diamond(
+                final_diamond_query_faa, args.diamond_db, outdir / "final" / "diamond",
+                args.threads, args.evalue, args.max_target_seqs,
+            )
+            final_hits_by_orf = parse_diamond_hits(final_hits_tsv)
+            log.info(
+                "Final assembly: got hits for %d/%d ORFs.",
+                len(final_hits_by_orf), len(final_orf_to_contig),
+            )
 
-        # 7. Reclassify and reapply the animal/plant filter because frontier extension
-        # can introduce contigs whose taxonomy differs from the preliminary seed bin.
-        steps.next(f"Final contig classification/retention at ranks: {internal_ranks}...")
-        final_classifications = classify_all_contigs(
-            list(final_contig_seqs.keys()), final_orf_to_contig, final_hits_by_orf,
-            internal_ranks, args.bitscore_range, args.max_hits_per_orf,
-            args.min_support, args.support_denominator,
-        )
+            # 7. Reclassify and reapply the animal/plant filter because frontier extension
+            # can introduce contigs whose taxonomy differs from the preliminary seed bin.
+            steps.next(f"Final contig classification/retention at ranks: {internal_ranks}...")
+            final_classifications = classify_all_contigs(
+                list(final_contig_seqs.keys()), final_orf_to_contig, final_hits_by_orf,
+                internal_ranks, args.bitscore_range, args.max_hits_per_orf,
+                args.min_support, args.support_denominator,
+            )
         final_triage_retained = {
             contig_id: result for contig_id, result in final_classifications.items()
             if contig_id not in final_triage_excluded_ids
@@ -4048,6 +4684,10 @@ def main(argv=None):
                 checkm_pplacer_threads=args.checkm_pplacer_threads,
                 checkm_extra=args.checkm_extra,
             )
+
+    if not args.skip_report:
+        steps.next("Writing the HTML report...")
+        write_html_report(outdir, args.report_min_length, args.report_max_points)
 
     log.info("Done. Results in %s", outdir)
 
