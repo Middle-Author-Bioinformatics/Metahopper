@@ -337,10 +337,25 @@ Entries marked [cond] are only created when that condition holds.
   manifest, the reused Prodigal and DIAMOND output is still valid but a warning notes
   that classification will diverge from the earlier bins.
 
-  Runs made before progress recording existed have neither file; detection then falls
-  back to inspecting the output files with the same validators, and the inventory line
-  says so ("from output files"). In that case pass -d, and --trimmomatic-folder if
-  reassembling, explicitly.
+  Runs made before progress recording existed have neither file. Detection then orders
+  the stages by the mtime of the directory each one creates: the most recently touched
+  directory is what the pipeline was writing when it stopped, so that stage is treated
+  as unfinished and restarted from its beginning, everything before it is validated and
+  kept, and everything after it is discarded. This is what an intact-looking output file
+  cannot tell you -- a stale hits.tsv from an older attempt passes every format check
+  but is correctly dropped when its directory predates the interrupted stage.
+
+    Resume: no progress record. Newest output directory is reassembly (modified
+    2026-09-10 19:35), so stage 'reassembly' is treated as unfinished; earlier stages
+    are verified and kept.
+
+  Reassembly is the exception: it resumes per bin rather than from the beginning, since
+  each finished bin is a complete artifact and rebuilding one costs hours.
+
+  Copying or moving a run directory resets mtimes and destroys this ordering, so when
+  all the directory timestamps fall within two seconds of each other the fallback says
+  so and suggests setting the --reuse-* flags by hand. In legacy mode pass -d, and
+  --trimmomatic-folder if reassembling, explicitly.
 
   The equivalent manual form, if you would rather be explicit:
 
@@ -763,13 +778,39 @@ class RunState:
         "final_diamond": (["final/diamond/hits.tsv"], "hits"),
     }
 
+    #: Canonical pipeline order, paired with the directory each stage creates. Used by
+    #: the legacy fallback to work out which stage was in flight when a run without a
+    #: progress record was killed: the most recently touched directory is the one that
+    #: was being written. Entries with no stage of their own still mark position in the
+    #: sequence, so a kill inside them invalidates everything from there on.
+    STAGE_DIRS = [
+        ("polyg", "polyg"),
+        ("qc", "qc"),
+        ("assembly", "megahit"),
+        ("prodigal", "prodigal"),
+        ("diamond", "diamond"),
+        ("classification", "classification"),
+        ("bins", "bins"),
+        ("reassembly", "reassembly"),
+        ("final_assembly", "final/assembly"),
+        ("final_prodigal", "final/prodigal"),
+        ("final_diamond", "final/diamond"),
+        ("final_classification", "final/classification"),
+        ("final_bins", "final/bins"),
+        ("binarena", "binarena"),
+    ]
+
     def __init__(self, outdir: Path, ranks):
         self.outdir = Path(outdir)
         self.ranks = list(ranks)
         self.stages = {}
         self.manifest = {}
         self.progress = read_progress(self.outdir)
-        self.source = "progress record" if self.progress else "output files"
+        self.cut_stage = None          # index of the interrupted stage, legacy runs only
+        self._mtime_spread = 0.0
+        self._n_dirs = 0
+        self.source = ("progress record" if self.progress
+                       else "output files ordered by directory mtime")
         self._detect()
 
     def _add(self, name, status, detail, paths=None):
@@ -796,6 +837,68 @@ class RunState:
     def _paths(self, stage):
         return [self.outdir / r for r in self.EVIDENCE[stage][0]]
 
+    def newest_stage(self):
+        """(stage, dir, mtime) for the most recently touched output directory.
+
+        Directory mtime changes when an entry is added or removed, so the newest
+        directory is the one the pipeline was writing when it stopped. Ties are broken
+        towards the later stage in STAGE_DIRS, which matters because the stage that
+        creates a directory often also touches the previous one in the same second.
+        """
+        found = []
+        for index, (stage, rel) in enumerate(self.STAGE_DIRS):
+            path = self.outdir / rel
+            if path.is_dir():
+                try:
+                    found.append((path.stat().st_mtime, index, stage, path))
+                except OSError:
+                    continue
+        if not found:
+            return None
+        mtime, index, stage, path = max(found, key=lambda item: (item[0], item[1]))
+        self._mtime_spread = max(f[0] for f in found) - min(f[0] for f in found)
+        self._n_dirs = len(found)
+        return stage, path, mtime, index
+
+    def _detect_legacy_by_mtime(self):
+        """Order legacy stages by directory mtime and treat the newest as incomplete.
+
+        Without a progress record there is no way to know a stage finished; an intact
+        output file only shows it got far enough to write one. The newest directory is
+        the best available evidence of what was in flight, so that stage and everything
+        after it is redone, and everything before it is validated and kept.
+        """
+        newest = self.newest_stage()
+        if newest is None:
+            return None
+        stage, path, mtime, cut = newest
+        when = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        log.info("Resume: no progress record. Newest output directory is %s "
+                 "(modified %s), so stage '%s' is treated as unfinished; earlier "
+                 "stages are verified and kept.", path.name, when, stage)
+        if self._n_dirs > 1 and self._mtime_spread < 2.0:
+            log.warning(
+                "Resume: all %d output directories share almost the same timestamp "
+                "(%.1fs apart). The tree was probably copied or moved, which resets "
+                "mtimes, so stage ordering cannot be trusted. Check the inventory below "
+                "and pass the --reuse-*/--resume-reassembly flags yourself if it looks "
+                "wrong.", self._n_dirs, self._mtime_spread,
+            )
+        for index, (name, _rel) in enumerate(self.STAGE_DIRS):
+            if name not in self.EVIDENCE:
+                continue
+            if index >= cut:
+                self._add(name, "absent",
+                          f"at or after the interrupted stage '{stage}'")
+            elif self._validate(name):
+                self._add(name, "complete", "outputs verified (ordered by mtime)",
+                          self._paths(name))
+            elif any(_nonempty(p) for p in self._paths(name)):
+                self._add(name, "partial", "outputs truncated or incomplete")
+            else:
+                self._add(name, "absent", "not run")
+        return cut
+
     def _detect(self):
         manifest_path = self.outdir / "run_manifest.json"
         if _nonempty(manifest_path):
@@ -804,22 +907,27 @@ class RunState:
             except ValueError:
                 self.manifest = {}
 
-        last_recorded = list(self.progress)[-1] if self.progress else None
+        if not self.progress:
+            # Legacy directory: order the stages by directory mtime instead.
+            self.cut_stage = self._detect_legacy_by_mtime()
+            self._detect_bins()
+            self._detect_reassembly()
+            return
+
+        last_recorded = list(self.progress)[-1]
         for stage in self.EVIDENCE:
-            recorded = stage in self.progress
-            if self.progress and not recorded:
+            if stage not in self.progress:
                 # Trust the record: the stage never finished. Do not re-derive from files.
                 self._add(stage, "absent", "not recorded as finished")
                 continue
             # Validate a recorded stage only when it was the last thing recorded (the one
             # a kill could have caught mid-write); earlier stages are taken as given.
-            if recorded and stage != last_recorded:
+            if stage != last_recorded:
                 self._add(stage, "complete", "recorded complete", self._paths(stage))
                 continue
             if self._validate(stage):
-                detail = "recorded complete, outputs verified" if recorded \
-                    else "outputs present and intact (no progress record)"
-                self._add(stage, "complete", detail, self._paths(stage))
+                self._add(stage, "complete", "recorded complete, outputs verified",
+                          self._paths(stage))
             elif any(_nonempty(p) for p in self._paths(stage)):
                 self._add(stage, "partial", "outputs truncated or incomplete")
             else:
@@ -829,6 +937,10 @@ class RunState:
         self._detect_reassembly()
 
     def _detect_bins(self):
+        bins_index = next(i for i, (n, _) in enumerate(self.STAGE_DIRS) if n == "bins")
+        if self.cut_stage is not None and bins_index >= self.cut_stage:
+            self._add("bins", "absent", "at or after the interrupted stage")
+            return
         found = [r for r in self.ranks
                  if complete_text(self.outdir / "bins" / r / "bin_membership.tsv")]
         if found:
