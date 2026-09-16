@@ -319,17 +319,28 @@ Entries marked [cond] are only created when that condition holds.
   Anything explicitly given on the command line wins over what is detected, so
   `--resume -o out -i other_contigs.fasta` uses your contigs.
 
-  Truncation is checked rather than assumed. A process killed mid-write normally leaves
-  a partial final line, so text outputs must end in a newline, hits.tsv's last row must
-  have all its fields, FASTQ tails must still parse as whole 4-line records, and gzipped
-  QC output is fully decompressed to prove the stream is not cut short. A stage whose
-  output fails its check is reported 'partial' and redone instead of trusted. If key
-  parameters (--ranks, --min-support, --max-hits-per-orf) differ from the manifest, the
-  reused Prodigal and DIAMOND output is still valid but a warning notes that
-  classification will diverge from the earlier bins.
+  How it knows where the run stopped: each stage appends a line to run_progress.jsonl
+  when it finishes, recording the stage name, the time, and the size of each output it
+  wrote. --resume reads that record, so completion is a recorded fact rather than
+  something inferred from whichever files happen to be present. A stage with no record
+  did not finish, even if its output file exists, and will be redone.
 
-  Runs made before --resume existed have no manifest; detection still works from the
-  output files, but pass -d (and --trimmomatic-folder, if reassembling) explicitly.
+  The outputs of the most recently recorded stage are re-validated, since that is the
+  one a kill could have caught between writing the file and writing the record: text
+  outputs must end in a newline, hits.tsv's last row must have all its fields, FASTQ
+  tails must still parse as whole 4-line records, and gzipped QC output is fully
+  decompressed to prove the stream is not cut short. Earlier stages are taken as given,
+  because a later record proves they were followed. A half-written final record is
+  ignored. Anything failing validation is reported 'partial' and redone.
+
+  If key parameters (--ranks, --min-support, --max-hits-per-orf) differ from the
+  manifest, the reused Prodigal and DIAMOND output is still valid but a warning notes
+  that classification will diverge from the earlier bins.
+
+  Runs made before progress recording existed have neither file; detection then falls
+  back to inspecting the output files with the same validators, and the inventory line
+  says so ("from output files"). In that case pass -d, and --trimmomatic-folder if
+  reassembling, explicitly.
 
   The equivalent manual form, if you would rather be explicit:
 
@@ -728,126 +739,123 @@ def complete_gzip(path) -> bool:
 
 
 class RunState:
-    """What a previous run left in an output directory, stage by stage.
+    """What a previous run in an output directory completed.
 
-    Detection is purely from files on disk, so it works on runs made by earlier versions
-    of this script. Each stage is 'complete' only if its outputs pass the corresponding
-    truncation check; anything questionable is reported as 'partial' and redone.
+    The progress record written by record_stage() is the primary source: it says what
+    finished, in order, and is not open to interpretation. The outputs of the most
+    recently recorded stage are still validated, because that is the one that could have
+    been truncated by a kill arriving between the write and the record. Directories
+    written before progress recording existed fall back to file detection.
     """
+
+    #: stage -> (outputs relative to outdir, validator). Used to validate a recorded
+    #: stage's outputs, and as the legacy fallback when there is no progress record.
+    EVIDENCE = {
+        "polyg": (["polyg/polyg_trimmed_1.fastq", "polyg/polyg_trimmed_2.fastq"],
+                  "fastq"),
+        "qc": (["qc/notcombined.final_1P.gz", "qc/notcombined.final_2P.gz",
+                "qc/unpaired.fq.gz"], "gzip"),
+        "assembly": (["megahit/final.contigs.fa"], "fasta"),
+        "prodigal": (["prodigal/proteins.faa", "prodigal/genes.gff"], "prodigal"),
+        "diamond": (["diamond/hits.tsv"], "hits"),
+        "final_prodigal": (["final/prodigal/proteins.faa", "final/prodigal/genes.gff"],
+                           "prodigal"),
+        "final_diamond": (["final/diamond/hits.tsv"], "hits"),
+    }
 
     def __init__(self, outdir: Path, ranks):
         self.outdir = Path(outdir)
         self.ranks = list(ranks)
         self.stages = {}
         self.manifest = {}
+        self.progress = read_progress(self.outdir)
+        self.source = "progress record" if self.progress else "output files"
         self._detect()
 
     def _add(self, name, status, detail, paths=None):
         self.stages[name] = {"status": status, "detail": detail, "paths": paths or []}
 
+    def _validate(self, stage) -> bool:
+        """Do this stage's recorded outputs still look intact?"""
+        rel, kind = self.EVIDENCE[stage]
+        paths = [self.outdir / r for r in rel]
+        if not all(_nonempty(p) for p in paths):
+            return False
+        if kind == "fastq":
+            return all(complete_fastq(p) for p in paths)
+        if kind == "gzip":
+            return all(complete_gzip(p) for p in paths)
+        if kind == "fasta":
+            return all(complete_fasta(p) for p in paths)
+        if kind == "prodigal":
+            return complete_fasta(paths[0]) and complete_text(paths[1])
+        if kind == "hits":
+            return complete_tsv(paths[0], len(DIAMOND_FIELDS))
+        return True
+
+    def _paths(self, stage):
+        return [self.outdir / r for r in self.EVIDENCE[stage][0]]
+
     def _detect(self):
-        o = self.outdir
-        manifest_path = o / "run_manifest.json"
+        manifest_path = self.outdir / "run_manifest.json"
         if _nonempty(manifest_path):
             try:
                 self.manifest = json.loads(manifest_path.read_text())
             except ValueError:
                 self.manifest = {}
 
-        # poly-G trimming
-        g1, g2 = o / "polyg" / "polyg_trimmed_1.fastq", o / "polyg" / "polyg_trimmed_2.fastq"
-        if complete_fastq(g1) and complete_fastq(g2):
-            self._add("polyg", "complete", "trimmed read pair present", [g1, g2])
-        elif _nonempty(g1) or _nonempty(g2):
-            self._add("polyg", "partial", "trimmed reads truncated or unpaired")
-        else:
-            self._add("polyg", "absent", "not run")
-
-        # Trimmomatic/FLASH QC
-        qc = o / "qc"
-        q1, q2 = qc / "notcombined.final_1P.gz", qc / "notcombined.final_2P.gz"
-        qu = qc / "unpaired.fq.gz"
-        if all(_nonempty(p) for p in (q1, q2, qu)):
-            if all(complete_gzip(p) for p in (q1, q2, qu)):
-                self._add("qc", "complete", "QC read set intact", [q1, q2, qu])
+        last_recorded = list(self.progress)[-1] if self.progress else None
+        for stage in self.EVIDENCE:
+            recorded = stage in self.progress
+            if self.progress and not recorded:
+                # Trust the record: the stage never finished. Do not re-derive from files.
+                self._add(stage, "absent", "not recorded as finished")
+                continue
+            # Validate a recorded stage only when it was the last thing recorded (the one
+            # a kill could have caught mid-write); earlier stages are taken as given.
+            if recorded and stage != last_recorded:
+                self._add(stage, "complete", "recorded complete", self._paths(stage))
+                continue
+            if self._validate(stage):
+                detail = "recorded complete, outputs verified" if recorded \
+                    else "outputs present and intact (no progress record)"
+                self._add(stage, "complete", detail, self._paths(stage))
+            elif any(_nonempty(p) for p in self._paths(stage)):
+                self._add(stage, "partial", "outputs truncated or incomplete")
             else:
-                self._add("qc", "partial", "a QC gzip stream is truncated")
-        else:
-            self._add("qc", "absent", "not run")
+                self._add(stage, "absent", "not run")
 
-        # MEGAHIT
-        asm = o / "megahit" / "final.contigs.fa"
-        if complete_fasta(asm) and (o / "megahit" / "done").exists():
-            self._add("assembly", "complete", "MEGAHIT finished (done marker present)", [asm])
-        elif complete_fasta(asm):
-            self._add("assembly", "complete", "contigs present (no MEGAHIT done marker)", [asm])
-        elif _nonempty(asm):
-            self._add("assembly", "partial", "final.contigs.fa is truncated")
-        else:
-            self._add("assembly", "absent", "not run")
+        self._detect_bins()
+        self._detect_reassembly()
 
-        # Prodigal
-        faa, gff = o / "prodigal" / "proteins.faa", o / "prodigal" / "genes.gff"
-        if complete_fasta(faa) and complete_text(gff):
-            self._add("prodigal", "complete", "proteins and GFF present", [faa, gff])
-        elif _nonempty(faa) or _nonempty(gff):
-            self._add("prodigal", "partial", "Prodigal output truncated")
-        else:
-            self._add("prodigal", "absent", "not run")
-
-        # DIAMOND
-        hits = o / "diamond" / "hits.tsv"
-        if complete_tsv(hits, len(DIAMOND_FIELDS)):
-            self._add("diamond", "complete", "hit table present", [hits])
-        elif _nonempty(hits):
-            self._add("diamond", "partial", "hits.tsv truncated mid-record")
-        else:
-            self._add("diamond", "absent", "not run")
-
-        # preliminary bins
+    def _detect_bins(self):
         found = [r for r in self.ranks
-                 if complete_text(o / "bins" / r / "bin_membership.tsv")]
+                 if complete_text(self.outdir / "bins" / r / "bin_membership.tsv")]
         if found:
             self._add("bins", "complete", f"bins written at {', '.join(found)}")
         else:
             self._add("bins", "absent", "not run")
 
-        # reassembly, per bin
-        reasm = o / "reassembly"
-        if reasm.is_dir():
-            done, total = 0, 0
-            for rank_dir in sorted(p for p in reasm.iterdir() if p.is_dir()):
-                for bin_dir in sorted(p for p in rank_dir.iterdir() if p.is_dir()):
-                    if bin_dir.name == "competitive_seed":
-                        continue
-                    total += 1
-                    if complete_fasta(bin_dir / "reassembled.fasta"):
-                        done += 1
-            bam = next(reasm.glob("*/competitive_seed/reads_to_all_bins.bam"), None)
-            bam_ok = _nonempty(bam)
-            detail = f"{done} bin(s) reassembled"
-            detail += "; seed mapping reusable" if bam_ok else "; seed mapping missing or empty"
-            self._add("reassembly", "complete" if done and done == total else "partial", detail)
-        else:
+    def _detect_reassembly(self):
+        # Always counted per bin from disk: the stage is inherently resumable part way
+        # through, so "finished" is not a single fact a record could capture.
+        reasm = self.outdir / "reassembly"
+        if not reasm.is_dir():
             self._add("reassembly", "absent", "not run")
-
-        # final pass
-        ffaa = o / "final" / "prodigal" / "proteins.faa"
-        fgff = o / "final" / "prodigal" / "genes.gff"
-        if complete_fasta(ffaa) and complete_text(fgff):
-            self._add("final_prodigal", "complete", "final proteins present", [ffaa, fgff])
-        elif _nonempty(ffaa):
-            self._add("final_prodigal", "partial", "final Prodigal output truncated")
-        else:
-            self._add("final_prodigal", "absent", "not run")
-
-        fhits = o / "final" / "diamond" / "hits.tsv"
-        if complete_tsv(fhits, len(DIAMOND_FIELDS)):
-            self._add("final_diamond", "complete", "final hit table present", [fhits])
-        elif _nonempty(fhits):
-            self._add("final_diamond", "partial", "final hits.tsv truncated mid-record")
-        else:
-            self._add("final_diamond", "absent", "not run")
+            return
+        done = total = 0
+        for rank_dir in sorted(p for p in reasm.iterdir() if p.is_dir()):
+            for bin_dir in sorted(p for p in rank_dir.iterdir() if p.is_dir()):
+                if bin_dir.name == "competitive_seed":
+                    continue
+                total += 1
+                if complete_fasta(bin_dir / "reassembled.fasta"):
+                    done += 1
+        bam = next(reasm.glob("*/competitive_seed/reads_to_all_bins.bam"), None)
+        detail = f"{done} bin(s) reassembled"
+        detail += "; seed mapping reusable" if _nonempty(bam) else \
+                  "; seed mapping missing or empty"
+        self._add("reassembly", "complete" if done and done == total else "partial", detail)
 
     def status(self, name) -> str:
         return self.stages.get(name, {}).get("status", "absent")
@@ -858,12 +866,62 @@ class RunState:
     def log_inventory(self) -> None:
         order = ["polyg", "qc", "assembly", "prodigal", "diamond", "bins",
                  "reassembly", "final_prodigal", "final_diamond"]
-        log.info("Resume: inspected %s", self.outdir)
+        log.info("Resume: inspected %s (from %s)", self.outdir, self.source)
         for name in order:
             st = self.stages.get(name)
-            if not st:
-                continue
-            log.info("  %-15s %-9s %s", name, st["status"], st["detail"])
+            if st:
+                log.info("  %-15s %-9s %s", name, st["status"], st["detail"])
+
+
+PROGRESS_FILE = "run_progress.jsonl"
+
+
+def record_stage(outdir: Path, stage: str, outputs=None, **info) -> None:
+    """Append one line recording that `stage` finished.
+
+    Recording completion is strictly better than inferring it later from the shape of
+    whatever files happen to be lying around: it is unambiguous, it preserves stage
+    order for free because the file is append-only, and the recorded byte counts detect
+    a file that was truncated after the fact. Failing to write the record must never
+    fail a stage that actually succeeded, so errors here are logged and swallowed.
+    """
+    paths = [Path(p) for p in (outputs or [])]
+    row = {
+        "stage": stage,
+        "finished": datetime.now().isoformat(timespec="seconds"),
+        "outputs": [str(p.relative_to(outdir)) if p.is_absolute() and
+                    str(p).startswith(str(outdir)) else str(p) for p in paths],
+        "bytes": {str(p.name): (p.stat().st_size if p.is_file() else None) for p in paths},
+    }
+    row.update(info)
+    try:
+        with open(outdir / PROGRESS_FILE, "a") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+    except OSError as exc:
+        log.warning("Could not record stage '%s' progress (%s).", stage, exc)
+
+
+def read_progress(outdir: Path) -> dict:
+    """{stage: record} for every stage recorded complete, last record per stage winning.
+
+    A partial final line is skipped: the process may have been killed mid-write, and a
+    half-written record is not evidence that its stage finished.
+    """
+    path = outdir / PROGRESS_FILE
+    if not _nonempty(path):
+        return {}
+    done = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue                      # truncated or corrupt final record
+        if isinstance(row, dict) and row.get("stage"):
+            done[row["stage"]] = row
+    return done
 
 
 def write_run_manifest(outdir: Path, args) -> None:
@@ -938,6 +996,67 @@ def apply_resume(args, state: RunState) -> None:
         if state.status(name) == "partial":
             log.warning("Resume: %s output looks truncated (%s); it will be redone.",
                         label, state.stages[name]["detail"])
+
+
+# ----------------------------------------------- shared preliminary/final pass steps
+
+def triage_and_write_candidates(contig_seqs: dict, faa: Path, gff: Path, base_dir: Path,
+                                classification_dir: Path, skip_triage: bool,
+                                label: str) -> tuple:
+    """Gene-density triage plus the candidate-protein FASTA for DIAMOND.
+
+    Shared by the preliminary and final passes, which ran byte-identical copies of this
+    before. `base_dir` is the pass's own directory (the run root, or run/final).
+    """
+    orf_to_contig = parse_orf_to_contig(faa)
+    contig_metrics = compute_contig_metrics(contig_seqs, gff)
+    triage_calls, triage_excluded_ids = triage_contigs(
+        contig_metrics, disabled=skip_triage,
+    )
+    classification_dir.mkdir(parents=True, exist_ok=True)
+    triage_excluded_path = (
+        classification_dir / "excluded_eukaryotic_like_gene_density.fasta"
+    )
+    triage_excluded_path.unlink(missing_ok=True)
+    if triage_excluded_ids:
+        write_fasta(
+            triage_excluded_path,
+            {contig_id: contig_seqs[contig_id] for contig_id in triage_excluded_ids},
+        )
+        log.info("%s gene-density triage quarantined %d long, low-coding-density "
+                 "contig(s) before DIAMOND.", label, len(triage_excluded_ids))
+    diamond_query_faa = write_candidate_proteins(
+        faa, orf_to_contig, triage_excluded_ids,
+        base_dir / "prodigal" / "proteins.prokaryotic_candidates.faa",
+    )
+    log.info("%s: predicted %d ORFs.", label, len(orf_to_contig))
+    return (orf_to_contig, contig_metrics, triage_calls, triage_excluded_ids,
+            diamond_query_faa)
+
+
+def split_and_write_excluded(classifications: dict, contig_seqs: dict,
+                             triage_excluded_ids: set, exclude_kingdoms,
+                             classification_dir: Path, label: str) -> tuple:
+    """Drop triaged contigs, then apply the animal/plant kingdom filter.
+
+    Shared by both passes. Returns (for_binning, excluded_ids).
+    """
+    triage_retained = {
+        contig_id: result for contig_id, result in classifications.items()
+        if contig_id not in triage_excluded_ids
+    }
+    for_binning, excluded_ids = split_excluded_eukaryotes(
+        triage_retained, exclude_kingdoms,
+    )
+    excluded_path = classification_dir / "excluded_animal_plant_contamination.fasta"
+    excluded_path.unlink(missing_ok=True)
+    if excluded_ids:
+        log.info("%s: excluding %d contig(s) classified as %s.",
+                 label, len(excluded_ids), exclude_kingdoms)
+        write_fasta(excluded_path, {
+            cid: contig_seqs[cid] for cid in excluded_ids if cid in contig_seqs
+        })
+    return for_binning, excluded_ids
 
 
 def run_qc(r1: Path, r2: Path, outdir: Path, threads: int,
@@ -3998,6 +4117,11 @@ def main(argv=None):
     if not using_reads and not using_contigs:
         log.error("Provide contigs (-i), paired reads (-1/-2), or both.")
         sys.exit(1)
+    for label, path in (("-i/--input", args.input), ("-1/--r1", args.r1),
+                        ("-2/--r2", args.r2)):
+        if path is not None and not Path(path).is_file():
+            log.error("%s does not exist: %s", label, path)
+            sys.exit(1)
 
     # Seed-and-extension is the default whenever reads are available. Contigs-only
     # mode implicitly disables it unless the user explicitly requested it, which is an
@@ -4221,6 +4345,7 @@ def main(argv=None):
                 r1_in, r2_in, outdir / "polyg", args.threads,
                 poly_g_min_len=args.poly_g_min_len,
             )
+            record_stage(outdir, "polyg", [r1_in, r2_in])
 
         if reads_only:
             if not args.skip_qc:
@@ -4232,6 +4357,7 @@ def main(argv=None):
                     qc_quality=args.qc_quality, qc_minlen=args.qc_minlen,
                     keep_tmp=args.keep_qc_tmp,
                 )
+                record_stage(outdir, "qc", [r1_final, r2_final, u_final])
             else:
                 r1_final, r2_final, u_final = r1_in, r2_in, None
 
@@ -4241,6 +4367,7 @@ def main(argv=None):
                 min_contig_len=args.megahit_min_contig_len, extra_args=args.megahit_extra,
             )
             log.info("MEGAHIT assembly: %s", assembly_fasta)
+            record_stage(outdir, "assembly", [assembly_fasta])
         else:
             log.info(
                 "Using supplied contigs as the initial assembly; reads are reserved for "
@@ -4255,29 +4382,13 @@ def main(argv=None):
     else:
         steps.next("Running preliminary Prodigal...")
         faa, gff = run_prodigal(assembly_fasta, outdir / "prodigal", mode=args.prodigal_mode)
-    orf_to_contig = parse_orf_to_contig(faa)
-    contig_metrics = compute_contig_metrics(contig_seqs, gff)
-    triage_calls, triage_excluded_ids = triage_contigs(
-        contig_metrics, disabled=args.skip_contig_triage,
-    )
+        record_stage(outdir, "prodigal", [faa, gff])
     classification_dir = outdir / "classification"
-    classification_dir.mkdir(parents=True, exist_ok=True)
-    triage_excluded_path = classification_dir / "excluded_eukaryotic_like_gene_density.fasta"
-    triage_excluded_path.unlink(missing_ok=True)
-    if triage_excluded_ids:
-        write_fasta(
-            triage_excluded_path,
-            {contig_id: contig_seqs[contig_id] for contig_id in triage_excluded_ids},
-        )
-        log.info(
-            "Gene-density triage quarantined %d long, low-coding-density contig(s) before DIAMOND.",
-            len(triage_excluded_ids),
-        )
-    diamond_query_faa = write_candidate_proteins(
-        faa, orf_to_contig, triage_excluded_ids,
-        outdir / "prodigal" / "proteins.prokaryotic_candidates.faa",
+    (orf_to_contig, contig_metrics, triage_calls, triage_excluded_ids,
+     diamond_query_faa) = triage_and_write_candidates(
+        contig_seqs, faa, gff, outdir, classification_dir,
+        args.skip_contig_triage, "Preliminary assembly",
     )
-    log.info("Predicted %d ORFs.", len(orf_to_contig))
 
     # 2. Preliminary DIAMOND
     if reuse_diamond:
@@ -4288,6 +4399,7 @@ def main(argv=None):
             diamond_query_faa, args.diamond_db, outdir / "diamond", args.threads, args.evalue,
             args.max_target_seqs,
         )
+        record_stage(outdir, "diamond", [hits_tsv])
     hits_by_orf = parse_diamond_hits(hits_tsv)
     if reuse_diamond:
         # Reused hits are only meaningful if they came from these same ORFs. A stale table
@@ -4326,25 +4438,10 @@ def main(argv=None):
     )
 
     exclude_kingdoms = [k.strip() for k in args.exclude_kingdoms.split(",") if k.strip()]
-    triage_retained = {
-        contig_id: result for contig_id, result in classifications.items()
-        if contig_id not in triage_excluded_ids
-    }
-    classifications_for_binning, excluded_ids = split_excluded_eukaryotes(
-        triage_retained, exclude_kingdoms,
+    classifications_for_binning, excluded_ids = split_and_write_excluded(
+        classifications, contig_seqs, triage_excluded_ids, exclude_kingdoms,
+        classification_dir, "Preliminary pass",
     )
-    preliminary_excluded_path = classification_dir / "excluded_animal_plant_contamination.fasta"
-    preliminary_excluded_path.unlink(missing_ok=True)
-    if excluded_ids:
-        log.info(
-            "Excluding %d contig(s) classified as %s (host-animal/plant contamination).",
-            len(excluded_ids), exclude_kingdoms,
-        )
-        excluded_records = {cid: contig_seqs[cid] for cid in excluded_ids if cid in contig_seqs}
-        write_fasta(
-            preliminary_excluded_path,
-            excluded_records,
-        )
 
     # No pre-expansion GC/coverage refinement: seeds are taken as classified, and all
     # compositional refinement happens once at step 9 on the final assembly.
@@ -4422,39 +4519,15 @@ def main(argv=None):
         final_faa, final_gff = run_prodigal(
             final_assembly_fasta, outdir / "final" / "prodigal", mode=args.prodigal_mode,
         )
+        record_stage(outdir, "final_prodigal", [final_faa, final_gff])
         final_contig_seqs = read_fasta(final_assembly_fasta)
-        final_orf_to_contig = parse_orf_to_contig(final_faa)
-        final_contig_metrics = compute_contig_metrics(final_contig_seqs, final_gff)
-        final_triage_calls, final_triage_excluded_ids = triage_contigs(
-            final_contig_metrics, disabled=args.skip_contig_triage,
-        )
         final_classification_dir = outdir / "final" / "classification"
-        final_classification_dir.mkdir(parents=True, exist_ok=True)
-        final_triage_excluded_path = (
-            final_classification_dir / "excluded_eukaryotic_like_gene_density.fasta"
-        )
-        final_triage_excluded_path.unlink(missing_ok=True)
-        if final_triage_excluded_ids:
-            write_fasta(
-                final_triage_excluded_path,
-                {
-                    contig_id: final_contig_seqs[contig_id]
-                    for contig_id in final_triage_excluded_ids
-                },
+        (final_orf_to_contig, final_contig_metrics, final_triage_calls,
+         final_triage_excluded_ids, final_diamond_query_faa) = \
+            triage_and_write_candidates(
+                final_contig_seqs, final_faa, final_gff, outdir / "final",
+                final_classification_dir, args.skip_contig_triage, "Final assembly",
             )
-            log.info(
-                "Final gene-density triage quarantined %d contig(s) before DIAMOND.",
-                len(final_triage_excluded_ids),
-            )
-        reuse_final = resume_state is not None
-        if reuse_final and resume_state.done("final_prodigal"):
-            log.info("Resume: reusing final Prodigal output %s.", final_faa)
-        if not inherit_taxonomy:
-            final_diamond_query_faa = write_candidate_proteins(
-                final_faa, final_orf_to_contig, final_triage_excluded_ids,
-                outdir / "final" / "prodigal" / "proteins.prokaryotic_candidates.faa",
-            )
-        log.info("Final assembly: predicted %d ORFs.", len(final_orf_to_contig))
 
         if inherit_taxonomy:
             # 7a. No database available: take each consolidated contig's lineage from the
@@ -4481,6 +4554,7 @@ def main(argv=None):
                 final_diamond_query_faa, args.diamond_db, outdir / "final" / "diamond",
                 args.threads, args.evalue, args.max_target_seqs,
             )
+            record_stage(outdir, "final_diamond", [final_hits_tsv])
             final_hits_by_orf = parse_diamond_hits(final_hits_tsv)
             log.info(
                 "Final assembly: got hits for %d/%d ORFs.",
@@ -4495,25 +4569,10 @@ def main(argv=None):
                 internal_ranks, args.bitscore_range, args.max_hits_per_orf,
                 args.min_support, args.support_denominator,
             )
-        final_triage_retained = {
-            contig_id: result for contig_id, result in final_classifications.items()
-            if contig_id not in final_triage_excluded_ids
-        }
-        final_classifications_for_binning, final_excluded_ids = split_excluded_eukaryotes(
-            final_triage_retained, exclude_kingdoms,
+        final_classifications_for_binning, final_excluded_ids = split_and_write_excluded(
+            final_classifications, final_contig_seqs, final_triage_excluded_ids,
+            exclude_kingdoms, final_classification_dir, "Final pass",
         )
-        final_excluded_path = final_classification_dir / "excluded_animal_plant_contamination.fasta"
-        final_excluded_path.unlink(missing_ok=True)
-        if final_excluded_ids:
-            log.info(
-                "Final pass: excluding %d contig(s) classified as %s.",
-                len(final_excluded_ids), exclude_kingdoms,
-            )
-            final_excluded_records = {
-                cid: final_contig_seqs[cid]
-                for cid in final_excluded_ids if cid in final_contig_seqs
-            }
-            write_fasta(final_excluded_path, final_excluded_records)
 
         # 9. The single sequence-compositional refinement pass. Coverage is recomputed by
         # remapping the complete read set to the consolidated assembly rather than reusing
