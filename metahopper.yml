@@ -1,0 +1,41 @@
+name: metahopper
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # Core classification / assembly
+  - prodigal
+  - diamond>=2.1.17
+  - megahit
+
+  # Read QC / preprocessing
+  - trimmomatic
+  - flash2
+  - pigz
+  - fastp
+
+  # Mapping / BAM handling
+  - bowtie2
+  - samtools
+
+  # Seed-and-extension
+  - bbmap
+  - spades
+  - pilon
+
+  # Assembly QC
+  - quast
+
+  # BinaRena feature generation / ordinations
+  - numpy
+  - scipy
+  - scikit-learn
+  - umap-learn
+
+  # Useful runtime utilities
+  - openjdk

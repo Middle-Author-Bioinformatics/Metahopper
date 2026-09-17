@@ -1,0 +1,14 @@
+name: unicycler
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python>=3.10,<3.11
+  - unicycler
+  - spades
+  - bowtie2
+  - samtools
+  - pilon
+  - openjdk
