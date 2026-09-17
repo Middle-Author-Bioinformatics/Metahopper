@@ -352,10 +352,21 @@ Entries marked [cond] are only created when that condition holds.
   Reassembly is the exception: it resumes per bin rather than from the beginning, since
   each finished bin is a complete artifact and rebuilding one costs hours.
 
-  Copying or moving a run directory resets mtimes and destroys this ordering, so when
-  all the directory timestamps fall within two seconds of each other the fallback says
-  so and suggests setting the --reuse-* flags by hand. In legacy mode pass -d, and
-  --trimmomatic-folder if reassembling, explicitly.
+  mtime ordering is a fallback, not a foundation, and it is used exactly once: every
+  stage the fallback judges complete is immediately written into the progress record
+  (tagged "adopted_from"), so the next resume of that directory is record-driven. This
+  matters because a resumed run leaves misleading timestamps -- re-running a late stage
+  bumps its directory while the reused early stages keep their old ones, and rewriting
+  prodigal/proteins.prokaryotic_candidates.faa can make prodigal/ look newer than
+  diamond/, which would otherwise discard an intact multi-hour DIAMOND table.
+
+  Two further limits of directory mtimes, for anyone reading an inventory by hand:
+  copying or moving a run directory resets them (the fallback warns when every
+  timestamp falls within two seconds), and overwriting a file in place does not bump
+  its directory at all -- only adding or removing an entry does. So a stage that rewrote
+  the same filenames can keep an old directory timestamp despite having just run.
+
+  In legacy mode pass -d, and --trimmomatic-folder if reassembling, explicitly.
 
   The equivalent manual form, if you would rather be explicit:
 
@@ -371,10 +382,86 @@ Entries marked [cond] are only created when that condition holds.
   reassembly_summary.tsv, exactly as if they had just been built. Empty or truncated
   files are not treated as reusable. Delete a bin's directory to force it to be redone.
 
-  Memory note: before the reassembly stage the preliminary DIAMOND hit table, ORF map,
-  contig sequences and contig metrics are released, because the stage then shells out to
-  bowtie2, BBDuk and Unicycler/SPAdes, which each want many GB. The hit table alone
-  costs roughly 6 MB of RAM per MB of hits.tsv.
+  Memory
+  ------
+  Peak usage is during preliminary classification, when the hit table, the contig
+  sequences, the per-contig metrics and the classifications are all live at once.
+  Measured costs, which scale linearly with input size:
+
+    hits.tsv          ~1.6 MB of RAM per MB of file
+    contig sequences  ~1.0 MB of RAM per MB of assembly FASTA
+    contig metrics    ~0.36 kB per contig
+    classifications   ~0.30 kB per contig
+
+  So a 1.2 GB assembly of 1.5 M contigs with a 564 MB hit table peaks near 3 GB before
+  the external tools are launched. Identical lineages are shared between hits rather
+  than rebuilt per hit, which is what keeps the hit table at 1.6 rather than 7.3 MB per
+  MB; a metagenome's hits typically resolve to a few thousand distinct lineages, so the
+  saving is around 4x. Before the reassembly stage the hit table, ORF map, contig
+  sequences and contig metrics are all released, because that stage shells out to
+  bowtie2, BBDuk and Unicycler/SPAdes, which each want many GB of their own.
+
+  Processes and threads
+  ---------------------
+  The reassembly stage is where the process count comes from, because its work is
+  per bin and per extension round rather than one big job:
+
+    per rank  : 3 spawns   (bowtie2-build, bowtie2, samtools -- the seed mapping)
+    per bin   : 22 spawns  (seed extraction, QC, Unicycler/SPAdes, Pilon)
+    per round : 14 spawns  (BBDuk bait scan, extraction, full QC, frontier baits)
+
+  So 10 bins at the default 5 rounds is roughly 3 + 10*(22 + 5*14) = 923 process
+  launches from this script. Everything is bounded -- rounds by
+  --reassemble-max-rounds and bins by the bin count -- so the number cannot run away.
+
+  What the scheduler counts is larger, because -t is passed to every one of those
+  tools: at -t 24 that is ~22,000 thread-equivalents over the stage, and the assemblers
+  spawn more internally (Unicycler runs SPAdes once per k-mer value; JVM tools add GC
+  and JIT threads on top of their worker threads). If an administrator reports tens of
+  thousands of processes, it is almost certainly this cumulative count over the whole
+  run rather than a concurrent one -- concurrently the script runs one external tool at
+  a time.
+
+  --reassemble-threads caps the per-bin tools (default min(-t, 8)) while leaving the
+  competitive seed mapping at the full -t, since that single mapping genuinely benefits
+  from the cores whereas a round's QC of a small read batch does not. At -t 24 this
+  takes the stage from ~22,000 thread-equivalents to ~7,400.
+
+  The competitive seed mapping is the single largest memory consumer in the pipeline,
+  because bowtie2 runs with -k 20 against every seed bin at once and the resulting SAM
+  is proportional to (reads x 20). That stream is parsed line by line and never
+  buffered. Reading it with capture_output=True, as earlier versions did, held the
+  whole thing in memory as one string and then doubled it with .splitlines(): for a
+  56 M read-pair library that is tens of GB, spent before a single contig is
+  reassembled, and it is the likeliest reason a run appears to die immediately after
+  "reusing the existing competitive seed mapping". Lower --reassemble-seed-score-min or
+  raise --reassemble-min-read-identity to admit fewer alignments if it is still large.
+
+  Resource safety
+  ---------------
+  Defaults are deliberately small, so an unqualified invocation is safe to start on a
+  shared machine: -t 1, --reassemble-memory-gb 8, --reassemble-bbtools-memory 4g. Raise
+  them once you know what the machine can spare. Earlier versions defaulted to 8
+  threads, a 32 GB assembler cap and a 16 GB JVM heap, which is not a reasonable thing
+  to take without asking.
+
+  Available memory is still detected -- MemTotal/MemAvailable from /proc/meminfo,
+  overridden by a cgroup limit when one is lower, which is what applies inside a
+  container or a scheduler job -- but it is now only used to keep the caps honest. A
+  default that does not fit is reduced; an explicit --reassemble-memory-gb larger than
+  available is warned about and left alone, since the user may know something this
+  check does not.
+
+  poly-G output is written gzipped. It used to be plain FASTQ, which on a large library
+  is tens of GB of avoidable disk; a full filesystem is its own kind of outage. Runs
+  made by the older version keep working -- both layouts are detected and reused.
+
+  If a run is still killed for memory, in order of effect: lower --reassemble-memory-gb
+  (default 32) and --reassemble-bbtools-memory (default 16g), which cap the external
+  assemblers; lower --max-target-seqs (default 25), which shrinks hits.tsv itself and
+  therefore the largest in-memory structure; raise --megahit-min-contig-len to carry
+  fewer short contigs through every stage; and lower -t, which reduces bowtie2 and
+  samtools overhead.
 
   With --inherit-reassembly-taxonomy, final/diamond/ is absent and every final/ taxonomy
   column is a label inherited from the preliminary bin the contig was assembled out of,
@@ -496,6 +583,84 @@ class StepCounter:
         self.i += 1
         log.info("Step %d/%d: %s", self.i, self.total, label)
 
+
+#: Conservative defaults: one core and an 8 GB assembler budget. A pipeline that grabs
+#: most of a shared server by default is antisocial, and every one of these can be
+#: raised explicitly once you know what the machine can spare.
+DEFAULT_THREADS = 1
+DEFAULT_MEMORY_GB = 8
+DEFAULT_BBTOOLS_MEMORY = "4g"
+
+
+def detect_memory_gb() -> tuple:
+    """(total_gb, available_gb, source) for this machine or cgroup.
+
+    A pipeline that unconditionally asks an assembler for 32 GB and a JVM for a 16 GB
+    heap can take down a shared server regardless of how careful the rest of it is, so
+    the defaults are derived from what is actually present rather than hard-coded.
+    cgroup limits win when they are lower than the host's RAM, which is what matters
+    inside a container or a scheduler-managed job.
+    """
+    total = available = None
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            info[key] = int(rest.split()[0]) / (1024 * 1024)      # kB -> GB
+        total = info.get("MemTotal")
+        available = info.get("MemAvailable", total)
+    except (OSError, ValueError, IndexError):
+        pass
+    source = "/proc/meminfo"
+    for cg in ("/sys/fs/cgroup/memory.max",
+               "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(cg).read_text().strip()
+            if raw and raw != "max":
+                limit = int(raw) / (1024 ** 3)
+                if limit > 0 and (total is None or limit < total):
+                    total = limit
+                    available = min(available or limit, limit)
+                    source = cg
+        except (OSError, ValueError):
+            continue
+    if total is None:
+        return None, None, "unknown"
+    return total, available if available is not None else total, source
+
+
+def resolve_memory_budget(args) -> None:
+    """Report the machine's memory and keep the requested caps inside it.
+
+    The defaults are deliberately small. They are lowered further, but never raised,
+    when the machine or cgroup has less than the default available; an explicit request
+    that exceeds what is there is warned about rather than quietly changed, because the
+    user may know something this check does not.
+    """
+    total, available, source = detect_memory_gb()
+    if total is None:
+        log.warning("Could not detect system memory; using --reassemble-memory-gb %s "
+                    "and --reassemble-bbtools-memory %s as given.",
+                    args.reassemble_memory_gb, args.reassemble_bbtools_memory)
+        return
+    log.info("Memory: %.1f GB total, %.1f GB available (%s). Threads: %d.",
+             total, available, source, args.threads)
+
+    explicit = args.reassemble_memory_gb != DEFAULT_MEMORY_GB
+    if args.reassemble_memory_gb > available:
+        if explicit:
+            log.warning("--reassemble-memory-gb %d exceeds the %.0f GB available. The "
+                        "assembler may be OOM-killed, or take the machine down with it.",
+                        args.reassemble_memory_gb, available)
+        else:
+            args.reassemble_memory_gb = max(2, int(available * 0.5))
+            log.info("Memory: only %.1f GB available, so the assembler cap is reduced "
+                     "from %d to %d GB.", available, DEFAULT_MEMORY_GB,
+                     args.reassemble_memory_gb)
+            if args.reassemble_bbtools_memory == DEFAULT_BBTOOLS_MEMORY:
+                args.reassemble_bbtools_memory = f"{max(1, args.reassemble_memory_gb // 2)}g"
+                log.info("Memory: BBDuk heap reduced to %s.",
+                         args.reassemble_bbtools_memory)
 
 def which_or_die(tool: str) -> str:
     path = shutil.which(tool)
@@ -640,8 +805,16 @@ def trim_poly_g(r1: Path, r2: Path, outdir: Path, threads: int,
     what Trimmomatic + FLASH already do downstream.
     """
     outdir.mkdir(parents=True, exist_ok=True)
-    out1 = outdir / "polyg_trimmed_1.fastq"
-    out2 = outdir / "polyg_trimmed_2.fastq"
+    # fastp compresses when the output name ends in .gz. Writing plain FASTQ here cost
+    # ~4x the disk for no benefit -- on a large library that is tens of GB, and filling
+    # a shared filesystem is its own kind of outage.
+    out1 = outdir / "polyg_trimmed_1.fastq.gz"
+    out2 = outdir / "polyg_trimmed_2.fastq.gz"
+    legacy1 = outdir / "polyg_trimmed_1.fastq"
+    legacy2 = outdir / "polyg_trimmed_2.fastq"
+    if legacy1.is_file() and legacy2.is_file() and not out1.is_file():
+        log.info("Reusing uncompressed poly-G output from an earlier version.")
+        return legacy1, legacy2
     log_file = outdir / "fastp_polyg.log"
     cmd = [
         fastp_cmd, "-i", str(r1), "-I", str(r2), "-o", str(out1), "-O", str(out2),
@@ -766,7 +939,8 @@ class RunState:
     #: stage -> (outputs relative to outdir, validator). Used to validate a recorded
     #: stage's outputs, and as the legacy fallback when there is no progress record.
     EVIDENCE = {
-        "polyg": (["polyg/polyg_trimmed_1.fastq", "polyg/polyg_trimmed_2.fastq"],
+        # .gz since the disk fix; plain .fastq is still accepted for older runs.
+        "polyg": (["polyg/polyg_trimmed_1.fastq.gz", "polyg/polyg_trimmed_2.fastq.gz"],
                   "fastq"),
         "qc": (["qc/notcombined.final_1P.gz", "qc/notcombined.final_2P.gz",
                 "qc/unpaired.fq.gz"], "gzip"),
@@ -818,12 +992,15 @@ class RunState:
 
     def _validate(self, stage) -> bool:
         """Do this stage's recorded outputs still look intact?"""
-        rel, kind = self.EVIDENCE[stage]
-        paths = [self.outdir / r for r in rel]
+        _rel, kind = self.EVIDENCE[stage]
+        paths = self._paths(stage)          # resolves the legacy poly-G layout too
         if not all(_nonempty(p) for p in paths):
             return False
         if kind == "fastq":
-            return all(complete_fastq(p) for p in paths)
+            # poly-G output is gzipped now and was plain text before; a gzip tail is
+            # binary, so the text-level record check only applies to the old layout.
+            return all(complete_gzip(p) if str(p).endswith(".gz") else complete_fastq(p)
+                       for p in paths)
         if kind == "gzip":
             return all(complete_gzip(p) for p in paths)
         if kind == "fasta":
@@ -835,7 +1012,12 @@ class RunState:
         return True
 
     def _paths(self, stage):
-        return [self.outdir / r for r in self.EVIDENCE[stage][0]]
+        paths = [self.outdir / r for r in self.EVIDENCE[stage][0]]
+        if stage == "polyg" and not all(_nonempty(p) for p in paths):
+            legacy = [Path(str(p)[:-3]) for p in paths]      # drop .gz
+            if all(_nonempty(p) for p in legacy):
+                return legacy
+        return paths
 
     def newest_stage(self):
         """(stage, dir, mtime) for the most recently touched output directory.
@@ -1108,6 +1290,23 @@ def apply_resume(args, state: RunState) -> None:
         if state.status(name) == "partial":
             log.warning("Resume: %s output looks truncated (%s); it will be redone.",
                         label, state.stages[name]["detail"])
+
+    # Adopt what was detected into the progress record. Stages that resume *reuses* are
+    # never executed, so they would otherwise never be recorded, and a directory that
+    # has been resumed once has mtimes that no longer reflect the original pipeline
+    # order -- re-running a late stage bumps its directory while the reused early ones
+    # keep their old timestamps. Writing the record now makes every later resume
+    # record-driven and removes any further reliance on mtime ordering.
+    adopted = [name for name in state.EVIDENCE
+               if state.done(name) and name not in state.progress]
+    if adopted:
+        for name in adopted:
+            record_stage(args.outdir, name,
+                         [Path(p) for p in state.stages[name]["paths"]],
+                         adopted_from=state.source)
+        log.info("Resume: recorded %d already-complete stage(s) (%s) so future resumes "
+                 "read the progress record instead of directory timestamps.",
+                 len(adopted), ", ".join(adopted))
 
 
 # ----------------------------------------------- shared preliminary/final pass steps
@@ -1475,18 +1674,27 @@ def parse_diamond_hits(hits_tsv: Path) -> dict:
     hits_by_orf = defaultdict(list)
     idx = {f: i for i, f in enumerate(DIAMOND_FIELDS)}
     any_taxonomy = False
+    # A metagenome's millions of hits resolve to only a few thousand distinct lineages,
+    # so building a fresh dict of rank -> taxa tuples per hit wastes most of the memory
+    # this function uses. Cache by the raw taxonomy fields and share one immutable
+    # lineage between every hit that has it; Hit.lineage is only ever read.
+    rank_fields = [(rank, idx[field]) for rank, field in DIAMOND_RANK_FIELDS.items()]
+    lineage_cache = {}
     with open(hits_tsv) as fh:
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if len(f) < len(DIAMOND_FIELDS):
                 continue
-            lineage = {
-                rank: parse_diamond_taxa(f[idx[field]])
-                for rank, field in DIAMOND_RANK_FIELDS.items()
-            }
-            if any(lineage.values()):
+            key = tuple(f[i] for _rank, i in rank_fields)
+            lineage = lineage_cache.get(key)
+            if lineage is None:
+                lineage = {rank: parse_diamond_taxa(f[i]) for rank, i in rank_fields}
+                lineage_cache[key] = lineage
+                if any(lineage.values()):
+                    any_taxonomy = True
+            elif not any_taxonomy and any(lineage.values()):
                 any_taxonomy = True
-            hits_by_orf[f[idx["qseqid"]]].append(Hit(
+            hits_by_orf[sys.intern(f[idx["qseqid"]])].append(Hit(
                 sseqid=f[idx["sseqid"]],
                 pident=float(f[idx["pident"]]),
                 length=int(f[idx["length"]]),
@@ -2913,55 +3121,81 @@ def competitively_assign_templates(bam: Path, ref_to_bin: dict, min_aligned_frac
     Secondary alignments are retained so conserved reads can expose cross-bin competition.
     The best AS score for each mate is summed within each candidate bin. Equal best scores
     across bins are called ambiguous and excluded from every bin.
+
+    The SAM stream is consumed line by line and never buffered. The mapping runs with
+    bowtie2 -k 20 against every seed bin at once, so for a large library this stream is
+    tens of GB; reading it with capture_output=True held all of it as one string and
+    then .splitlines() doubled it, which was enough to exhaust a server's memory before
+    a single contig had been reassembled.
     """
-    proc = subprocess.run(
-        ["samtools", "view", "-@", str(threads), "-F", "2052", str(bam)],
-        capture_output=True, text=True, check=True,
-    )
-    per_template = defaultdict(lambda: defaultdict(dict))
-    for line in proc.stdout.splitlines():
-        f = line.split("\t")
-        if len(f) < 11 or f[2] not in ref_to_bin or f[5] == "*":
-            continue
-        flag = int(f[1])
-        aligned = aligned_bases_from_cigar(f[5])
-        query_len = query_bases_from_cigar(f[5]) or len(f[9])
-        nm = 0
-        alignment_score = None
-        for tag in f[11:]:
-            if tag.startswith("NM:i:"):
-                nm = int(tag.split(":", 2)[2])
-            elif tag.startswith("AS:i:"):
-                alignment_score = int(tag.split(":", 2)[2])
-        if not query_len or not aligned or alignment_score is None:
-            continue
-        if aligned / query_len < min_aligned_fraction:
-            continue
-        if (aligned - nm) / aligned < min_identity:
-            continue
-        mate = 1 if flag & 64 else (2 if flag & 128 else 0)
-        bin_name = ref_to_bin[f[2]]
-        prior = per_template[f[0]][bin_name].get(mate)
-        if prior is None or alignment_score > prior:
-            per_template[f[0]][bin_name][mate] = alignment_score
+    cmd = ["samtools", "view", "-@", str(threads), "-F", "2052", str(bam)]
+    log.info("Running: %s", " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1024 * 1024)
+    intern = sys.intern
+    per_template = {}
+    n_records = 0
+    try:
+        for line in proc.stdout:
+            f = line.split("\t")
+            if len(f) < 11 or f[5] == "*":
+                continue
+            bin_name = ref_to_bin.get(f[2])
+            if bin_name is None:
+                continue
+            aligned = aligned_bases_from_cigar(f[5])
+            query_len = query_bases_from_cigar(f[5]) or len(f[9])
+            nm = 0
+            alignment_score = None
+            for tag in f[11:]:
+                if tag.startswith("NM:i:"):
+                    nm = int(tag.split(":", 2)[2])
+                elif tag.startswith("AS:i:"):
+                    alignment_score = int(tag.split(":", 2)[2])
+            if not query_len or not aligned or alignment_score is None:
+                continue
+            if aligned / query_len < min_aligned_fraction:
+                continue
+            if (aligned - nm) / aligned < min_identity:
+                continue
+            n_records += 1
+            mate = 1 if int(f[1]) & 64 else (2 if int(f[1]) & 128 else 0)
+            # Flat dict keyed by (bin, mate) rather than a dict of dicts of dicts: one
+            # small dict per template instead of three nested ones, which matters when
+            # there are tens of millions of templates.
+            key = intern(f[0])
+            slot = per_template.get(key)
+            if slot is None:
+                per_template[key] = {(bin_name, mate): alignment_score}
+            else:
+                prior = slot.get((bin_name, mate))
+                if prior is None or alignment_score > prior:
+                    slot[(bin_name, mate)] = alignment_score
+            if n_records % 20_000_000 == 0:
+                log.info("  competitive mapping: %d M alignments parsed, %d M templates "
+                         "so far...", n_records // 1_000_000, len(per_template) // 1_000_000)
+        stderr = proc.stderr.read()
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
+    if proc.wait() != 0:
+        raise RuntimeError(f"samtools view failed ({proc.returncode}): {stderr[-2000:]}")
 
     assignments = defaultdict(set)
     ambiguous = 0
-    for template, bin_mates in per_template.items():
-        scores = {
-            bin_name: sum(mate_scores.values())
-            for bin_name, mate_scores in bin_mates.items()
-        }
-        if not scores:
-            continue
+    for template, slots in per_template.items():
+        scores = defaultdict(int)
+        for (bin_name, _mate), score in slots.items():
+            scores[bin_name] += score
         best_score = max(scores.values())
-        winners = [bin_name for bin_name, score in scores.items() if score == best_score]
+        winners = [b for b, sc in scores.items() if sc == best_score]
         if len(winners) != 1:
             ambiguous += 1
             continue
         assignments[winners[0]].add(template)
-    return {bin_name: names for bin_name, names in assignments.items()}, len(per_template), ambiguous
-
+    n_templates = len(per_template)
+    per_template.clear()                      # release before the caller builds its sets
+    return ({b: names for b, names in assignments.items()}, n_templates, ambiguous)
 
 def recruit_read_names(bam: Path, min_aligned_fraction: float, min_identity: float, threads: int) -> set:
     """Primary, mapped (not secondary/supplementary) alignments only (-F 2308), filtered by
@@ -3479,7 +3713,8 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                         polish: bool, unicycler_mode: str, unicycler_extra: str = None,
                         spades_fallback: bool = True, unicycler_argv=None,
                         min_recovered_fraction: float = 0.5,
-                        seed_excluded_ids: set = None, resume: bool = False) -> dict:
+                        seed_excluded_ids: set = None, resume: bool = False,
+                        bin_threads: int = None) -> dict:
     """Drives reassemble_one_bin() over every bin FASTA at each rank in `ranks`, and writes
     a before/after comparison table (contig count, N50, total length) per rank.
 
@@ -3565,7 +3800,7 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                         bin_fasta, bin_name, r, r1_raw, r2_raw, competitive_bam,
                         assignments.get(bin_name, set()),
                         all_seed_assigned - assignments.get(bin_name, set()),
-                        outdir, threads, trimmomatic_folder,
+                        outdir, bin_threads or threads, trimmomatic_folder,
                         qc_quality, qc_minlen, flash_max_overlap, max_rounds, word_size,
                         min_word_hits, bait_min_entropy, max_round_growth,
                         max_accepted_fraction, min_new_templates, min_growth,
@@ -3888,7 +4123,10 @@ def parse_args(argv=None):
                          "seed-and-extension run additionally needs "
                          "--inherit-reassembly-taxonomy.")
     p.add_argument("-o", "--outdir", required=True, type=Path, help="Output directory")
-    p.add_argument("-t", "--threads", type=int, default=8)
+    p.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS,
+                    help=f"Threads for every stage (default {DEFAULT_THREADS}). Raise this "
+                         "to match what the machine can spare; it is passed through to "
+                         "MEGAHIT, DIAMOND, bowtie2, samtools and the assemblers.")
     p.add_argument("--skip-qc", action="store_true",
                     help="Feed -1/-2 straight to MEGAHIT, skipping the Trimmomatic/FLASH QC step "
                          "(--trim-polyg, if given, still runs).")
@@ -4063,6 +4301,14 @@ def parse_args(argv=None):
                          "and poly-G trimmed reads back in so QC and MEGAHIT are skipped, and "
                          "recovers -1/-2/-d from run_manifest.json when they are not repeated. "
                          "Outputs that look truncated are redone rather than trusted.")
+    rb.add_argument("--reassemble-threads", type=int, default=None,
+                     help="Threads for the per-bin work inside the reassembly stage "
+                          "(recruitment QC, BBDuk, Unicycler/SPAdes, Pilon). Defaults to "
+                          "min(-t, 8). The competitive seed mapping still uses the full "
+                          "-t because it is one large job, whereas each bin's rounds "
+                          "process small read batches where 24 threads per tool is pure "
+                          "overhead and multiplies the process/thread count the "
+                          "scheduler sees.")
     rb.add_argument("--resume-reassembly", action="store_true",
                      help="Reuse finished reassembly work under <outdir>/reassembly: skip any "
                           "bin that already has a non-empty reassembled.fasta, and reuse an "
@@ -4107,8 +4353,9 @@ def parse_args(argv=None):
     rb.add_argument("--reassemble-min-growth", type=float, default=0.0001,
                      help="Stop extension once round-over-round growth falls below this fraction "
                           "(default 0.0001).")
-    rb.add_argument("--reassemble-bbtools-memory", default="16g",
-                     help="Java heap for BBDuk during frontier extension, e.g. 16g (default 16g).")
+    rb.add_argument("--reassemble-bbtools-memory", default=DEFAULT_BBTOOLS_MEMORY,
+                     help=f"Java heap for BBDuk during frontier extension, e.g. 16g "
+                          f"(default {DEFAULT_BBTOOLS_MEMORY}).")
     rb.add_argument("--assembler", choices=["unicycler", "spades"], default="unicycler",
                      help="Assembler for each bin's expanded read pool. 'unicycler' "
                           "(default) sweeps SPAdes k-mers, bridges the graph and attempts "
@@ -4139,8 +4386,10 @@ def parse_args(argv=None):
                      help="spades.py mode used by --assembler spades and by the Unicycler "
                           "fallback: 'meta' (metaSPAdes, default -- more forgiving of "
                           "residual strain heterogeneity/uneven coverage) or 'standard'.")
-    rb.add_argument("--reassemble-memory-gb", type=int, default=32,
-                     help="SPAdes memory limit in GB for each bin's reassembly (default 32).")
+    rb.add_argument("--reassemble-memory-gb", type=int, default=DEFAULT_MEMORY_GB,
+                     help=f"SPAdes memory limit in GB for each bin's reassembly (default "
+                          f"{DEFAULT_MEMORY_GB}). Reduced automatically if the machine has "
+                          "less than this available.")
     rb.add_argument("--reassemble-min-recovered-fraction", type=float, default=0.5,
                      help="Reject a bin's reassembly, and keep its original contigs in "
                           "the consolidated assembly, when the reassembly retains less "
@@ -4220,6 +4469,8 @@ def main(argv=None):
         apply_resume(args, resume_state)
     else:
         resume_state = None
+
+    resolve_memory_budget(args)
 
     using_reads = args.r1 is not None or args.r2 is not None
     using_contigs = args.input is not None
@@ -4601,6 +4852,11 @@ def main(argv=None):
             assembler_label = "Unicycler"
         else:
             assembler_label = "metaSPAdes" if args.reassemble_mode == "meta" else "SPAdes"
+        bin_threads = args.reassemble_threads or min(args.threads, 8)
+        if bin_threads != args.threads:
+            log.info("Reassembly: per-bin tools will use %d thread(s) (competitive seed "
+                     "mapping still uses %d). Override with --reassemble-threads.",
+                     bin_threads, args.threads)
         steps.next(f"Targeted bin reassembly at ranks {reassemble_ranks} "
                    f"(competitive seed-and-extend + focused {assembler_label}"
                    f"{' + Pilon' if args.polish else ''})...")
@@ -4619,6 +4875,7 @@ def main(argv=None):
             args.polish, args.unicycler_mode, args.unicycler_extra, args.spades_fallback,
             unicycler_argv, args.reassemble_min_recovered_fraction,
             seed_excluded_ids=None, resume=args.resume_reassembly,
+            bin_threads=bin_threads,
         )
 
         steps.next(f"Consolidating final assembly from preliminary rank '{final_source_rank}'...")
