@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MetaHopper 5 — audited targeted assembly and binning.
+"""MetaHopper 6 — audited targeted assembly and binning.
 
 Quick start (paired reads with an existing assembly):
   python MetaHopper.py -i contigs.fasta -1 R1.fq.gz -2 R2.fq.gz \
@@ -12,6 +12,8 @@ Main controls:
   --polish                    opt-in Pilon, after initial candidate acceptance
   --plots pca|all|off          default pca
   --target-bins A,B            optional subset of source-rank bin filenames/stems
+  --inspect endosymbionts|all|off  default endosymbionts; coverage and terminal junction checks
+  --references DIRECTORY      optional within-group reference-genome phylogenies
   --help-all                  advanced options and legacy aliases
 
 Reassembly requires minimap2 to verify original-sequence retention. Default gates:
@@ -826,7 +828,8 @@ def write_run_manifest(outdir: Path, args) -> None:
             "mode", "expansion_mode", "reassemble_bins", "reassemble_max_rounds", "polish",
             "skip_checkm", "skip_quast", "skip_preliminary_assessment", "skip_binarena",
             "skip_bin_refinement", "skip_qc", "binarena_methods", "assembler", "target_bins",
-            "bin_minutes", "reassemble_min_recovered_fraction", "min_bin_length", "ranks")},
+            "bin_minutes", "reassemble_min_recovered_fraction", "min_bin_length", "ranks", "inspect")},
+        "inspection_references": str(args.references.resolve()) if args.references else None,
     }
     try:
         outdir.mkdir(parents=True, exist_ok=True)
@@ -841,6 +844,8 @@ def apply_resume(args, state: RunState) -> None:
     state.log_inventory()
     m = state.manifest
 
+    if args.references is None and args.inspect != "off" and m.get("inspection_references"):
+        args.references = Path(m["inspection_references"])
     for key, value in m.get("workflow", {}).items():
         if hasattr(args, key) and key not in getattr(args, "_provided_dests", set()):
             setattr(args, key, value)
@@ -4114,7 +4119,7 @@ def build_consolidated_final_assembly(outdir: Path, source_rank: str,
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="MetaHopper 5: classify and bin contigs; with reads, run guarded seed-only reassembly. "
+        description="MetaHopper 6: classify and bin contigs; with reads, run guarded seed-only reassembly. "
                     "Keep metahopper_report.py beside this script. Reassembly requires minimap2. "
                     "Use --help-all for advanced/legacy flags.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -4479,6 +4484,10 @@ def parse_args(argv=None):
                         help="Initial whole-library QC (default on); recruited pools are always cleaned.")
     simple.add_argument("--target-bins", default=None,
                         help="Comma-separated source-rank bin names to improve; other bins are retained.")
+    simple.add_argument("--inspect", choices=["endosymbionts", "all", "off"], default="endosymbionts",
+                        help="Coverage/junction inspection (default endosymbionts).")
+    simple.add_argument("--references", type=Path, default=None,
+                        help="Reference genomes in genus subfolders for optional protein trees.")
     simple.add_argument("--help-all", action="store_true", help="Show advanced and legacy options.")
     tokens = list(sys.argv[1:] if argv is None else argv)
     if "--help-all" in tokens:
@@ -4486,7 +4495,7 @@ def parse_args(argv=None):
         p.exit()
     visible = {"help", "input", "r1", "r2", "diamond_db", "outdir", "threads",
                "trimmomatic_folder", "mode", "rounds", "assessment", "polish", "plots",
-               "qc", "target_bins", "help_all", "resume", "ranks", "assembler"}
+               "qc", "target_bins", "help_all", "resume", "ranks", "assembler", "inspect", "references"}
     for action in p._actions:
         if action.dest not in visible or any(opt.startswith("--skip-") for opt in action.option_strings):
             action.help = argparse.SUPPRESS
@@ -4524,6 +4533,10 @@ def parse_args(argv=None):
         p.error("Threads must be positive")
     if args.reassemble_include_unclassified:
         p.error("Reassembling the mixed Unclassified catch-all is no longer supported.")
+    if args.references and not args.references.is_dir():
+        p.error("--references must be an existing directory")
+    if args.references and args.inspect == "off":
+        p.error("--references requires inspection; omit --inspect off")
     args._provided_dests = {action.dest for action in p._actions
                             if present.intersection(action.option_strings)}
     for flag, destinations in {
@@ -4558,6 +4571,9 @@ def parse_anchor_specs(specs) -> dict:
 def main(argv=None):
     args = parse_args(argv)
     setup_logging(args.verbose)
+    if args.inspect != "off" and not (Path(__file__).resolve().parent / "metahopper_inspect.py").is_file():
+        log.error("Keep metahopper_inspect.py beside MetaHopper.py, or use --inspect off.")
+        sys.exit(1)
 
     if args.resume:
         if not args.outdir.is_dir():
@@ -5253,6 +5269,30 @@ def main(argv=None):
                 checkm_pplacer_threads=args.checkm_pplacer_threads,
                 checkm_extra=args.checkm_extra,
             )
+
+    if args.inspect != "off":
+        log.info("Inspecting coverage, terminal junctions, and endosymbiont candidates...")
+        try:
+            import importlib.util
+            helper = Path(__file__).resolve().parent / "metahopper_inspect.py"
+            spec = importlib.util.spec_from_file_location("metahopper_inspect", helper)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            inspection = module.inspect_run(
+                outdir, mode=args.inspect, references=args.references, threads=args.threads,
+                rank=final_source_rank if args.reassemble_bins else refinement_rank,
+                assembly=final_assembly_fasta if args.reassemble_bins else assembly_fasta,
+                r1=r1_in if using_reads else None, r2=r2_in if using_reads else None,
+                assembly_sequences=final_contig_seqs if args.reassemble_bins else contig_seqs)
+            for issue in inspection["errors"]:
+                log.warning("Inspection: %s", issue)
+            for tree in inspection["trees"]:
+                log.info("Reference tree %s: %s %s", tree["group"], tree["status"], tree.get("reason", ""))
+        except (RuntimeError, ValueError, OSError) as exc:
+            log.warning("Inspection could not complete: %s. Assembly/bin outputs are retained.", exc)
+            inspection_dir = outdir / "inspection"
+            inspection_dir.mkdir(exist_ok=True)
+            (inspection_dir / "inspection.json").write_text(json.dumps({"errors": [str(exc)]}))
 
     if not args.skip_report:
         steps.next("Writing the HTML report...")

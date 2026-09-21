@@ -61,6 +61,8 @@ import csv
 import gzip
 import html
 import json
+import math
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -235,7 +237,7 @@ def collect_bins(layout: RunLayout, compute_missing: bool):
     for rank in layout.ranks():
         rank_dir = layout.bins_dir / rank
         summary = {r.get("bin"): r for r in read_tsv(rank_dir / "summary.tsv")}
-        reassembly = {r.get("bin"): r for r in read_tsv(rank_dir / "reassembly_summary.tsv")}
+        reassembly = {r.get("bin"): r for r in read_tsv(layout.root / "bins" / rank / "reassembly_summary.tsv")}
         for fasta in sorted(rank_dir.glob("*.fasta")):
             name = fasta.stem
             record = {
@@ -557,6 +559,8 @@ border-radius:7px;font-size:.78rem;display:none;z-index:9;max-width:320px;line-h
 <div class="tabs" id="tabs"></div>
 <div id="pane-overview" class="pane on">__OVERVIEW__</div>
 <div id="pane-bins" class="pane">__BINS__</div>
+<div id="pane-expansion" class="pane">__EXPANSION__</div>
+<div id="pane-inspection" class="pane">__INSPECTION__</div>
 <div id="pane-binarena" class="pane">__BINARENA__</div>
 <div id="pane-files" class="pane">__FILES__</div>
 </div>
@@ -1193,9 +1197,7 @@ def render_overview(layout: RunLayout, bin_rows, ranks, scatter, provenance_coun
                    '<th>contigs</th></tr></thead><tbody>')
         for (bin_name, source_type), count in sorted(
                 provenance_counts.items(), key=lambda kv: -kv[1]):
-            pill = ('<span class="pill ok">reassembled</span>'
-                    if source_type == "reassembled"
-                    else '<span class="pill no">original</span>')
+            pill = f'<span class="pill">{esc(source_type)}</span>' 
             out.append("<tr>" + cell(bin_name, klass="l")
                        + f'<td class="l" data-v="{esc(source_type)}">{pill}</td>'
                        + cell(count, num_fmt) + "</tr>")
@@ -1238,8 +1240,10 @@ def render_bins(bin_rows, ranks):
             outcome = row.get("reassembly_outcome")
             if outcome == "accepted":
                 pill = '<span class="pill ok">accepted</span>'
+            elif outcome == "linked":
+                pill = '<span class="pill ok">linked</span>'
             elif outcome:
-                pill = '<span class="pill no">rejected</span>'
+                pill = f'<span class="pill no">{esc(outcome)}</span>'
             else:
                 pill = "&ndash;"
             cells.append(f'<td class="l" data-v="{esc(outcome or "")}">{pill}</td>')
@@ -1359,6 +1363,142 @@ def render_files(layout: RunLayout):
     return "\n".join(out)
 
 
+def render_expansion(layout):
+    """Compare source-bin candidates separately from final taxonomically re-binned output."""
+    root = layout.root
+    tables = sorted((root / "bins").glob("*/reassembly_summary.tsv"))
+    if not tables:
+        return '<div class="card"><h2>Expansion</h2><p>No expansion comparison is available. A bin-only run does not perform expansion.</p></div>'
+    out = ['<div class="card"><h2>Expansion: cost and outcome</h2>',
+           '<p>Candidate metrics describe the proposed bin before final reclassification/refinement. '
+           'Final metrics describe the final bin of the same name; renamed or split bins need manual review. '
+           'A larger bin or higher N50 alone does not establish better genome recovery. '
+           'Link mode adds existing contigs and does not join sequence.</p>']
+    headers = ['rank', 'bin', 'outcome', 'bin minutes', 'contigs before', 'candidate contigs',
+               'final contigs', 'bp before', 'candidate bp', 'final bp', 'N50 before',
+               'candidate N50', 'final N50', 'original sequence retained %',
+               'completeness before %', 'candidate completeness %', 'final completeness %',
+               'contamination before %', 'candidate contamination %', 'final contamination %',
+               'marker check', 'rounds', 'seed templates', 'accepted templates',
+               'recruitment minutes', 'assembly minutes', 'polish minutes', 'polish outcome', 'reason / stop']
+    out.append('<div class="scroll"><table class="sortable"><thead><tr>' +
+               ''.join('<th>' + esc(x) + '</th>' for x in headers) + '</tr></thead><tbody>')
+    timing_notes = []
+    for path in tables:
+        rank = path.parent.name
+        before = {r.get('bin'): r for r in read_tsv(path.parent / 'summary.tsv')}
+        after = {r.get('bin'): r for r in read_tsv(root / 'final' / 'bins' / rank / 'summary.tsv')}
+        timing = root / 'reassembly' / rank / 'rank_timing.json'
+        if timing.is_file():
+            try:
+                t = json.loads(timing.read_text())
+                timing_notes.append(f"{rank}: {float(t.get('elapsed_seconds', 0)) / 60:.2f} minutes including shared mapping/extraction and candidate quality assessment")
+            except (ValueError, TypeError):
+                pass
+        for row in read_tsv(path):
+            b, a = before.get(row.get('bin'), {}), after.get(row.get('bin'), {})
+            def n(key):
+                return to_float(row.get(key))
+            def minutes(key):
+                value = n(key)
+                return None if value is None else value / 60
+            def baseline(key):
+                return to_float(row.get(key + '_before')) if to_float(row.get(key + '_before')) is not None else to_float(b.get(key))
+            retained = n('original_sequence_retained')
+            values = [rank, row.get('bin'), row.get('outcome'), minutes('elapsed_seconds'),
+                      n('contigs_before'), n('contigs_after'), to_float(a.get('num_contigs')),
+                      n('total_length_before_bp'), n('total_length_after_bp'), to_float(a.get('total_length_bp')),
+                      n('N50_before'), n('N50_after'), to_float(a.get('N50')),
+                      None if retained is None else retained * 100,
+                      baseline('completeness_percent'), n('completeness_percent_candidate'), to_float(a.get('completeness_percent')),
+                      baseline('contamination_percent'), n('contamination_percent_candidate'), to_float(a.get('contamination_percent')),
+                      row.get('marker_check', 'not evaluated'), n('extension_rounds'), n('seed_templates'), n('accepted_templates'),
+                      minutes('recruitment_seconds'), minutes('assembly_seconds'), minutes('polish_seconds'), row.get('polish_outcome'),
+                      row.get('reason') or row.get('recruitment_stop')]
+            out.append('<tr>' + ''.join(cell(v, (lambda x: f'{x:,.2f}') if isinstance(v, (int, float)) else None) for v in values) + '</tr>')
+    out.append('</tbody></table></div>')
+    out.append('<p class="note">Per-bin time excludes shared mapping, extraction, and batch CheckM. Missing marker evidence is not a quality pass. Candidate marker scores precede optional polishing.</p>')
+    for note in timing_notes:
+        out.append('<p>' + esc(note) + '</p>')
+    out.append('</div>')
+    return '\n'.join(out)
+
+
+def render_inspection(layout):
+    path = layout.root / 'inspection' / 'inspection.json'
+    if not path.is_file():
+        return '<div class="card"><h2>Inspection</h2><p>No inspection results. Run metahopper_inspect.py on this output directory.</p></div>'
+    try:
+        data = json.loads(path.read_text())
+    except (ValueError, OSError) as exc:
+        return '<div class="card"><p>Inspection could not be read: ' + esc(str(exc)) + '</p></div>'
+    out = ['<div class="card"><h2>Endosymbiont inspection</h2><p>Taxonomic candidates, not confirmed host associations. A taxon not detected in bins may still be present in the sample.</p>']
+    for message in data.get('errors', []):
+        out.append('<p class="note">' + esc(message) + '</p>')
+    def table(rows, columns):
+        text = ['<div class="scroll"><table class="sortable"><thead><tr>']
+        text += ['<th>' + esc(label) + '</th>' for key,label in columns]
+        text.append('</tr></thead><tbody>')
+        for row in rows:
+            text.append('<tr>')
+            for key,label in columns:
+                val=row.get(key)
+                text.append(cell(val, (lambda x:f'{x:,.3f}') if isinstance(val,float) else None))
+            text.append('</tr>')
+        text.append('</tbody></table></div>')
+        return ''.join(text)
+    out.append(table(data.get('bins',[]), [('label','bin/candidate'),('group','group'),('source','source'),
+        ('length_bp','bp'),('contigs','contigs'),('gc_percent','GC %'),('mean_depth','mean depth'),
+        ('breadth_1x','covered fraction'),('reference_size_ratio','size / reference median'),
+        ('translation_table','tree translation table'),('junctions_supported','supported terminal junctions'),('review_flags','review flags')]))
+    out.append('<details><summary>Screening panel</summary>')
+    out.append(table(data.get('panel',[]), [('taxon','taxon'),('status','screening status'),('role','association'),('translation_table_hint','code hint')]))
+    out.append('</details></div><div class="card"><h2>Terminal junction evidence</h2><p>Tests the last-to-first sequence connection, accounting for exact terminal duplication when present. Unique high-quality reads must span the join with at least 25 aligned bases on both sides. Five templates at three distinct alignment starts are required for the supported label. This does not certify circularity or validate internal joins.</p>')
+    out.append(table(data.get('junctions',[]), [('contig','contig'),('terminal_overlap_bp','exact overlap bp'),
+        ('spanning_templates','spanning templates'),('distinct_alignment_starts','distinct starts'),('bracketing_pairs','bracketing pairs'),('status','status'),('reason','reason')]))
+    out.append('</div><div class="card"><h2>Coverage profiles</h2><p>Depth uses MAPQ ≥20 and base quality ≥20, with overlapping mates suppressed. Red bands mark zero-depth windows; low depth in repetitive sequence can reflect ambiguous mapping. Window coordinates are zero-based, end-exclusive.</p>')
+    windows={}
+    for row in data.get('windows',[]):windows.setdefault(row['contig'],[]).append(row)
+    for row in data.get('coverage',[]):
+        cid=row['contig'];w=windows.get(cid,[])
+        out.append('<details><summary>'+esc(cid)+' — mean '+f'{row["mean_depth"]:.1f}×; breadth {100*row["breadth_1x"]:.1f}%</summary>')
+        if w:
+            # Bound SVG size; preserve zero-window flags as separate bands.
+            size=row['length_bp'];maximum=max(x['mean_depth'] for x in w) or 1
+            stride=max(1,math.ceil(len(w)/400))
+            points=[]
+            for i in range(0,len(w),stride):
+                batch=w[i:i+stride];x=40+900*((batch[0]['start']+batch[-1]['end'])/2)/max(1,size)
+                y=160-130*sum(v['mean_depth'] for v in batch)/len(batch)/maximum
+                points.append(f'{x:.2f},{y:.2f}')
+            out.append('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 195" style="width:100%;height:auto" role="img" aria-label="Coverage profile">')
+            for v in w:
+                if v['flag']=='zero_coverage':
+                    x=40+900*v['start']/max(1,size);width=max(.8,900*(v['end']-v['start'])/max(1,size))
+                    out.append(f'<rect x="{x:.2f}" y="25" width="{width:.2f}" height="135" fill="#fecaca"/>')
+            out.append('<path d="M40,25 V160 H940" fill="none" stroke="#64748b"/>')
+            out.append('<polyline fill="none" stroke="#2563eb" stroke-width="1.5" points="'+' '.join(points)+'"/>')
+            out.append(f'<text x="40" y="15" font-size="12">0–{maximum:.1f}× depth</text><text x="40" y="180" font-size="12">0 bp</text><text x="840" y="180" font-size="12">{size:,} bp</text></svg>')
+        out.append('</details>')
+    out.append('</div><div class="card"><h2>Reference phylogenies</h2><p>Separate within-group protein trees; unrooted, with arbitrary display orientation. Reference labels/groups come from supplied metadata or filenames. Reciprocal-best-hit markers are exploratory orthology estimates; reduced genomes, strain mixtures and long branches require review. Exact alignments, marker occupancy, commands and Newick trees are saved under inspection/phylogeny/.</p>')
+    for tree in data.get('trees',[]):
+        out.append('<h3>'+esc(tree.get('group',''))+'</h3><p>'+esc(tree.get('status',''))+' '+esc(tree.get('reason',''))+'</p>')
+        if tree.get('status')=='tree_built':
+            # Re-render known Newick with escaped labels instead of trusting stored SVG markup.
+            out.append('<p>'+esc(tree.get('method',''))+f'; {tree.get("markers",0)} markers, {tree.get("aligned_sites",0):,} sites.</p>')
+            svgpath=layout.root/'inspection'/'phylogeny'/re.sub(r'[^A-Za-z0-9_.-]','_',tree['group'])/'genomes.tsv'
+            labels={r['id']:r['kind']+': '+r['label'] for r in read_tsv(svgpath)}
+            try:
+                import metahopper_inspect
+                out.append(metahopper_inspect.newick_svg(tree['newick'],labels))
+            except (ImportError,ValueError,KeyError,IndexError):
+                out.append('<pre>'+esc(tree.get('newick',''))+'</pre>')
+    if not data.get('trees'):out.append('<p>No reference trees requested or no grouped references available.</p>')
+    for issue in data.get('reference_issues',[]):out.append('<p>'+esc(issue.get('file',''))+': '+esc(issue.get('reason',''))+'</p>')
+    out.append('</div>')
+    return '\n'.join(out)
+
+
 def build_report(layout: RunLayout, args) -> str:
     bin_rows = collect_bins(layout, compute_missing=not args.no_fasta_stats)
     ranks = rank_totals(bin_rows)
@@ -1371,6 +1511,7 @@ def build_report(layout: RunLayout, args) -> str:
             provenance_counts[key] = provenance_counts.get(key, 0) + 1
 
     tabs = [{"id": "overview", "label": "Overview"}, {"id": "bins", "label": "Bins"},
+            {"id": "expansion", "label": "Expansion"}, {"id": "inspection", "label": "Inspection"},
             {"id": "binarena", "label": "BinaRena"}, {"id": "files", "label": "Files"}]
     title = args.title or f"MetaHopper report \u2014 {layout.root.name}"
     subtitle = (f"{layout.stage} bin set &middot; "
@@ -1388,6 +1529,8 @@ def build_report(layout: RunLayout, args) -> str:
             .replace("__OVERVIEW__", render_overview(layout, bin_rows, ranks, scatter,
                                                      provenance_counts))
             .replace("__BINS__", render_bins(bin_rows, ranks))
+            .replace("__EXPANSION__", render_expansion(layout))
+            .replace("__INSPECTION__", render_inspection(layout))
             .replace("__BINARENA__", render_binarena(scatter))
             .replace("__FILES__", render_files(layout))
             .replace("__DATA__", payload))
