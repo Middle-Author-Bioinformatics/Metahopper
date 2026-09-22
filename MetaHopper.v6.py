@@ -818,6 +818,7 @@ def write_run_manifest(outdir: Path, args) -> None:
         "r1": str(args.r1) if args.r1 else None,
         "r2": str(args.r2) if args.r2 else None,
         "input": str(args.input) if args.input else None,
+        "diamond_hits": str(args.diamond_hits) if args.diamond_hits else None,
         "diamond_db": str(args.diamond_db) if args.diamond_db else None,
         "trimmomatic_folder": str(args.trimmomatic_folder) if args.trimmomatic_folder else None,
         "ranks": args.ranks,
@@ -850,7 +851,7 @@ def apply_resume(args, state: RunState) -> None:
         if hasattr(args, key) and key not in getattr(args, "_provided_dests", set()):
             setattr(args, key, value)
     # Recover inputs the user did not repeat on the command line.
-    for attr in ("input", "r1", "r2", "diamond_db", "trimmomatic_folder"):
+    for attr in ("input", "r1", "r2", "diamond_hits", "diamond_db", "trimmomatic_folder"):
         if getattr(args, attr, None) is None and m.get(attr):
             setattr(args, attr, Path(m[attr]))
             log.info("Resume: took %s from run_manifest.json (%s).", attr, m[attr])
@@ -1315,6 +1316,40 @@ def parse_diamond_hits(hits_tsv: Path) -> dict:
     return hits_by_orf
 
 
+def infer_orf_to_contig_from_hits(hits_by_orf: dict, contig_ids) -> tuple:
+    """Recover Prodigal ORF -> contig names from an existing DIAMOND table."""
+    contig_set = set(contig_ids)
+    mapping = {}
+    unmatched = []
+    for orf_id in hits_by_orf:
+        idx = orf_id.rfind("_")
+        if idx == -1 or not orf_id[idx + 1:].isdigit():
+            unmatched.append(orf_id)
+            continue
+        contig_id = orf_id[:idx]
+        if contig_id not in contig_set:
+            unmatched.append(orf_id)
+            continue
+        mapping[orf_id] = contig_id
+    return mapping, unmatched
+
+
+def metrics_without_prodigal(contig_seqs: dict) -> dict:
+    """Length/GC metrics for -b, where the preliminary Prodigal GFF is not regenerated."""
+    metrics = {}
+    for contig_id, sequence in contig_seqs.items():
+        seq = sequence.upper()
+        length = len(seq)
+        acgt = sum(seq.count(base) for base in "ACGT")
+        gc_fraction = ((seq.count("G") + seq.count("C")) / acgt) if acgt else 0.0
+        metrics[contig_id] = {
+            "length_bp": length, "gc_fraction": gc_fraction,
+            "coding_bp": None, "coding_density": None, "n_cds": None,
+            "mean_cds_length_bp": None, "mean_depth": None, "covered_fraction": None,
+        }
+    return metrics
+
+
 # --------------------------------------------------------------------------------------
 # Step 3: Taxonomy is read directly from nr-tax.dmnd DIAMOND output fields.
 # --------------------------------------------------------------------------------------
@@ -1432,8 +1467,9 @@ def write_classification_table(classifications: dict, ranks, out_path: Path,
                 metric.get("length_bp", "NA"),
                 (f"{100.0 * metric.get('gc_fraction', 0.0):.3f}"
                  if metric else "NA"),
-                (f"{metric.get('coding_density', 0.0):.5f}" if metric else "NA"),
-                metric.get("n_cds", res["_n_orfs_total"]),
+                (f"{metric.get('coding_density'):.5f}"
+                 if metric and metric.get("coding_density") is not None else "NA"),
+                (metric.get("n_cds") if metric and metric.get("n_cds") is not None else "NA"),
                 (f"{mean_depth:.5f}" if mean_depth is not None else "NA"),
                 (f"{covered_fraction:.5f}" if covered_fraction is not None else "NA"),
                 triage_calls.get(contig_id, "not_evaluated"),
@@ -2090,8 +2126,9 @@ def write_binarena_table(out_path: Path, contig_seqs: dict, contig_metrics: dict
                 f"{gc_percent:.2f}",
                 (f"{depth:.4f}" if depth is not None else ""),
                 (f"{covered:.4f}" if covered is not None else ""),
-                f"{metric.get('coding_density', 0.0):.4f}",
-                metric.get("n_cds", ""),
+                (f"{metric.get('coding_density'):.4f}"
+                 if metric.get("coding_density") is not None else "NA"),
+                (metric.get("n_cds") if metric.get("n_cds") is not None else "NA"),
             ]
             for rank in ranks:
                 taxon, _support = result.get(rank, ("Unclassified", 0.0))
@@ -2621,7 +2658,7 @@ def estimate_contig_coverage(fasta: Path, r1: Path, r2: Path, outdir: Path,
     """Competitively map the complete read set and return per-contig mean depth.
 
     Bowtie2 reports one best placement by default, so a multi-mapping read does not add
-    depth to every similar contig. ``samtools depth -aa`` is streamed and aggregated to
+    depth to every similar contig. ``samtools depth`` is streamed and aggregated to
     avoid materializing a potentially very large depth table.
     """
     outdir.mkdir(parents=True, exist_ok=True)
@@ -2640,7 +2677,7 @@ def estimate_contig_coverage(fasta: Path, r1: Path, r2: Path, outdir: Path,
     depth_sum = defaultdict(float)
     covered = defaultdict(int)
     proc = subprocess.Popen(
-        ["samtools", "depth", "-aa", str(sorted_bam)],
+        ["samtools", "depth", str(sorted_bam)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     assert proc.stdout is not None
@@ -4147,6 +4184,14 @@ def parse_args(argv=None):
                     help="Optional input contigs FASTA. Use alone for classification/binning, or "
                          "together with -1/-2 to use these contigs as the initial assembly and "
                          "enable read recruitment without running MEGAHIT.")
+    p.add_argument("-b", "--diamond-hits", type=Path, default=None,
+                    help="Optional preliminary DIAMOND hits.tsv from a previous MetaHopper run. "
+                         "Requires -i/--input with the exact assembly FASTA that produced those "
+                         "hits. Skips preliminary Prodigal and DIAMOND and classifies directly "
+                         "from the supplied hit table. Preliminary gene-density triage is not "
+                         "available in this shortcut because no Prodigal GFF is regenerated. "
+                         "A final Prodigal/DIAMOND pass still runs after reassembly unless "
+                         "--inherit-reassembly-taxonomy is used.")
     p.add_argument("-1", "--r1", type=Path, default=None, help="Raw/forward paired-end FASTQ (R1)")
     p.add_argument("-2", "--r2", type=Path, default=None, help="Raw/reverse paired-end FASTQ (R2)")
     p.add_argument("-d", "--diamond-db", type=Path, default=None,
@@ -4512,7 +4557,7 @@ def parse_args(argv=None):
     if "--help-all" in tokens:
         p.print_help()
         p.exit()
-    visible = {"help", "input", "r1", "r2", "diamond_db", "outdir", "threads",
+    visible = {"help", "input", "diamond_hits", "r1", "r2", "diamond_db", "outdir", "threads",
                "trimmomatic_folder", "mode", "rounds", "assessment", "polish", "plots",
                "qc", "target_bins", "help_all", "resume", "ranks", "assembler", "inspect", "references"}
     for action in p._actions:
@@ -4617,8 +4662,12 @@ def main(argv=None):
     if not using_reads and not using_contigs:
         log.error("Provide contigs (-i), paired reads (-1/-2), or both.")
         sys.exit(1)
-    for label, path in (("-i/--input", args.input), ("-1/--r1", args.r1),
-                        ("-2/--r2", args.r2)):
+    if args.diamond_hits is not None and args.input is None:
+        log.error("-b/--diamond-hits requires -i/--input: use the exact assembly FASTA "
+                  "that generated the supplied DIAMOND table.")
+        sys.exit(1)
+    for label, path in (("-i/--input", args.input), ("-b/--diamond-hits", args.diamond_hits),
+                        ("-1/--r1", args.r1), ("-2/--r2", args.r2)):
         if path is not None and not Path(path).is_file():
             log.error("%s does not exist: %s", label, path)
             sys.exit(1)
@@ -4705,26 +4754,24 @@ def main(argv=None):
 
     faa = outdir / "prodigal" / "proteins.faa"
     gff = outdir / "prodigal" / "genes.gff"
+    supplied_hits = args.diamond_hits is not None
     reuse_prodigal = (
         args.reuse_prodigal and faa.exists()
         and (args.skip_contig_triage or gff.exists())
     )
-    hits_tsv = outdir / "diamond" / "hits.tsv"
-    # Omitting -d is only viable by reusing what is already on disk, so treat it as an
-    # implicit --reuse-diamond/--reuse-prodigal rather than failing on a missing flag.
-    if args.diamond_db is None and (hits_tsv.exists() or faa.exists()):
+    hits_tsv = args.diamond_hits if supplied_hits else outdir / "diamond" / "hits.tsv"
+    if not supplied_hits and args.diamond_db is None and (hits_tsv.exists() or faa.exists()):
         if not args.reuse_diamond and hits_tsv.exists():
             log.info("No -d given and %s exists; enabling --reuse-diamond.", hits_tsv)
             args.reuse_diamond = True
-            reuse_diamond = True
         if not args.reuse_prodigal and faa.exists():
             log.info("No -d given and %s exists; enabling --reuse-prodigal.", faa)
             args.reuse_prodigal = True
             reuse_prodigal = faa.exists() and (args.skip_contig_triage or gff.exists())
-    reuse_diamond = args.reuse_diamond and hits_tsv.exists()
+    reuse_diamond = supplied_hits or (args.reuse_diamond and hits_tsv.exists())
 
-    # A run needs the database for the preliminary pass unless that pass is reused, and
-    # for the final pass unless taxonomy is inherited. Decide before doing any work.
+    # A run needs the database for the preliminary pass unless that pass is reused/supplied,
+    # and for the final pass unless taxonomy is inherited. Decide before doing any work.
     needs_db_prelim = not reuse_diamond
     needs_db_final = args.reassemble_bins and args.expansion_mode != "link" and not args.inherit_reassembly_taxonomy
     if args.diamond_db is None:
@@ -4738,7 +4785,7 @@ def main(argv=None):
             sys.exit(1)
         if needs_db_final:
             log.error(
-                "-d/--diamond-db is required: the preliminary pass can be reused from %s, "
+                "-d/--diamond-db is required: the preliminary pass can use %s, "
                 "but seed-and-extension reassembly classifies the *consolidated* assembly, "
                 "whose contigs are new sequences absent from that table. Either supply -d, "
                 "or add --inherit-reassembly-taxonomy to have each consolidated contig "
@@ -4759,7 +4806,7 @@ def main(argv=None):
             which_or_die("flash")
         if reads_only:
             which_or_die("megahit")
-    if args.reassemble_bins or not reuse_prodigal:
+    if args.reassemble_bins or (not reuse_prodigal and not supplied_hits):
         which_or_die("prodigal")
     if needs_db_prelim or needs_db_final:
         which_or_die("diamond")
@@ -4833,9 +4880,10 @@ def main(argv=None):
     # seed-and-extension runs, 7 more (reassembly, consolidation, final Prodigal, final
     # DIAMOND, final classification, final bins, quality assessment); otherwise 1 more
     # (quality assessment). Refinement and BinaRena staging add one step each.
+    supplied_hits_savings = 1 if supplied_hits else 0
     steps = StepCounter(
         n_qc_steps + (11 if args.reassemble_bins else 5) + refinement_steps
-        + binarena_steps + report_steps - inherit_savings
+        + binarena_steps + report_steps - inherit_savings - supplied_hits_savings
     )
 
     # 0a/0b/0c. Poly-G may prepare reads in either read mode; QC+MEGAHIT are reads-only.
@@ -4879,54 +4927,87 @@ def main(argv=None):
 
     contig_seqs = read_fasta(assembly_fasta)
 
-    # 1. Preliminary Prodigal and default pre-DIAMOND gene-density triage.
-    if reuse_prodigal:
-        steps.next(f"Reusing preliminary Prodigal output: {faa}")
-    else:
-        steps.next("Running preliminary Prodigal...")
-        faa, gff = run_prodigal(assembly_fasta, outdir / "prodigal", mode=args.prodigal_mode)
-        record_stage(outdir, "prodigal", [faa, gff])
     classification_dir = outdir / "classification"
-    (orf_to_contig, contig_metrics, triage_calls, triage_excluded_ids,
-     diamond_query_faa) = triage_and_write_candidates(
-        contig_seqs, faa, gff, outdir, classification_dir,
-        args.skip_contig_triage, "Preliminary assembly",
-    )
-
-    # 2. Preliminary DIAMOND
-    if reuse_diamond:
-        steps.next(f"Reusing preliminary DIAMOND output: {hits_tsv}")
-    else:
-        steps.next(f"Running preliminary DIAMOND blastp vs {args.diamond_db}...")
-        hits_tsv = run_diamond(
-            diamond_query_faa, args.diamond_db, outdir / "diamond", args.threads, args.evalue,
-            args.max_target_seqs,
-        )
-        record_stage(outdir, "diamond", [hits_tsv])
-    hits_by_orf = parse_diamond_hits(hits_tsv)
-    if reuse_diamond:
-        # Reused hits are only meaningful if they came from these same ORFs. A stale table
-        # from a different assembly would otherwise classify silently against nothing.
-        overlap = sum(1 for orf_id in hits_by_orf if orf_id in orf_to_contig)
-        if not hits_by_orf or overlap == 0:
+    if supplied_hits:
+        steps.next(f"Using supplied preliminary DIAMOND hits: {hits_tsv}")
+        hits_by_orf = parse_diamond_hits(hits_tsv)
+        orf_to_contig, unmatched_orfs = infer_orf_to_contig_from_hits(hits_by_orf, contig_seqs.keys())
+        if not hits_by_orf or not orf_to_contig:
             log.error(
-                "Reused DIAMOND table %s shares no ORF names with the %d ORFs predicted "
-                "from %s. It was almost certainly produced from a different assembly. "
-                "Delete it and rerun with -d, or point -o at the matching run directory.",
-                hits_tsv, len(orf_to_contig), assembly_fasta,
+                "Supplied DIAMOND table %s has no Prodigal-style query ORFs that map to "
+                "contigs in %s. Use the exact assembly that generated this hits.tsv.",
+                hits_tsv, assembly_fasta,
             )
             sys.exit(1)
-        frac = overlap / len(hits_by_orf)
-        if frac < 0.5:
+        matched, total_hit_orfs = len(orf_to_contig), len(hits_by_orf)
+        if unmatched_orfs:
+            frac = matched / max(1, total_hit_orfs)
+            if frac < 0.5:
+                log.error(
+                    "Only %d/%d hit-bearing ORFs in %s map to contigs in %s (%.1f%%); "
+                    "the hit table is probably from a different assembly.",
+                    matched, total_hit_orfs, hits_tsv, assembly_fasta, 100 * frac,
+                )
+                sys.exit(1)
             log.warning(
-                "Only %d/%d ORFs in the reused DIAMOND table (%.0f%%) match the current "
-                "ORF predictions; results may be based on a partly stale table.",
-                overlap, len(hits_by_orf), 100 * frac,
+                "%d/%d hit-bearing ORFs in %s map to this assembly (%.1f%%); unmatched "
+                "ORFs will be ignored.", matched, total_hit_orfs, hits_tsv, 100 * frac,
             )
         else:
-            log.info("Reused DIAMOND table matches current ORFs (%d/%d).",
-                     overlap, len(hits_by_orf))
-    log.info("Got hits for %d/%d ORFs.", len(hits_by_orf), len(orf_to_contig))
+            log.info("Supplied DIAMOND table matches the assembly: %d hit-bearing ORFs.", matched)
+        contig_metrics = metrics_without_prodigal(contig_seqs)
+        triage_calls = {cid: "not_evaluated_supplied_diamond_hits" for cid in contig_seqs}
+        triage_excluded_ids = set()
+        diamond_query_faa = None
+        log.info(
+            "Preliminary gene-density triage skipped with -b (no Prodigal GFF regenerated). "
+            "Final reassembled sequences still receive the normal Prodigal/triage/DIAMOND pass."
+        )
+    else:
+        # 1. Preliminary Prodigal and default pre-DIAMOND gene-density triage.
+        if reuse_prodigal:
+            steps.next(f"Reusing preliminary Prodigal output: {faa}")
+        else:
+            steps.next("Running preliminary Prodigal...")
+            faa, gff = run_prodigal(assembly_fasta, outdir / "prodigal", mode=args.prodigal_mode)
+            record_stage(outdir, "prodigal", [faa, gff])
+        (orf_to_contig, contig_metrics, triage_calls, triage_excluded_ids,
+         diamond_query_faa) = triage_and_write_candidates(
+            contig_seqs, faa, gff, outdir, classification_dir,
+            args.skip_contig_triage, "Preliminary assembly",
+        )
+
+        # 2. Preliminary DIAMOND
+        if reuse_diamond:
+            steps.next(f"Reusing preliminary DIAMOND output: {hits_tsv}")
+        else:
+            steps.next(f"Running preliminary DIAMOND blastp vs {args.diamond_db}...")
+            hits_tsv = run_diamond(
+                diamond_query_faa, args.diamond_db, outdir / "diamond", args.threads, args.evalue,
+                args.max_target_seqs,
+            )
+            record_stage(outdir, "diamond", [hits_tsv])
+        hits_by_orf = parse_diamond_hits(hits_tsv)
+        if reuse_diamond:
+            overlap = sum(1 for orf_id in hits_by_orf if orf_id in orf_to_contig)
+            if not hits_by_orf or overlap == 0:
+                log.error(
+                    "Reused DIAMOND table %s shares no ORF names with the %d ORFs predicted "
+                    "from %s. It was almost certainly produced from a different assembly. "
+                    "Delete it and rerun with -d, or point -o at the matching run directory.",
+                    hits_tsv, len(orf_to_contig), assembly_fasta,
+                )
+                sys.exit(1)
+            frac = overlap / len(hits_by_orf)
+            if frac < 0.5:
+                log.warning(
+                    "Only %d/%d ORFs in the reused DIAMOND table (%.0f%%) match the current "
+                    "ORF predictions; results may be based on a partly stale table.",
+                    overlap, len(hits_by_orf), 100 * frac,
+                )
+            else:
+                log.info("Reused DIAMOND table matches current ORFs (%d/%d).", overlap, len(hits_by_orf))
+    log.info("Got hits for %d/%d usable ORFs.", len(hits_by_orf), len(orf_to_contig))
 
     # 3. Preliminary classification and microbial-contig retention
     # "domain" and "kingdom" are always classified internally (even if not in --ranks) so

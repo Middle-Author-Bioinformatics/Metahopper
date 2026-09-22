@@ -143,7 +143,7 @@ def map_reads(reference, r1, r2, work, threads, local=False):
 
 
 def coverage_from_lines(lines, lengths, window=1000):
-    """Zero-fill missing positions; bounded window arrays, no per-base arrays."""
+    """Zero-fill positions omitted by samtools depth; bounded window arrays, no per-base arrays."""
     data = {cid: {'length': n, 'sum': 0, 'sum2': 0, 'covered': 0, 'ge10': 0,
                   'hist': Counter(), 'positions': 0, 'windows': [0] * ((n + window - 1)//window),
                   'window_covered': [0] * ((n + window - 1)//window)} for cid, n in lengths.items()}
@@ -525,7 +525,7 @@ def inspect_run(root, mode='endosymbionts', references=None, threads=8, rank=Non
             # BED limits depth output while retaining the whole-assembly mapping context.
             bed=out/'selected_contigs.bed'
             bed.write_text(''.join(f'{cid}\t0\t{len(seq)}\n' for cid,seq in selected.items()))
-            lines=stream(['samtools','depth','-aa','-s','-q','20','-Q','20','-G','3844','-b',bed,bam],out/'coverage.log')
+            lines=stream(['samtools','depth','-s','-q','20','-Q','20','-G','3844','-b',bed,bam],out/'coverage.log')
             coverage,windows=coverage_from_lines(lines,{cid:len(seq) for cid,seq in selected.items()})
             result['coverage']=list(coverage.values());result['windows']=windows
             write_tsv(out/'coverage.tsv',result['coverage'])
