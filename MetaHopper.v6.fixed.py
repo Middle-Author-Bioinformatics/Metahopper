@@ -4554,43 +4554,33 @@ def parse_args(argv=None):
                         help="Reference genomes in genus subfolders for optional protein trees.")
     simple.add_argument("--help-all", action="store_true", help="Show advanced and legacy options.")
     tokens = list(sys.argv[1:] if argv is None else argv)
-    visible = {"help", "input", "diamond_hits", "r1", "r2", "diamond_db", "outdir", "threads",
-               "trimmomatic_folder", "mode", "rounds", "assessment", "polish", "plots",
-               "qc", "target_bins", "help_all", "resume", "ranks", "assembler", "inspect", "references"}
-
-    # Python 3.10's argparse formatter can raise an internal AssertionError when actions
-    # inside a mutually-exclusive group are changed to argparse.SUPPRESS after the group
-    # has been constructed. MetaHopper historically hid advanced/legacy options this way
-    # to keep ordinary -h concise. Intercept ordinary help before that suppression step and
-    # render the small public option set directly; --help-all still uses argparse's full
-    # formatter with nothing suppressed. This affects help text only, never option parsing.
     if "--help-all" in tokens:
         p.print_help()
         p.exit()
-    if "-h" in tokens or "--help" in tokens:
-        print(f"usage: {p.prog} [options] -o OUTDIR")
-        print()
-        print(p.description)
-        print("\nMain options:")
-        for action in p._actions:
-            if action.dest not in visible:
-                continue
-            if any(opt.startswith("--skip-") for opt in action.option_strings):
-                continue
-            opts = ", ".join(action.option_strings)
-            if action.nargs != 0 and action.dest != "help":
-                if action.choices:
-                    value = "{" + ",".join(map(str, action.choices)) + "}"
-                else:
-                    value = action.metavar or action.dest.upper()
-                opts = f"{opts} {value}"
-            help_text = action.help if action.help not in (None, argparse.SUPPRESS) else ""
-            print(f"  {opts:<36} {help_text}")
-        p.exit()
-
+    visible = {"help", "input", "diamond_hits", "r1", "r2", "diamond_db", "outdir", "threads",
+               "trimmomatic_folder", "mode", "rounds", "assessment", "polish", "plots",
+               "qc", "target_bins", "help_all", "resume", "ranks", "assembler", "inspect", "references"}
     for action in p._actions:
         if action.dest not in visible or any(opt.startswith("--skip-") for opt in action.option_strings):
             action.help = argparse.SUPPRESS
+
+    # Python 3.10 argparse can raise an internal AssertionError while formatting usage
+    # when every member of a mutually exclusive group has help=SUPPRESS.  Parsing the
+    # group itself is fine; only help rendering is affected.  For compact -h/--help,
+    # temporarily hide fully-suppressed mutex groups from the formatter, then restore
+    # them unchanged so normal argument validation keeps working.
+    if "-h" in tokens or "--help" in tokens:
+        original_mutex_groups = p._mutually_exclusive_groups
+        try:
+            p._mutually_exclusive_groups = [
+                group for group in original_mutex_groups
+                if any(action.help != argparse.SUPPRESS for action in group._group_actions)
+            ]
+            p.print_help()
+        finally:
+            p._mutually_exclusive_groups = original_mutex_groups
+        p.exit()
+
     args = p.parse_args(tokens)
     present = {token.split("=", 1)[0] for token in tokens}
     def conflict(new, legacy):
