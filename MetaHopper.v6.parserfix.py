@@ -1,0 +1,5431 @@
+#!/usr/bin/env python3
+"""MetaHopper 6 — audited targeted assembly and binning.
+
+Quick start (paired reads with an existing assembly):
+  python MetaHopper.py -i contigs.fasta -1 R1.fq.gz -2 R2.fq.gz \
+      -d nr-tax.dmnd -o results --trimmomatic-folder /path/to/trimmomatic
+
+Main controls:
+  --mode bin|link|reassemble   default reassemble with reads; bin without reads
+  --rounds N                  default 0: seed-only; extension is opt-in
+  --assessment full|basic     full adds QUAST/CheckM when available
+  --polish                    opt-in Pilon, after initial candidate acceptance
+  --plots pca|all|off          default pca
+  --target-bins A,B            optional subset of source-rank bin filenames/stems
+  --inspect endosymbionts|all|off  default endosymbionts; coverage and terminal junction checks
+  --references DIRECTORY      optional within-group reference-genome phylogenies
+  --help-all                  advanced options and legacy aliases
+
+Reassembly requires minimap2 to verify original-sequence retention. Default gates:
+>=95% original bases aligned at >=95% identity, >=95% length retention, <=125%
+length, and either >=10% fewer contigs, >=20% higher N50, or >=2 percentage points
+more CheckM completeness. Where comparable CheckM estimates exist, reject >1 pp
+completeness loss or >1 pp contamination increase. These are conservative heuristics,
+not proof of correctness; inspect strain mixtures and read support. CheckM scores
+are not genome-quality certifications for genus mixtures, eukaryotes or reduced
+symbionts. Missing/non-comparable marker evidence is recorded explicitly.
+
+Link mode adopts only eligible unclassified original contigs, never joins sequence,
+keeps every original contig once, and preserves sequence taxonomy separately from
+read-supported membership. Exact tied claims remain unassigned. All original seed
+competitors remain in the mapping reference; Unclassified reads may be recruited
+for linking, but named-bin seed reads cannot be stolen.
+
+Reports include candidate and final metrics separately, timings, and failure reasons.
+Legacy flags remain accepted, hidden from ordinary --help. Use fresh output folders
+for benchmark conditions. External tool versions and real-data results must still
+be validated on the deployment machine.
+"""
+
+import argparse
+import csv
+import gc
+import gzip
+import json
+import logging
+import math
+import os
+import re
+import shlex
+import shutil
+import statistics
+import time
+import threading
+import signal
+import hashlib
+from collections import OrderedDict
+import subprocess
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
+
+# --------------------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------------------
+
+# Both "domain" and "superkingdom" are requested because taxonomy-enabled DIAMOND
+# databases can expose either top-rank label. "kingdom" lets the default retention filter
+# distinguish Fungi from Metazoa and Viridiplantae within Eukaryota.
+WANTED_RANKS = ["domain", "superkingdom", "kingdom", "phylum", "family", "genus", "species"]
+BIN_RANKS_DEFAULT = ["genus", "species"]
+
+# Eukaryotic kingdoms dropped from binning by default (--exclude-kingdoms). Metazoa and
+# Viridiplantae are the only two of NCBI's formal "kingdom"-rank taxa besides Fungi --
+# everything else under Eukaryota (the various protist lineages: SAR, Excavata,
+# Amoebozoa, etc.) has no kingdom-rank ancestor at all in NCBI's taxonomy, so it's never
+# matched by this filter and passes through untouched, same as Fungi.
+DEFAULT_EXCLUDED_KINGDOMS = ["Metazoa", "Viridiplantae"]
+
+# Deliberately conservative heuristic/refinement defaults. Gene-density triage only
+# quarantines long contigs with very little Prodigal-predicted coding sequence. GC and
+# coverage refinement requires a joint outlier: either signal by itself is reported but
+# never sufficient to reject a seed or demote a final taxonomic assignment.
+TRIAGE_MIN_LENGTH_BP = 3000
+TRIAGE_MAX_EUKARYOTIC_CODING_DENSITY = 0.35
+REFINEMENT_MIN_CONTIG_LENGTH_BP = 2000
+REFINEMENT_MIN_REFERENCE_CONTIGS = 4
+REFINEMENT_MIN_TAXON_SUPPORT = 0.70
+REFINEMENT_GC_ABSOLUTE_FLOOR = 0.08
+REFINEMENT_COVERAGE_LOG2_FLOOR = 2.0
+REFINEMENT_ROBUST_Z = 4.0
+REFINEMENT_RANK_ORDER = [
+    "domain", "superkingdom", "kingdom", "phylum", "family", "genus", "species",
+]
+
+DIAMOND_RANK_FIELDS = {
+    "domain": "sdomain",
+    "superkingdom": "ssuperkingdom",
+    "kingdom": "skingdom",
+    "phylum": "sphylum",
+    "family": "sfamily",
+    "genus": "sgenus",
+    "species": "sspecies",
+}
+
+# DIAMOND >=2.1.17 exposes generic sRANK output fields. The accession-to-taxid map,
+# NCBI tree, and scientific names used to resolve these fields are baked into nr-tax.dmnd
+# at `diamond makedb` time, so no external taxdump is needed at runtime.
+DIAMOND_FIELDS = [
+    "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+    "qstart", "qend", "sstart", "send", "evalue", "bitscore",
+    "staxids", *DIAMOND_RANK_FIELDS.values(), "stitle",
+]
+
+
+log = logging.getLogger("metatax_binner")
+
+
+# --------------------------------------------------------------------------------------
+# Small utilities
+# --------------------------------------------------------------------------------------
+
+def setup_logging(verbose: bool = False) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+class StepCounter:
+    """Tiny helper so log lines read 'Step i/N: ...' even though N varies depending on
+    whether QC/MEGAHIT ran (raw-reads mode) or we started straight from a contigs FASTA."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.i = 0
+
+    def next(self, label: str) -> None:
+        self.i += 1
+        log.info("Step %d/%d: %s", self.i, self.total, label)
+
+
+#: Conservative defaults: one core and an 8 GB assembler budget. A pipeline that grabs
+#: most of a shared server by default is antisocial, and every one of these can be
+#: raised explicitly once you know what the machine can spare.
+DEFAULT_THREADS = 1
+DEFAULT_MEMORY_GB = 8
+DEFAULT_BBTOOLS_MEMORY = "4g"
+
+
+def detect_memory_gb() -> tuple:
+    """(total_gb, available_gb, source) for this machine or cgroup.
+
+    A pipeline that unconditionally asks an assembler for 32 GB and a JVM for a 16 GB
+    heap can take down a shared server regardless of how careful the rest of it is, so
+    the defaults are derived from what is actually present rather than hard-coded.
+    cgroup limits win when they are lower than the host's RAM, which is what matters
+    inside a container or a scheduler-managed job.
+    """
+    total = available = None
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            info[key] = int(rest.split()[0]) / (1024 * 1024)      # kB -> GB
+        total = info.get("MemTotal")
+        available = info.get("MemAvailable", total)
+    except (OSError, ValueError, IndexError):
+        pass
+    source = "/proc/meminfo"
+    for cg in ("/sys/fs/cgroup/memory.max",
+               "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(cg).read_text().strip()
+            if raw and raw != "max":
+                limit = int(raw) / (1024 ** 3)
+                if limit > 0 and (total is None or limit < total):
+                    total = limit
+                    available = min(available or limit, limit)
+                    source = cg
+        except (OSError, ValueError):
+            continue
+    if total is None:
+        return None, None, "unknown"
+    return total, available if available is not None else total, source
+
+
+def resolve_memory_budget(args) -> None:
+    """Report the machine's memory and keep the requested caps inside it.
+
+    The defaults are deliberately small. They are lowered further, but never raised,
+    when the machine or cgroup has less than the default available; an explicit request
+    that exceeds what is there is warned about rather than quietly changed, because the
+    user may know something this check does not.
+    """
+    total, available, source = detect_memory_gb()
+    if total is None:
+        log.warning("Could not detect system memory; using --reassemble-memory-gb %s "
+                    "and --reassemble-bbtools-memory %s as given.",
+                    args.reassemble_memory_gb, args.reassemble_bbtools_memory)
+        return
+    log.info("Memory: %.1f GB total, %.1f GB available (%s). Threads: %d.",
+             total, available, source, args.threads)
+
+    explicit = args.reassemble_memory_gb != DEFAULT_MEMORY_GB
+    if args.reassemble_memory_gb > available:
+        if explicit:
+            log.warning("--reassemble-memory-gb %d exceeds the %.0f GB available. The "
+                        "assembler may be OOM-killed, or take the machine down with it.",
+                        args.reassemble_memory_gb, available)
+        else:
+            args.reassemble_memory_gb = max(2, int(available * 0.5))
+            log.info("Memory: only %.1f GB available, so the assembler cap is reduced "
+                     "from %d to %d GB.", available, DEFAULT_MEMORY_GB,
+                     args.reassemble_memory_gb)
+            if args.reassemble_bbtools_memory == DEFAULT_BBTOOLS_MEMORY:
+                args.reassemble_bbtools_memory = f"{max(1, args.reassemble_memory_gb // 2)}g"
+                log.info("Memory: BBDuk heap reduced to %s.",
+                         args.reassemble_bbtools_memory)
+
+def which_or_die(tool: str) -> str:
+    path = shutil.which(tool)
+    if path is None:
+        log.error("Required tool '%s' not found on PATH.", tool)
+        sys.exit(1)
+    return path
+
+
+def require_diamond_taxonomy_fields() -> None:
+    """Require the DIAMOND release that introduced generic ``sRANK`` fields."""
+    proc = subprocess.run(["diamond", "version"], capture_output=True, text=True)
+    version_text = f"{proc.stdout} {proc.stderr}".strip()
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_text)
+    if proc.returncode != 0 or not match:
+        log.error("Could not determine DIAMOND version: %s", version_text or "no output")
+        sys.exit(1)
+    version = tuple(int(part) for part in match.groups())
+    if version < (2, 1, 17):
+        log.error(
+            "DIAMOND %s is too old. MetaHopper requires >=2.1.17 for taxonomy fields "
+            "such as sphylum, sfamily, and sgenus.",
+            ".".join(str(part) for part in version),
+        )
+        sys.exit(1)
+
+
+BIN_DEADLINE = None
+
+
+def arm_deadline(proc):
+    if BIN_DEADLINE is None:
+        return None
+    def terminate():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    timer = threading.Timer(max(0.01, BIN_DEADLINE - time.monotonic()), terminate)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def run_cmd(cmd, log_file: Path = None, cwd: Path = None, env: dict = None) -> None:
+    log.info("Running: %s", " ".join(str(c) for c in cmd))
+    with open(log_file, "a") if log_file else open("/dev/null", "w") as lf:
+        proc = subprocess.Popen(
+            cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=cwd, text=True, env=env,
+            start_new_session=True,
+        )
+        timer = arm_deadline(proc)
+        try:
+            proc.wait()
+        finally:
+            if timer:
+                timer.cancel()
+    if proc.returncode != 0:
+        tail = ""
+        if log_file and Path(log_file).exists():
+            tail = "\n".join(Path(log_file).read_text().splitlines()[-30:])
+        raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(str(c) for c in cmd)}\n{tail}")
+
+
+def run_pipeline(cmds, stdout_path: Path = None, log_file: Path = None) -> None:
+    """Runs cmds[0] | cmds[1] | ... | cmds[-1], like a bash pipe. The last stage's stdout is
+    written to stdout_path if given, otherwise discarded; every stage's stderr is appended
+    to log_file. Used for the bowtie2 | samtools and samtools collate | samtools fastq
+    pipelines in the targeted bin-reassembly module (Step 7)."""
+    opened = []
+    lf = open(log_file, "a") if log_file else subprocess.DEVNULL
+    if lf is not subprocess.DEVNULL:
+        opened.append(lf)
+    procs = []
+    timers = []
+    prev_stdout = None
+    try:
+        for i, cmd in enumerate(cmds):
+            is_last = i == len(cmds) - 1
+            if is_last:
+                out = open(stdout_path, "wb") if stdout_path else subprocess.DEVNULL
+                if stdout_path:
+                    opened.append(out)
+            else:
+                out = subprocess.PIPE
+            proc = subprocess.Popen(cmd, stdin=prev_stdout, stdout=out, stderr=lf, start_new_session=True)
+            timers.append(arm_deadline(proc))
+            if prev_stdout is not None:
+                prev_stdout.close()
+            prev_stdout = proc.stdout
+            procs.append(proc)
+        for proc in procs:
+            proc.wait()
+    finally:
+        for timer in timers:
+            if timer:
+                timer.cancel()
+        for proc in procs:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+        for fh in opened:
+            fh.close()
+    for cmd, proc in zip(cmds, procs):
+        if proc.returncode != 0:
+            raise RuntimeError(f"Pipeline stage failed ({proc.returncode}): {' '.join(str(c) for c in cmd)}")
+
+
+def count_fastq_reads(path: Path) -> int:
+    """Fast read count via `zcat -f | wc -l` (handles both gzipped and plain FASTQ)."""
+    if not path or not Path(path).exists() or Path(path).stat().st_size == 0:
+        return 0
+    proc = subprocess.run(f"zcat -f -- {shlex.quote(str(path))} | wc -l",
+                           shell=True, capture_output=True, text=True, check=True)
+    lines = int((proc.stdout or "0").strip() or 0)
+    return lines // 4
+
+
+def sanitize(name: str) -> str:
+    if not name:
+        name = "Unclassified"
+    keep = []
+    for ch in name:
+        keep.append(ch if (ch.isalnum() or ch in "-._") else "_")
+    out = "".join(keep).strip("_")
+    return out or "Unclassified"
+
+
+def read_fasta(path: Path) -> dict:
+    """Minimal FASTA reader: {seq_id: sequence}. seq_id = header up to first whitespace."""
+    seqs = {}
+    header = None
+    chunks = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            if line.startswith(">"):
+                if header is not None:
+                    seqs[header] = "".join(chunks)
+                header = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+        if header is not None:
+            seqs[header] = "".join(chunks)
+    return seqs
+
+
+def write_fasta(path: Path, records: dict, wrap: int = 70) -> None:
+    with open(path, "w") as fh:
+        for seq_id, seq in records.items():
+            fh.write(f">{seq_id}\n")
+            for i in range(0, len(seq), wrap):
+                fh.write(seq[i:i + wrap] + "\n")
+
+
+# --------------------------------------------------------------------------------------
+# Step 0a: poly-G trimming (fastp) -- optional, only for raw-reads (--r1/--r2) input
+# --------------------------------------------------------------------------------------
+
+def trim_poly_g(r1: Path, r2: Path, outdir: Path, threads: int,
+                 fastp_cmd: str = "fastp", poly_g_min_len: int = 10) -> tuple:
+    """Trims poly-G tails with fastp's dedicated detector, and nothing else.
+
+    Poly-G runs are a well-known artifact of two-channel Illumina chemistry (NextSeq,
+    NovaSeq): those instruments call a dark/no-signal cycle as 'G', so reads that run
+    past the end of a short insert (or into a quality dropout) pick up a run of spurious
+    G's that isn't part of the biological sequence. Trimmomatic's adapter/quality-trim
+    steps don't reliably catch this -- poly-G runs are often called at deceptively high
+    quality and don't match the ILLUMINACLIP adapter sequences -- so this runs before
+    everything else in the QC chain. Every other fastp filter is disabled here (adapter
+    trimming, quality filtering, length filtering) so it doesn't duplicate/interfere with
+    what Trimmomatic + FLASH already do downstream.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    # fastp compresses when the output name ends in .gz. Writing plain FASTQ here cost
+    # ~4x the disk for no benefit -- on a large library that is tens of GB, and filling
+    # a shared filesystem is its own kind of outage.
+    out1 = outdir / "polyg_trimmed_1.fastq.gz"
+    out2 = outdir / "polyg_trimmed_2.fastq.gz"
+    legacy1 = outdir / "polyg_trimmed_1.fastq"
+    legacy2 = outdir / "polyg_trimmed_2.fastq"
+    if legacy1.is_file() and legacy2.is_file() and not out1.is_file():
+        log.info("Reusing uncompressed poly-G output from an earlier version.")
+        return legacy1, legacy2
+    log_file = outdir / "fastp_polyg.log"
+    cmd = [
+        fastp_cmd, "-i", str(r1), "-I", str(r2), "-o", str(out1), "-O", str(out2),
+        "--trim_poly_g", "--poly_g_min_len", str(poly_g_min_len),
+        "--disable_adapter_trimming", "--disable_quality_filtering", "--disable_length_filtering",
+        "--thread", str(threads),
+        "--json", str(outdir / "fastp_polyg.json"), "--html", str(outdir / "fastp_polyg.html"),
+    ]
+    run_cmd(cmd, log_file=log_file)
+    return out1, out2
+
+
+# --------------------------------------------------------------------------------------
+# Step 0b: QC (Trimmomatic + FLASH) -- optional, only for raw-reads (--r1/--r2) input
+# --------------------------------------------------------------------------------------
+
+def trimmomatic_se_if_reads(trimmomatic_cmd: str, threads: int, fq_in: Path,
+                            fq_out: Path, qc_quality: int, qc_minlen: int,
+                            log_file: Path, what: str) -> Path:
+    """Quality-trim a single-end FASTQ, tolerating an empty input.
+
+    Trimmomatic SE exits 1 with "Error: Unable to detect quality encoding" when handed a
+    zero-read FASTQ, because it samples the file to guess phred33 vs phred64 and finds
+    nothing to sample. That is a routine outcome, not a failure: a library with heavy
+    adapter read-through can leave "Reverse Only Surviving: 0", so Trimmomatic PE writes
+    an empty <base>_2U, and FLASH can likewise merge nothing. Writing an empty output and
+    moving on keeps a normal library from aborting the whole sample.
+    """
+    if count_fastq_reads(fq_in) == 0:
+        log.info("No %s to quality-trim (%s is empty); skipping this Trimmomatic pass.",
+                 what, fq_in.name)
+        fq_out.write_bytes(b"")
+        return fq_out
+    run_cmd([trimmomatic_cmd, "SE", "-threads", str(threads), str(fq_in), str(fq_out),
+             f"SLIDINGWINDOW:4:{qc_quality}", f"MINLEN:{qc_minlen}"], log_file=log_file)
+    return fq_out
+
+
+# ------------------------------------------------------------------ resume detection
+
+def _tail(path: Path, n: int = 8192) -> bytes:
+    """Last n bytes of a file, without reading the rest of it."""
+    with open(path, "rb") as fh:
+        size = fh.seek(0, os.SEEK_END)
+        fh.seek(max(0, size - n))
+        return fh.read()
+
+
+def _nonempty(path) -> bool:
+    try:
+        return path is not None and Path(path).is_file() and Path(path).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def complete_text(path) -> bool:
+    """Non-empty and ending in a newline.
+
+    A process killed mid-write almost always leaves a partial final line, so this cheap
+    O(1) check catches the common truncation signature without reading the whole file.
+    It cannot detect a file that was cut exactly on a line boundary.
+    """
+    return _nonempty(path) and _tail(Path(path), 2).endswith(b"\n")
+
+
+def complete_fasta(path) -> bool:
+    if not complete_text(path):
+        return False
+    with open(path, "rb") as fh:
+        return fh.read(1) == b">"
+
+
+def complete_fastq(path) -> bool:
+    """Complete text whose trailing lines still parse as whole 4-line records."""
+    if not complete_text(path):
+        return False
+    lines = [l for l in _tail(Path(path)).split(b"\n") if l != b""]
+    if len(lines) < 4:
+        return True                      # too small to judge; the newline check stands
+    for i in range(len(lines) - 4, -1, -1):
+        if lines[i].startswith(b"@"):
+            rec = lines[i:i + 4]
+            return len(rec) == 4 and rec[2].startswith(b"+") and len(rec[1]) == len(rec[3])
+    return False
+
+
+def complete_tsv(path, min_fields: int) -> bool:
+    if not complete_text(path):
+        return False
+    lines = [l for l in _tail(Path(path)).split(b"\n") if l != b""]
+    return bool(lines) and len(lines[-1].split(b"\t")) >= min_fields
+
+
+def complete_gzip(path) -> bool:
+    """Fully decompress to confirm the stream is not truncated.
+
+    Unlike the text checks this is O(size), but a truncated gzip is otherwise
+    undetectable and silently loses reads, and re-running QC costs far more than the
+    seconds this takes.
+    """
+    if not _nonempty(path):
+        return False
+    try:
+        with gzip.open(path, "rb") as fh:
+            while fh.read(8 << 20):
+                pass
+        return True
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return False
+
+
+class RunState:
+    """What a previous run in an output directory completed.
+
+    The progress record written by record_stage() is the primary source: it says what
+    finished, in order, and is not open to interpretation. The outputs of the most
+    recently recorded stage are still validated, because that is the one that could have
+    been truncated by a kill arriving between the write and the record. Directories
+    written before progress recording existed fall back to file detection.
+    """
+
+    #: stage -> (outputs relative to outdir, validator). Used to validate a recorded
+    #: stage's outputs, and as the legacy fallback when there is no progress record.
+    EVIDENCE = {
+        # .gz since the disk fix; plain .fastq is still accepted for older runs.
+        "polyg": (["polyg/polyg_trimmed_1.fastq.gz", "polyg/polyg_trimmed_2.fastq.gz"],
+                  "fastq"),
+        "qc": (["qc/notcombined.final_1P.gz", "qc/notcombined.final_2P.gz",
+                "qc/unpaired.fq.gz"], "gzip"),
+        "assembly": (["megahit/final.contigs.fa"], "fasta"),
+        "prodigal": (["prodigal/proteins.faa", "prodigal/genes.gff"], "prodigal"),
+        "diamond": (["diamond/hits.tsv"], "hits"),
+        "final_prodigal": (["final/prodigal/proteins.faa", "final/prodigal/genes.gff"],
+                           "prodigal"),
+        "final_diamond": (["final/diamond/hits.tsv"], "hits"),
+    }
+
+    #: Canonical pipeline order, paired with the directory each stage creates. Used by
+    #: the legacy fallback to work out which stage was in flight when a run without a
+    #: progress record was killed: the most recently touched directory is the one that
+    #: was being written. Entries with no stage of their own still mark position in the
+    #: sequence, so a kill inside them invalidates everything from there on.
+    STAGE_DIRS = [
+        ("polyg", "polyg"),
+        ("qc", "qc"),
+        ("assembly", "megahit"),
+        ("prodigal", "prodigal"),
+        ("diamond", "diamond"),
+        ("classification", "classification"),
+        ("bins", "bins"),
+        ("reassembly", "reassembly"),
+        ("final_assembly", "final/assembly"),
+        ("final_prodigal", "final/prodigal"),
+        ("final_diamond", "final/diamond"),
+        ("final_classification", "final/classification"),
+        ("final_bins", "final/bins"),
+        ("binarena", "binarena"),
+    ]
+
+    def __init__(self, outdir: Path, ranks):
+        self.outdir = Path(outdir)
+        self.ranks = list(ranks)
+        self.stages = {}
+        self.manifest = {}
+        self.progress = read_progress(self.outdir)
+        self.cut_stage = None          # index of the interrupted stage, legacy runs only
+        self._mtime_spread = 0.0
+        self._n_dirs = 0
+        self.source = ("progress record" if self.progress
+                       else "output files ordered by directory mtime")
+        self._detect()
+
+    def _add(self, name, status, detail, paths=None):
+        self.stages[name] = {"status": status, "detail": detail, "paths": paths or []}
+
+    def _validate(self, stage) -> bool:
+        """Do this stage's recorded outputs still look intact?"""
+        _rel, kind = self.EVIDENCE[stage]
+        paths = self._paths(stage)          # resolves the legacy poly-G layout too
+        if not all(_nonempty(p) for p in paths):
+            return False
+        if kind == "fastq":
+            # poly-G output is gzipped now and was plain text before; a gzip tail is
+            # binary, so the text-level record check only applies to the old layout.
+            return all(complete_gzip(p) if str(p).endswith(".gz") else complete_fastq(p)
+                       for p in paths)
+        if kind == "gzip":
+            return all(complete_gzip(p) for p in paths)
+        if kind == "fasta":
+            return all(complete_fasta(p) for p in paths)
+        if kind == "prodigal":
+            return complete_fasta(paths[0]) and complete_text(paths[1])
+        if kind == "hits":
+            return complete_tsv(paths[0], len(DIAMOND_FIELDS))
+        return True
+
+    def _paths(self, stage):
+        paths = [self.outdir / r for r in self.EVIDENCE[stage][0]]
+        if stage == "polyg" and not all(_nonempty(p) for p in paths):
+            legacy = [Path(str(p)[:-3]) for p in paths]      # drop .gz
+            if all(_nonempty(p) for p in legacy):
+                return legacy
+        return paths
+
+    def newest_stage(self):
+        """(stage, dir, mtime) for the most recently touched output directory.
+
+        Directory mtime changes when an entry is added or removed, so the newest
+        directory is the one the pipeline was writing when it stopped. Ties are broken
+        towards the later stage in STAGE_DIRS, which matters because the stage that
+        creates a directory often also touches the previous one in the same second.
+        """
+        found = []
+        for index, (stage, rel) in enumerate(self.STAGE_DIRS):
+            path = self.outdir / rel
+            if path.is_dir():
+                try:
+                    found.append((path.stat().st_mtime, index, stage, path))
+                except OSError:
+                    continue
+        if not found:
+            return None
+        mtime, index, stage, path = max(found, key=lambda item: (item[0], item[1]))
+        self._mtime_spread = max(f[0] for f in found) - min(f[0] for f in found)
+        self._n_dirs = len(found)
+        return stage, path, mtime, index
+
+    def _detect_legacy_by_mtime(self):
+        """Order legacy stages by directory mtime and treat the newest as incomplete.
+
+        Without a progress record there is no way to know a stage finished; an intact
+        output file only shows it got far enough to write one. The newest directory is
+        the best available evidence of what was in flight, so that stage and everything
+        after it is redone, and everything before it is validated and kept.
+        """
+        newest = self.newest_stage()
+        if newest is None:
+            return None
+        stage, path, mtime, cut = newest
+        when = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        log.info("Resume: no progress record. Newest output directory is %s "
+                 "(modified %s), so stage '%s' is treated as unfinished; earlier "
+                 "stages are verified and kept.", path.name, when, stage)
+        if self._n_dirs > 1 and self._mtime_spread < 2.0:
+            log.warning(
+                "Resume: all %d output directories share almost the same timestamp "
+                "(%.1fs apart). The tree was probably copied or moved, which resets "
+                "mtimes, so stage ordering cannot be trusted. Check the inventory below "
+                "and pass the --reuse-*/--resume-reassembly flags yourself if it looks "
+                "wrong.", self._n_dirs, self._mtime_spread,
+            )
+        for index, (name, _rel) in enumerate(self.STAGE_DIRS):
+            if name not in self.EVIDENCE:
+                continue
+            if index >= cut:
+                self._add(name, "absent",
+                          f"at or after the interrupted stage '{stage}'")
+            elif self._validate(name):
+                self._add(name, "complete", "outputs verified (ordered by mtime)",
+                          self._paths(name))
+            elif any(_nonempty(p) for p in self._paths(name)):
+                self._add(name, "partial", "outputs truncated or incomplete")
+            else:
+                self._add(name, "absent", "not run")
+        return cut
+
+    def _detect(self):
+        manifest_path = self.outdir / "run_manifest.json"
+        if _nonempty(manifest_path):
+            try:
+                self.manifest = json.loads(manifest_path.read_text())
+            except ValueError:
+                self.manifest = {}
+
+        if not self.progress:
+            # Legacy directory: order the stages by directory mtime instead.
+            self.cut_stage = self._detect_legacy_by_mtime()
+            self._detect_bins()
+            self._detect_reassembly()
+            return
+
+        last_recorded = list(self.progress)[-1]
+        for stage in self.EVIDENCE:
+            if stage not in self.progress:
+                # Trust the record: the stage never finished. Do not re-derive from files.
+                self._add(stage, "absent", "not recorded as finished")
+                continue
+            # Validate a recorded stage only when it was the last thing recorded (the one
+            # a kill could have caught mid-write); earlier stages are taken as given.
+            if stage != last_recorded:
+                self._add(stage, "complete", "recorded complete", self._paths(stage))
+                continue
+            if self._validate(stage):
+                self._add(stage, "complete", "recorded complete, outputs verified",
+                          self._paths(stage))
+            elif any(_nonempty(p) for p in self._paths(stage)):
+                self._add(stage, "partial", "outputs truncated or incomplete")
+            else:
+                self._add(stage, "absent", "not run")
+
+        self._detect_bins()
+        self._detect_reassembly()
+
+    def _detect_bins(self):
+        bins_index = next(i for i, (n, _) in enumerate(self.STAGE_DIRS) if n == "bins")
+        if self.cut_stage is not None and bins_index >= self.cut_stage:
+            self._add("bins", "absent", "at or after the interrupted stage")
+            return
+        found = [r for r in self.ranks
+                 if complete_text(self.outdir / "bins" / r / "bin_membership.tsv")]
+        if found:
+            self._add("bins", "complete", f"bins written at {', '.join(found)}")
+        else:
+            self._add("bins", "absent", "not run")
+
+    def _detect_reassembly(self):
+        # Always counted per bin from disk: the stage is inherently resumable part way
+        # through, so "finished" is not a single fact a record could capture.
+        reasm = self.outdir / "reassembly"
+        if not reasm.is_dir():
+            self._add("reassembly", "absent", "not run")
+            return
+        done = total = 0
+        for rank_dir in sorted(p for p in reasm.iterdir() if p.is_dir()):
+            for bin_dir in sorted(p for p in rank_dir.iterdir() if p.is_dir()):
+                if bin_dir.name == "competitive_seed":
+                    continue
+                total += 1
+                if complete_fasta(bin_dir / "reassembled.fasta"):
+                    done += 1
+        bam = next(reasm.glob("*/competitive_seed/reads_to_all_bins.bam"), None)
+        detail = f"{done} bin(s) reassembled"
+        detail += "; seed mapping reusable" if _nonempty(bam) else \
+                  "; seed mapping missing or empty"
+        self._add("reassembly", "complete" if done and done == total else "partial", detail)
+
+    def status(self, name) -> str:
+        return self.stages.get(name, {}).get("status", "absent")
+
+    def done(self, name) -> bool:
+        return self.status(name) == "complete"
+
+    def log_inventory(self) -> None:
+        order = ["polyg", "qc", "assembly", "prodigal", "diamond", "bins",
+                 "reassembly", "final_prodigal", "final_diamond"]
+        log.info("Resume: inspected %s (from %s)", self.outdir, self.source)
+        for name in order:
+            st = self.stages.get(name)
+            if st:
+                log.info("  %-15s %-9s %s", name, st["status"], st["detail"])
+
+
+PROGRESS_FILE = "run_progress.jsonl"
+
+
+def record_stage(outdir: Path, stage: str, outputs=None, **info) -> None:
+    """Append one line recording that `stage` finished.
+
+    Recording completion is strictly better than inferring it later from the shape of
+    whatever files happen to be lying around: it is unambiguous, it preserves stage
+    order for free because the file is append-only, and the recorded byte counts detect
+    a file that was truncated after the fact. Failing to write the record must never
+    fail a stage that actually succeeded, so errors here are logged and swallowed.
+    """
+    paths = [Path(p) for p in (outputs or [])]
+    row = {
+        "stage": stage,
+        "finished": datetime.now().isoformat(timespec="seconds"),
+        "outputs": [str(p.relative_to(outdir)) if p.is_absolute() and
+                    str(p).startswith(str(outdir)) else str(p) for p in paths],
+        "bytes": {str(p.name): (p.stat().st_size if p.is_file() else None) for p in paths},
+    }
+    row.update(info)
+    try:
+        with open(outdir / PROGRESS_FILE, "a") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+    except OSError as exc:
+        log.warning("Could not record stage '%s' progress (%s).", stage, exc)
+
+
+def read_progress(outdir: Path) -> dict:
+    """{stage: record} for every stage recorded complete, last record per stage winning.
+
+    A partial final line is skipped: the process may have been killed mid-write, and a
+    half-written record is not evidence that its stage finished.
+    """
+    path = outdir / PROGRESS_FILE
+    if not _nonempty(path):
+        return {}
+    done = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue                      # truncated or corrupt final record
+        if isinstance(row, dict) and row.get("stage"):
+            done[row["stage"]] = row
+    return done
+
+
+def write_run_manifest(outdir: Path, args) -> None:
+    """Record the inputs so a later --resume can recover them without being told again."""
+    payload = {
+        "written": datetime.now().isoformat(timespec="seconds"),
+        "r1": str(args.r1) if args.r1 else None,
+        "r2": str(args.r2) if args.r2 else None,
+        "input": str(args.input) if args.input else None,
+        "diamond_hits": str(args.diamond_hits) if args.diamond_hits else None,
+        "diamond_db": str(args.diamond_db) if args.diamond_db else None,
+        "trimmomatic_folder": str(args.trimmomatic_folder) if args.trimmomatic_folder else None,
+        "ranks": args.ranks,
+        "min_support": args.min_support,
+        "max_hits_per_orf": args.max_hits_per_orf,
+        "trim_polyg": bool(args.trim_polyg),
+        "workflow": {key: getattr(args, key) for key in (
+            "mode", "expansion_mode", "reassemble_bins", "reassemble_max_rounds", "polish",
+            "skip_checkm", "skip_quast", "skip_preliminary_assessment", "skip_binarena",
+            "skip_bin_refinement", "skip_qc", "binarena_methods", "assembler", "target_bins",
+            "bin_minutes", "reassemble_min_recovered_fraction", "min_bin_length", "ranks", "inspect")},
+        "inspection_references": str(args.references.resolve()) if args.references else None,
+    }
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "run_manifest.json").write_text(json.dumps(payload, indent=2) + "\n")
+    except OSError as exc:
+        log.warning("Could not write run_manifest.json (%s); --resume will still work "
+                    "from the output files themselves.", exc)
+
+
+def apply_resume(args, state: RunState) -> None:
+    """Reconfigure args so the run restarts wherever the previous one stopped."""
+    state.log_inventory()
+    m = state.manifest
+
+    if args.references is None and args.inspect != "off" and m.get("inspection_references"):
+        args.references = Path(m["inspection_references"])
+    for key, value in m.get("workflow", {}).items():
+        if hasattr(args, key) and key not in getattr(args, "_provided_dests", set()):
+            setattr(args, key, value)
+    # Recover inputs the user did not repeat on the command line.
+    for attr in ("input", "r1", "r2", "diamond_hits", "diamond_db", "trimmomatic_folder"):
+        if getattr(args, attr, None) is None and m.get(attr):
+            setattr(args, attr, Path(m[attr]))
+            log.info("Resume: took %s from run_manifest.json (%s).", attr, m[attr])
+    for key, attr in (("ranks", "ranks"), ("min_support", "min_support"),
+                      ("max_hits_per_orf", "max_hits_per_orf")):
+        if key in m and m[key] is not None and getattr(args, attr) != m[key]:
+            log.warning("Resume: --%s is %r now but was %r in the run being resumed. "
+                        "Reused DIAMOND and Prodigal output stays valid, but "
+                        "classification will differ from the earlier bins.",
+                        attr.replace("_", "-"), getattr(args, attr), m[key])
+
+    # Skip poly-G by feeding its output straight in.
+    if state.done("polyg"):
+        g1, g2 = state.stages["polyg"]["paths"]
+        args.r1, args.r2 = g1, g2
+        if args.trim_polyg:
+            args.trim_polyg = False
+            log.info("Resume: reusing poly-G trimmed reads; skipping fastp.")
+        else:
+            log.info("Resume: using existing poly-G trimmed reads as input.")
+
+    # Skip QC + MEGAHIT by supplying the finished assembly as contigs.
+    if state.done("assembly") and args.input is None:
+        args.input = state.stages["assembly"]["paths"][0]
+        log.info("Resume: using the existing assembly %s; skipping QC and MEGAHIT.",
+                 args.input)
+
+    if state.done("prodigal") and not args.reuse_prodigal:
+        args.reuse_prodigal = True
+        log.info("Resume: reusing preliminary Prodigal output.")
+    if state.done("diamond") and not args.reuse_diamond:
+        args.reuse_diamond = True
+        log.info("Resume: reusing the preliminary DIAMOND hit table.")
+    if state.status("reassembly") in ("complete", "partial") and not args.resume_reassembly:
+        args.resume_reassembly = True
+        log.info("Resume: resuming the reassembly stage (%s).",
+                 state.stages["reassembly"]["detail"])
+
+    for name, label in (("prodigal", "prodigal"), ("diamond", "diamond"),
+                        ("assembly", "assembly"), ("qc", "qc"), ("polyg", "polyg")):
+        if state.status(name) == "partial":
+            log.warning("Resume: %s output looks truncated (%s); it will be redone.",
+                        label, state.stages[name]["detail"])
+
+    # Adopt what was detected into the progress record. Stages that resume *reuses* are
+    # never executed, so they would otherwise never be recorded, and a directory that
+    # has been resumed once has mtimes that no longer reflect the original pipeline
+    # order -- re-running a late stage bumps its directory while the reused early ones
+    # keep their old timestamps. Writing the record now makes every later resume
+    # record-driven and removes any further reliance on mtime ordering.
+    adopted = [name for name in state.EVIDENCE
+               if state.done(name) and name not in state.progress]
+    if adopted:
+        for name in adopted:
+            record_stage(args.outdir, name,
+                         [Path(p) for p in state.stages[name]["paths"]],
+                         adopted_from=state.source)
+        log.info("Resume: recorded %d already-complete stage(s) (%s) so future resumes "
+                 "read the progress record instead of directory timestamps.",
+                 len(adopted), ", ".join(adopted))
+
+
+# ----------------------------------------------- shared preliminary/final pass steps
+
+def triage_and_write_candidates(contig_seqs: dict, faa: Path, gff: Path, base_dir: Path,
+                                classification_dir: Path, skip_triage: bool,
+                                label: str) -> tuple:
+    """Gene-density triage plus the candidate-protein FASTA for DIAMOND.
+
+    Shared by the preliminary and final passes, which ran byte-identical copies of this
+    before. `base_dir` is the pass's own directory (the run root, or run/final).
+    """
+    orf_to_contig = parse_orf_to_contig(faa)
+    contig_metrics = compute_contig_metrics(contig_seqs, gff)
+    triage_calls, triage_excluded_ids = triage_contigs(
+        contig_metrics, disabled=skip_triage,
+    )
+    classification_dir.mkdir(parents=True, exist_ok=True)
+    triage_excluded_path = (
+        classification_dir / "excluded_eukaryotic_like_gene_density.fasta"
+    )
+    triage_excluded_path.unlink(missing_ok=True)
+    if triage_excluded_ids:
+        write_fasta(
+            triage_excluded_path,
+            {contig_id: contig_seqs[contig_id] for contig_id in triage_excluded_ids},
+        )
+        log.info("%s gene-density triage quarantined %d long, low-coding-density "
+                 "contig(s) before DIAMOND.", label, len(triage_excluded_ids))
+    diamond_query_faa = write_candidate_proteins(
+        faa, orf_to_contig, triage_excluded_ids,
+        base_dir / "prodigal" / "proteins.prokaryotic_candidates.faa",
+    )
+    log.info("%s: predicted %d ORFs.", label, len(orf_to_contig))
+    return (orf_to_contig, contig_metrics, triage_calls, triage_excluded_ids,
+            diamond_query_faa)
+
+
+def split_and_write_excluded(classifications: dict, contig_seqs: dict,
+                             triage_excluded_ids: set, exclude_kingdoms,
+                             classification_dir: Path, label: str) -> tuple:
+    """Drop triaged contigs, then apply the animal/plant kingdom filter.
+
+    Shared by both passes. Returns (for_binning, excluded_ids).
+    """
+    triage_retained = {
+        contig_id: result for contig_id, result in classifications.items()
+        if contig_id not in triage_excluded_ids
+    }
+    for_binning, excluded_ids = split_excluded_eukaryotes(
+        triage_retained, exclude_kingdoms,
+    )
+    excluded_path = classification_dir / "excluded_animal_plant_contamination.fasta"
+    excluded_path.unlink(missing_ok=True)
+    if excluded_ids:
+        log.info("%s: excluding %d contig(s) classified as %s.",
+                 label, len(excluded_ids), exclude_kingdoms)
+        write_fasta(excluded_path, {
+            cid: contig_seqs[cid] for cid in excluded_ids if cid in contig_seqs
+        })
+    return for_binning, excluded_ids
+
+
+def run_qc(r1: Path, r2: Path, outdir: Path, threads: int,
+           trimmomatic_cmd: str, trimmomatic_folder: Path,
+           flash_cmd: str, flash_max_overlap: int, pigz_cmd: str,
+           qc_quality: int, qc_minlen: int, keep_tmp: bool = False) -> tuple:
+    """Adapter-trim (Trimmomatic ILLUMINACLIP), quality-trim (SLIDINGWINDOW), and merge
+    overlapping pairs (FLASH) -- the same recipe as QC_reads.sh (Trimmomatic PE adapter
+    clip -> quality-trim the orphaned singles -> FLASH-merge the still-paired reads ->
+    quality-trim the merged fragments and the unmerged pairs -> pool every singleton/
+    merged read into one file -> gzip). Returns (paired_r1.gz, paired_r2.gz, unpaired.gz).
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    log_file = outdir / "qc.log"
+    base = outdir / "reads"
+
+    adapters = Path(trimmomatic_folder) / "adapters" / "TruSeq3-PE-2.fa"
+    if not adapters.exists():
+        log.error("Adapter file not found: %s (check --trimmomatic-folder)", adapters)
+        sys.exit(1)
+
+    # 1. Adapter clip (paired)
+    run_cmd([
+        trimmomatic_cmd, "PE", "-threads", str(threads), "-baseout", str(base),
+        str(r1), str(r2), f"ILLUMINACLIP:{adapters}:2:30:10",
+    ], log_file=log_file)
+    p1, u1 = Path(f"{base}_1P"), Path(f"{base}_1U")
+    p2, u2 = Path(f"{base}_2P"), Path(f"{base}_2U")
+
+    # 2. Quality-trim the reads that lost their mate during adapter clipping
+    u1_qt, u2_qt = Path(f"{u1}.qual_trimmed"), Path(f"{u2}.qual_trimmed")
+    for u_in, u_out, what in ((u1, u1_qt, "forward-only orphans"),
+                              (u2, u2_qt, "reverse-only orphans")):
+        trimmomatic_se_if_reads(trimmomatic_cmd, threads, u_in, u_out,
+                                qc_quality, qc_minlen, log_file, what)
+
+    # 3. Merge overlapping pairs
+    run_cmd([
+        flash_cmd, "--threads", str(threads), "--output-prefix", "flash",
+        "--max-overlap", str(flash_max_overlap), str(p1), str(p2),
+        "--output-directory", str(outdir),
+    ], log_file=log_file)
+    merged = outdir / "flash.extendedFrags.fastq"
+    nc1 = outdir / "flash.notCombined_1.fastq"
+    nc2 = outdir / "flash.notCombined_2.fastq"
+
+    # 4. Quality-trim the merged fragments
+    merged_final = outdir / "merged.final.fastq"
+    trimmomatic_se_if_reads(trimmomatic_cmd, threads, merged, merged_final,
+                            qc_quality, qc_minlen, log_file, "FLASH-merged fragments")
+
+    # 5. Quality-trim the pairs FLASH couldn't merge
+    nc_base = outdir / "notcombined.final"
+    nc_p1, nc_u1 = Path(f"{nc_base}_1P"), Path(f"{nc_base}_1U")
+    nc_p2, nc_u2 = Path(f"{nc_base}_2P"), Path(f"{nc_base}_2U")
+    if count_fastq_reads(nc1) == 0 or count_fastq_reads(nc2) == 0:
+        # FLASH merged every pair, so there is nothing left to quality-trim as pairs.
+        log.info("FLASH left no unmerged pairs; skipping the paired quality-trim pass.")
+        for path in (nc_p1, nc_u1, nc_p2, nc_u2):
+            path.write_bytes(b"")
+    else:
+        run_cmd([trimmomatic_cmd, "PE", "-threads", str(threads), str(nc1), str(nc2),
+                 "-baseout", str(nc_base), f"SLIDINGWINDOW:4:{qc_quality}",
+                 f"MINLEN:{qc_minlen}"], log_file=log_file)
+
+    # 6. Pool every orphan/singleton/merged read into one unpaired file
+    unpaired = outdir / "unpaired.fq"
+    with open(unpaired, "w") as out_fh:
+        for part in (merged_final, nc_u1, nc_u2, u1_qt, u2_qt):
+            if part.exists() and part.stat().st_size > 0:
+                with open(part) as in_fh:
+                    shutil.copyfileobj(in_fh, out_fh)
+
+    # 7. Compress the final paired + unpaired reads (pigz if available, else gzip)
+    gzip_cmd = pigz_cmd if shutil.which(pigz_cmd) else "gzip"
+    gzip_opts = ["--best", "--processes", str(threads)] if gzip_cmd == pigz_cmd else ["-9"]
+    run_cmd([gzip_cmd, "-f", *gzip_opts, str(nc_p1), str(nc_p2), str(unpaired)], log_file=log_file)
+    final_r1, final_r2, final_u = Path(f"{nc_p1}.gz"), Path(f"{nc_p2}.gz"), Path(f"{unpaired}.gz")
+
+    if not keep_tmp:
+        for f in (p1, u1, p2, u2, u1_qt, u2_qt, merged, nc1, nc2, merged_final, nc_u1, nc_u2):
+            Path(f).unlink(missing_ok=True)
+
+    log.info("QC done: %s, %s, %s", final_r1, final_r2, final_u)
+    return final_r1, final_r2, final_u
+
+
+# --------------------------------------------------------------------------------------
+# Step 0c: MEGAHIT assembly -- optional, only for raw-reads (--r1/--r2) input
+# --------------------------------------------------------------------------------------
+
+def run_megahit(r1: Path, r2: Path, unpaired: Path, outdir: Path, threads: int,
+                 megahit_cmd: str = "megahit", min_contig_len: int = None,
+                 extra_args: str = None) -> Path:
+    """Runs MEGAHIT on paired (+ optional unpaired) reads. MEGAHIT refuses to write into
+    an existing output directory, so it's removed first if present (e.g. on a rerun)."""
+    if outdir.exists():
+        log.warning("Removing existing MEGAHIT output dir: %s", outdir)
+        shutil.rmtree(outdir)
+    outdir.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [megahit_cmd, "-1", str(r1), "-2", str(r2), "-t", str(threads), "-o", str(outdir)]
+    if unpaired:
+        cmd += ["-r", str(unpaired)]
+    if min_contig_len:
+        cmd += ["--min-contig-len", str(min_contig_len)]
+    if extra_args:
+        cmd += shlex.split(extra_args)
+
+    log_file = outdir.parent / "megahit.log"
+    run_cmd(cmd, log_file=log_file)
+
+    contigs = outdir / "final.contigs.fa"
+    if not contigs.exists():
+        raise RuntimeError(f"MEGAHIT did not produce {contigs}")
+    return contigs
+
+
+# --------------------------------------------------------------------------------------
+# Step 1: Prodigal
+# --------------------------------------------------------------------------------------
+
+def run_prodigal(fasta: Path, outdir: Path, mode: str = "meta") -> tuple:
+    outdir.mkdir(parents=True, exist_ok=True)
+    faa = outdir / "proteins.faa"
+    gff = outdir / "genes.gff"
+    log_file = outdir / "prodigal.log"
+    cmd = [
+        "prodigal", "-i", str(fasta), "-a", str(faa), "-f", "gff", "-o", str(gff),
+        "-p", mode, "-q",
+    ]
+    run_cmd(cmd, log_file=log_file)
+    return faa, gff
+
+
+def parse_orf_to_contig(faa: Path) -> dict:
+    """Prodigal names ORFs '<contig_id>_<gene_number>'. Map orf_id -> contig_id."""
+    mapping = {}
+    with open(faa) as fh:
+        for line in fh:
+            if not line.startswith(">"):
+                continue
+            orf_id = line[1:].split()[0]
+            idx = orf_id.rfind("_")
+            if idx == -1 or not orf_id[idx + 1:].isdigit():
+                log.warning("Could not parse contig id from ORF header: %s", orf_id)
+                continue
+            contig_id = orf_id[:idx]
+            mapping[orf_id] = contig_id
+    return mapping
+
+
+def compute_contig_metrics(contig_seqs: dict, gff: Path) -> dict:
+    """Calculate sequence and Prodigal gene-density metrics for every contig.
+
+    Coding density is the fraction of contig bases covered by the union of predicted CDS
+    intervals. Using the interval union prevents overlapping calls from producing values
+    above one. Coverage fields are populated later when paired reads are available.
+    """
+    cds_intervals = defaultdict(list)
+    if gff and Path(gff).exists():
+        with open(gff) as fh:
+            for line in fh:
+                if not line or line.startswith("#"):
+                    continue
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) < 5 or (len(fields) >= 3 and fields[2] != "CDS"):
+                    continue
+                try:
+                    start = max(0, int(fields[3]) - 1)
+                    end = int(fields[4])
+                except ValueError:
+                    continue
+                if end > start:
+                    cds_intervals[fields[0]].append((start, end))
+
+    metrics = {}
+    for contig_id, sequence in contig_seqs.items():
+        seq = sequence.upper()
+        length = len(seq)
+        acgt = sum(seq.count(base) for base in "ACGT")
+        gc_fraction = ((seq.count("G") + seq.count("C")) / acgt) if acgt else 0.0
+        intervals = sorted(cds_intervals.get(contig_id, []))
+        merged = []
+        for start, end in intervals:
+            start, end = min(start, length), min(end, length)
+            if end <= start:
+                continue
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        coding_bp = sum(end - start for start, end in merged)
+        cds_lengths = [min(end, length) - min(start, length) for start, end in intervals]
+        cds_lengths = [value for value in cds_lengths if value > 0]
+        metrics[contig_id] = {
+            "length_bp": length,
+            "gc_fraction": gc_fraction,
+            "coding_bp": coding_bp,
+            "coding_density": (coding_bp / length) if length else 0.0,
+            "n_cds": len(intervals),
+            "mean_cds_length_bp": (
+                sum(cds_lengths) / len(cds_lengths) if cds_lengths else 0.0
+            ),
+            "mean_depth": None,
+            "covered_fraction": None,
+        }
+    return metrics
+
+
+def triage_contigs(contig_metrics: dict, disabled: bool = False) -> tuple:
+    """Return ``(call_by_contig, quarantined_ids)`` from coding density.
+
+    Short contigs are retained as uncertain because coding density is unstable at short
+    lengths. The threshold is intentionally stringent: this is a preliminary screen, not
+    a substitute for the later DIAMOND taxonomy classification.
+    """
+    calls = {}
+    quarantined = set()
+    for contig_id, metric in contig_metrics.items():
+        if disabled:
+            call = "disabled"
+        elif metric["length_bp"] < TRIAGE_MIN_LENGTH_BP:
+            call = "uncertain_short_retained"
+        elif metric["coding_density"] < TRIAGE_MAX_EUKARYOTIC_CODING_DENSITY:
+            call = "eukaryotic_like_quarantined"
+            quarantined.add(contig_id)
+        else:
+            call = "prokaryotic_like_retained"
+        calls[contig_id] = call
+    return calls, quarantined
+
+
+def write_candidate_proteins(faa: Path, orf_to_contig: dict, excluded_contigs: set,
+                             out_path: Path) -> Path:
+    """Write the Prodigal proteins whose parent contigs passed preliminary triage."""
+    if not excluded_contigs:
+        out_path.unlink(missing_ok=True)
+        return faa
+    proteins = read_fasta(faa)
+    retained = {
+        orf_id: sequence for orf_id, sequence in proteins.items()
+        if orf_to_contig.get(orf_id) not in excluded_contigs
+    }
+    write_fasta(out_path, retained)
+    return out_path
+
+
+# --------------------------------------------------------------------------------------
+# Step 2: DIAMOND
+# --------------------------------------------------------------------------------------
+
+def run_diamond(query_faa: Path, db: Path, outdir: Path, threads: int, evalue: float,
+                 max_target_seqs: int) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    hits_tsv = outdir / "hits.tsv"
+    log_file = outdir / "diamond.log"
+    if not query_faa.exists() or query_faa.stat().st_size == 0:
+        log.warning("No proteins passed contig triage; writing an empty DIAMOND result.")
+        hits_tsv.write_text("")
+        return hits_tsv
+    cmd = [
+        "diamond", "blastp",
+        "-q", str(query_faa),
+        "-d", str(db),
+        "-o", str(hits_tsv),
+        "-e", str(evalue),
+        "-k", str(max_target_seqs),
+        "--threads", str(threads),
+        "--outfmt", "6", *DIAMOND_FIELDS,
+    ]
+    run_cmd(cmd, log_file=log_file)
+    return hits_tsv
+
+
+class Hit:
+    __slots__ = ("sseqid", "pident", "length", "evalue", "bitscore", "lineage")
+
+    def __init__(self, sseqid, pident, length, evalue, bitscore, lineage):
+        self.sseqid = sseqid
+        self.pident = pident
+        self.length = length
+        self.evalue = evalue
+        self.bitscore = bitscore
+        self.lineage = lineage
+
+
+def parse_diamond_taxa(value: str) -> tuple:
+    """Return the unique taxa represented by one DIAMOND taxonomy field.
+
+    A protein accession can be associated with more than one taxid. DIAMOND may render
+    the resulting names with semicolon or ``<>`` separators. Keeping every unique value
+    and splitting the hit's vote avoids making an arbitrary first-name assignment.
+    """
+    if not value or value in {"N/A", "*", "0"}:
+        return ()
+    return tuple(dict.fromkeys(
+        item.strip() for item in re.split(r"\s*(?:<>|;)\s*", value) if item.strip()
+    ))
+
+
+def parse_diamond_hits(hits_tsv: Path) -> dict:
+    """Return ``{orf_id: [Hit, ...]}`` with hierarchy read from nr-tax.dmnd."""
+    hits_by_orf = defaultdict(list)
+    idx = {f: i for i, f in enumerate(DIAMOND_FIELDS)}
+    any_taxonomy = False
+    # A metagenome's millions of hits resolve to only a few thousand distinct lineages,
+    # so building a fresh dict of rank -> taxa tuples per hit wastes most of the memory
+    # this function uses. Cache by the raw taxonomy fields and share one immutable
+    # lineage between every hit that has it; Hit.lineage is only ever read.
+    rank_fields = [(rank, idx[field]) for rank, field in DIAMOND_RANK_FIELDS.items()]
+    lineage_cache = {}
+    with open(hits_tsv) as fh:
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) < len(DIAMOND_FIELDS):
+                continue
+            key = tuple(f[i] for _rank, i in rank_fields)
+            lineage = lineage_cache.get(key)
+            if lineage is None:
+                lineage = {rank: parse_diamond_taxa(f[i]) for rank, i in rank_fields}
+                lineage_cache[key] = lineage
+                if any(lineage.values()):
+                    any_taxonomy = True
+            elif not any_taxonomy and any(lineage.values()):
+                any_taxonomy = True
+            hits_by_orf[sys.intern(f[idx["qseqid"]])].append(Hit(
+                sseqid=f[idx["sseqid"]],
+                pident=float(f[idx["pident"]]),
+                length=int(f[idx["length"]]),
+                evalue=float(f[idx["evalue"]]),
+                bitscore=float(f[idx["bitscore"]]),
+                lineage=lineage,
+            ))
+    if hits_by_orf and not any_taxonomy:
+        log.warning(
+            "DIAMOND returned protein hits but no rank-resolved taxonomy. Confirm that "
+            "-d points to nr-tax.dmnd built with --taxonmap, --taxonnodes, and "
+            "--taxonnames, and that DIAMOND is version 2.1.17 or newer."
+        )
+    return hits_by_orf
+
+
+def infer_orf_to_contig_from_hits(hits_by_orf: dict, contig_ids) -> tuple:
+    """Recover Prodigal ORF -> contig names from an existing DIAMOND table."""
+    contig_set = set(contig_ids)
+    mapping = {}
+    unmatched = []
+    for orf_id in hits_by_orf:
+        idx = orf_id.rfind("_")
+        if idx == -1 or not orf_id[idx + 1:].isdigit():
+            unmatched.append(orf_id)
+            continue
+        contig_id = orf_id[:idx]
+        if contig_id not in contig_set:
+            unmatched.append(orf_id)
+            continue
+        mapping[orf_id] = contig_id
+    return mapping, unmatched
+
+
+def metrics_without_prodigal(contig_seqs: dict) -> dict:
+    """Length/GC metrics for -b, where the preliminary Prodigal GFF is not regenerated."""
+    metrics = {}
+    for contig_id, sequence in contig_seqs.items():
+        seq = sequence.upper()
+        length = len(seq)
+        acgt = sum(seq.count(base) for base in "ACGT")
+        gc_fraction = ((seq.count("G") + seq.count("C")) / acgt) if acgt else 0.0
+        metrics[contig_id] = {
+            "length_bp": length, "gc_fraction": gc_fraction,
+            "coding_bp": None, "coding_density": None, "n_cds": None,
+            "mean_cds_length_bp": None, "mean_depth": None, "covered_fraction": None,
+        }
+    return metrics
+
+
+# --------------------------------------------------------------------------------------
+# Step 3: Taxonomy is read directly from nr-tax.dmnd DIAMOND output fields.
+# --------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------
+# Step 4: Per-contig classification (bitscore-weighted majority/plurality vote per rank)
+# --------------------------------------------------------------------------------------
+
+def classify_contig(orf_ids, hits_by_orf: dict, ranks,
+                     bitscore_range: float = 0.9, max_hits_per_orf: int = 5,
+                     min_support: float = 0.5,
+                     support_denominator: str = "all") -> dict:
+    """Bitscore-weighted vote per rank, tallied independently at each rank.
+
+    ``support_denominator`` controls what the winning taxon's weight is divided by:
+
+      "all"   -- every kept hit's bitscore, whether or not that hit carries a name at
+                 this rank. This is the historical behaviour. It systematically deflates
+                 support at fine ranks, because a large share of NR entries have a genus
+                 but no species-rank name ("Wolbachia sp.", environmental entries, etc.),
+                 and those hits enlarge the denominator while contributing to no species.
+      "named" -- only hits that actually carry a name at this rank. Support then answers
+                 "among the hits that could vote at this rank, how dominant is the
+                 winner?", which is usually what you want when comparing ranks. It makes
+                 species-level calls considerably more permissive, so it is opt-in.
+    """
+    rank_weights = {r: defaultdict(float) for r in ranks}
+    total_weight = {r: 0.0 for r in ranks}
+    n_orfs_with_hits = 0
+
+    for orf_id in orf_ids:
+        hits = hits_by_orf.get(orf_id)
+        if not hits:
+            continue
+        hits_sorted = sorted(hits, key=lambda h: h.bitscore, reverse=True)
+        best_bs = hits_sorted[0].bitscore
+        if best_bs <= 0:
+            continue
+        kept = [h for h in hits_sorted if h.bitscore >= bitscore_range * best_bs][:max_hits_per_orf]
+        if kept:
+            n_orfs_with_hits += 1
+        for h in kept:
+            for r in ranks:
+                names = h.lineage.get(r, ())
+                if names or support_denominator == "all":
+                    total_weight[r] += h.bitscore
+                if names:
+                    per_name_weight = h.bitscore / len(names)
+                    for name in names:
+                        rank_weights[r][name] += per_name_weight
+
+    result = {}
+    for r in ranks:
+        weights = rank_weights[r]
+        tw = total_weight[r]
+        if tw <= 0 or not weights:
+            result[r] = ("Unclassified", 0.0)
+            continue
+        top_taxon, top_w = max(weights.items(), key=lambda kv: kv[1])
+        support = top_w / tw
+        result[r] = (top_taxon, round(support, 4)) if support >= min_support else ("Unclassified", round(support, 4))
+    result["_n_orfs_total"] = len(orf_ids)
+    result["_n_orfs_with_hits"] = n_orfs_with_hits
+    return result
+
+
+def classify_all_contigs(contig_ids, orf_to_contig, hits_by_orf, ranks,
+                          bitscore_range, max_hits_per_orf, min_support,
+                          support_denominator="all") -> dict:
+    contig_to_orfs = defaultdict(list)
+    for orf_id, contig_id in orf_to_contig.items():
+        contig_to_orfs[contig_id].append(orf_id)
+
+    classifications = {}
+    for i, contig_id in enumerate(contig_ids, 1):
+        orfs = contig_to_orfs.get(contig_id, [])
+        classifications[contig_id] = classify_contig(
+            orfs, hits_by_orf, ranks, bitscore_range, max_hits_per_orf, min_support,
+            support_denominator,
+        )
+        if i % 500 == 0:
+            log.info("Classified %d/%d contigs...", i, len(contig_ids))
+    return classifications
+
+
+def write_classification_table(classifications: dict, ranks, out_path: Path,
+                                excluded_ids: set = None, contig_metrics: dict = None,
+                                triage_calls: dict = None, triage_excluded_ids: set = None,
+                                refinement_decisions: dict = None) -> None:
+    excluded_ids = excluded_ids or set()
+    contig_metrics = contig_metrics or {}
+    triage_calls = triage_calls or {}
+    triage_excluded_ids = triage_excluded_ids or set()
+    refinement_decisions = refinement_decisions or {}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        header = [
+            "contig", "length_bp", "GC_percent", "coding_density", "n_cds",
+            "mean_depth", "covered_fraction", "triage_call", "excluded_gene_density",
+            "refinement_status", "n_orfs", "n_orfs_with_hits",
+        ]
+        for r in ranks:
+            header += [r, f"{r}_support"]
+        header.append("excluded_animal_plant")
+        w.writerow(header)
+        for contig_id, res in classifications.items():
+            metric = contig_metrics.get(contig_id, {})
+            decision = refinement_decisions.get(contig_id, {})
+            mean_depth = metric.get("mean_depth")
+            covered_fraction = metric.get("covered_fraction")
+            row = [
+                contig_id,
+                metric.get("length_bp", "NA"),
+                (f"{100.0 * metric.get('gc_fraction', 0.0):.3f}"
+                 if metric else "NA"),
+                (f"{metric.get('coding_density'):.5f}"
+                 if metric and metric.get("coding_density") is not None else "NA"),
+                (metric.get("n_cds") if metric and metric.get("n_cds") is not None else "NA"),
+                (f"{mean_depth:.5f}" if mean_depth is not None else "NA"),
+                (f"{covered_fraction:.5f}" if covered_fraction is not None else "NA"),
+                triage_calls.get(contig_id, "not_evaluated"),
+                contig_id in triage_excluded_ids,
+                decision.get("status", "not_evaluated"),
+                res["_n_orfs_total"],
+                res["_n_orfs_with_hits"],
+            ]
+            for r in ranks:
+                taxon, support = res[r]
+                row += [taxon, support]
+            row.append(contig_id in excluded_ids)
+            w.writerow(row)
+
+
+def split_excluded_eukaryotes(classifications: dict, exclude_kingdoms) -> tuple:
+    """Splits off contigs whose (always-computed) 'kingdom' classification confidently
+    matches one of exclude_kingdoms -- by default Metazoa/Viridiplantae, i.e. host-animal
+    or plant contamination. Bacteria, Archaea, Fungi, and protist lineages (which mostly
+    have no formal kingdom-rank ancestor in NCBI taxonomy, so 'kingdom' comes back
+    Unclassified for them) are never matched here and always pass through.
+
+    Returns (kept_classifications, excluded_contig_ids).
+    """
+    if not exclude_kingdoms:
+        return classifications, set()
+    exclude_set = set(exclude_kingdoms)
+    kept = {}
+    excluded = set()
+    for contig_id, res in classifications.items():
+        kingdom, _support = res.get("kingdom", ("Unclassified", 0.0))
+        if kingdom in exclude_set:
+            excluded.add(contig_id)
+        else:
+            kept[contig_id] = res
+    return kept, excluded
+
+
+def _median_absolute_deviation(values, center=None) -> float:
+    if not values:
+        return 0.0
+    center = statistics.median(values) if center is None else center
+    return statistics.median(abs(value - center) for value in values)
+
+
+def choose_refinement_rank(ranks, requested: str = "auto") -> str:
+    """Choose a genome-oriented rank for GC/coverage coherence checks."""
+    if requested and requested != "auto":
+        if requested not in ranks:
+            raise ValueError(
+                f"--refinement-rank '{requested}' must occur in --ranks "
+                f"(available: {','.join(ranks)})."
+            )
+        return requested
+    # Prefer species so distinct species within one genus are not mistaken for GC/depth
+    # outliers. Fall back toward broader ranks only when finer calls were not requested.
+    for rank in ("species", "genus", "family", "phylum", "kingdom", "superkingdom", "domain"):
+        if rank in ranks:
+            return rank
+    return ranks[-1]
+
+
+def refine_taxonomic_bins(classifications: dict, contig_metrics: dict, rank: str,
+                          enabled: bool = True) -> tuple:
+    """Detect strong within-taxon GC *and* coverage outliers.
+
+    Robust bin centers are learned only from long, strongly classified contigs. A contig
+    is called discordant only when both GC and log2-depth exceed conservative, MAD-based
+    thresholds (with absolute floors). This deliberately avoids treating strain-level GC
+    variation, repeats, plasmids, or coverage noise as enough evidence on their own.
+    """
+    decisions = {}
+    groups = defaultdict(list)
+    for contig_id, res in classifications.items():
+        taxon, support = res.get(rank, ("Unclassified", 0.0))
+        decision = {
+            "rank": rank,
+            "taxon": taxon,
+            "support": support,
+            "status": "not_evaluated",
+            "gc_outlier": False,
+            "coverage_outlier": False,
+            "joint_outlier": False,
+        }
+        decisions[contig_id] = decision
+        if taxon == "Unclassified":
+            decision["status"] = "unclassified_not_refined"
+        else:
+            groups[taxon].append(contig_id)
+
+    outliers = set()
+    for taxon, contig_ids in groups.items():
+        references = [
+            contig_id for contig_id in contig_ids
+            if contig_metrics.get(contig_id, {}).get("length_bp", 0)
+            >= REFINEMENT_MIN_CONTIG_LENGTH_BP
+            and classifications[contig_id][rank][1] >= REFINEMENT_MIN_TAXON_SUPPORT
+            and contig_metrics.get(contig_id, {}).get("mean_depth") is not None
+        ]
+        if not enabled:
+            for contig_id in contig_ids:
+                decisions[contig_id]["status"] = "disabled"
+            continue
+        if len(references) < REFINEMENT_MIN_REFERENCE_CONTIGS:
+            for contig_id in contig_ids:
+                decisions[contig_id]["status"] = "insufficient_reference_contigs"
+            continue
+
+        gc_values = [contig_metrics[contig_id]["gc_fraction"] for contig_id in references]
+        depth_values = [contig_metrics[contig_id]["mean_depth"] for contig_id in references]
+        positive_depths = [value for value in depth_values if value > 0]
+        if not positive_depths:
+            for contig_id in contig_ids:
+                decisions[contig_id]["status"] = "no_coverage_signal"
+            continue
+        depth_floor = max(0.01, statistics.median(positive_depths) * 0.01)
+        log_depth_values = [math.log2(value + depth_floor) for value in depth_values]
+        gc_center = statistics.median(gc_values)
+        depth_center = statistics.median(log_depth_values)
+        gc_threshold = max(
+            REFINEMENT_GC_ABSOLUTE_FLOOR,
+            REFINEMENT_ROBUST_Z * 1.4826 * _median_absolute_deviation(gc_values, gc_center),
+        )
+        depth_threshold = max(
+            REFINEMENT_COVERAGE_LOG2_FLOOR,
+            REFINEMENT_ROBUST_Z * 1.4826
+            * _median_absolute_deviation(log_depth_values, depth_center),
+        )
+
+        for contig_id in contig_ids:
+            metric = contig_metrics.get(contig_id, {})
+            decision = decisions[contig_id]
+            decision.update({
+                "gc_center": gc_center,
+                "log2_depth_center": depth_center,
+                "gc_threshold": gc_threshold,
+                "log2_depth_threshold": depth_threshold,
+            })
+            if metric.get("length_bp", 0) < REFINEMENT_MIN_CONTIG_LENGTH_BP:
+                decision["status"] = "short_contig_not_refined"
+                continue
+            depth = metric.get("mean_depth")
+            if depth is None:
+                decision["status"] = "coverage_unavailable"
+                continue
+            gc_delta = abs(metric.get("gc_fraction", 0.0) - gc_center)
+            depth_delta = abs(math.log2(depth + depth_floor) - depth_center)
+            decision["gc_delta"] = gc_delta
+            decision["log2_depth_delta"] = depth_delta
+            decision["gc_outlier"] = gc_delta > gc_threshold
+            decision["coverage_outlier"] = depth_delta > depth_threshold
+            decision["joint_outlier"] = (
+                decision["gc_outlier"] and decision["coverage_outlier"]
+            )
+            if decision["joint_outlier"]:
+                decision["status"] = "joint_gc_coverage_outlier"
+                outliers.add(contig_id)
+            elif decision["gc_outlier"]:
+                decision["status"] = "gc_only_outlier_retained"
+            elif decision["coverage_outlier"]:
+                decision["status"] = "coverage_only_outlier_retained"
+            else:
+                decision["status"] = "coherent"
+    return decisions, outliers
+
+
+def write_refinement_table(decisions: dict, contig_metrics: dict, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "contig", "rank", "taxon", "taxon_support", "length_bp", "GC_percent",
+        "mean_depth", "covered_fraction", "GC_center_percent", "GC_delta_percent",
+        "GC_threshold_percent", "log2_depth_center", "log2_depth_delta",
+        "log2_depth_threshold", "GC_outlier", "coverage_outlier", "joint_outlier",
+        "status",
+    ]
+    with open(out_path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(fields)
+        for contig_id, decision in decisions.items():
+            metric = contig_metrics.get(contig_id, {})
+            writer.writerow([
+                contig_id, decision.get("rank", "NA"), decision.get("taxon", "NA"),
+                decision.get("support", "NA"), metric.get("length_bp", "NA"),
+                (f"{100.0 * metric.get('gc_fraction', 0.0):.3f}" if metric else "NA"),
+                (f"{metric['mean_depth']:.5f}"
+                 if metric.get("mean_depth") is not None else "NA"),
+                (f"{metric['covered_fraction']:.5f}"
+                 if metric.get("covered_fraction") is not None else "NA"),
+                (f"{100.0 * decision['gc_center']:.3f}"
+                 if "gc_center" in decision else "NA"),
+                (f"{100.0 * decision['gc_delta']:.3f}"
+                 if "gc_delta" in decision else "NA"),
+                (f"{100.0 * decision['gc_threshold']:.3f}"
+                 if "gc_threshold" in decision else "NA"),
+                (f"{decision['log2_depth_center']:.5f}"
+                 if "log2_depth_center" in decision else "NA"),
+                (f"{decision['log2_depth_delta']:.5f}"
+                 if "log2_depth_delta" in decision else "NA"),
+                (f"{decision['log2_depth_threshold']:.5f}"
+                 if "log2_depth_threshold" in decision else "NA"),
+                decision.get("gc_outlier", False),
+                decision.get("coverage_outlier", False),
+                decision.get("joint_outlier", False), decision.get("status", "NA"),
+            ])
+
+
+def demote_refinement_outliers(classifications: dict, outlier_ids: set, rank: str) -> dict:
+    """Demote a final joint outlier at ``rank`` and its more-specific descendants."""
+    refined = {contig_id: result.copy() for contig_id, result in classifications.items()}
+    try:
+        start = REFINEMENT_RANK_ORDER.index(rank)
+    except ValueError:
+        return refined
+    demoted_ranks = set(REFINEMENT_RANK_ORDER[start:])
+    for contig_id in outlier_ids:
+        if contig_id not in refined:
+            continue
+        for candidate_rank in demoted_ranks:
+            if candidate_rank in refined[contig_id]:
+                _taxon, support = refined[contig_id][candidate_rank]
+                refined[contig_id][candidate_rank] = ("Unclassified", support)
+    return refined
+
+
+# --------------------------------------------------------------------------------------
+# Step 5: Binning
+# --------------------------------------------------------------------------------------
+
+def bin_contigs(contig_seqs: dict, classifications: dict, ranks, outdir: Path,
+                 include_unclassified: bool = True) -> dict:
+    """Writes <outdir>/<rank>/<taxon>.fasta for every rank in `ranks`.
+    Returns {rank: {bin_name: [contig_ids]}}."""
+    membership = {}
+    for r in ranks:
+        rank_dir = outdir / r
+        rank_dir.mkdir(parents=True, exist_ok=True)
+        bins = defaultdict(list)
+        for contig_id, res in classifications.items():
+            taxon, _support = res[r]
+            if taxon == "Unclassified" and not include_unclassified:
+                continue
+            bins[sanitize(taxon)].append(contig_id)
+        # Remove bin FASTAs left over from a previous run with different parameters.
+        # Without this, a re-run whose taxon set changed (a different --min-support,
+        # --max-hits-per-orf, --ranks, or a reused DIAMOND table) leaves orphaned
+        # <Taxon>.fasta files sitting beside the current ones. Their contigs are also
+        # written into the new bins, so the directory listing double-counts sequence and
+        # no longer matches bin_membership.tsv. Only *.fasta bin files are considered:
+        # tables and tool subdirectories (quast_out/, checkm_out/) are left alone.
+        current = {f"{bin_name}.fasta" for bin_name in bins}
+        stale = sorted(
+            p for p in rank_dir.glob("*.fasta")
+            if p.is_file() and p.name not in current
+        )
+        if stale:
+            log.warning(
+                "Rank '%s': removing %d stale bin FASTA(s) from a previous run: %s",
+                r, len(stale), ", ".join(p.name for p in stale),
+            )
+            for p in stale:
+                p.unlink(missing_ok=True)
+
+        for bin_name, contig_ids in bins.items():
+            records = {cid: contig_seqs[cid] for cid in contig_ids if cid in contig_seqs}
+            write_fasta(rank_dir / f"{bin_name}.fasta", records)
+        membership[r] = bins
+        with open(rank_dir / "bin_membership.tsv", "w", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t")
+            w.writerow(["bin", "contig"])
+            for bin_name, contig_ids in bins.items():
+                for cid in contig_ids:
+                    w.writerow([bin_name, cid])
+        log.info("Rank '%s': wrote %d bin FASTA files to %s", r, len(bins), rank_dir)
+    return membership
+
+
+def filter_small_bins(contig_seqs: dict, membership: dict, ranks, bins_outdir: Path,
+                       min_bin_contigs: int, min_bin_length: int,
+                       include_unclassified: bool) -> dict:
+    """Merges bins smaller than the given thresholds into Unclassified (or drops them
+    entirely if include_unclassified is False), rewriting the bin FASTAs/membership.tsv
+    in place. Returns the updated {rank: {bin_name: [contig_ids]}}."""
+    if min_bin_contigs <= 1 and min_bin_length <= 0:
+        return membership
+
+    for r in ranks:
+        rank_dir = bins_outdir / r
+        bins = membership[r]
+        kept = {}
+        merged = []
+        n_dropped_bins = 0
+        for bin_name, contig_ids in bins.items():
+            if bin_name == "Unclassified":
+                kept[bin_name] = list(contig_ids)
+                continue
+            total_len = sum(len(contig_seqs[c]) for c in contig_ids if c in contig_seqs)
+            if len(contig_ids) < min_bin_contigs or total_len < min_bin_length:
+                (rank_dir / f"{bin_name}.fasta").unlink(missing_ok=True)
+                merged.extend(contig_ids)
+                n_dropped_bins += 1
+            else:
+                kept[bin_name] = list(contig_ids)
+
+        if merged and include_unclassified:
+            kept.setdefault("Unclassified", [])
+            kept["Unclassified"].extend(merged)
+            records = {cid: contig_seqs[cid] for cid in kept["Unclassified"] if cid in contig_seqs}
+            write_fasta(rank_dir / "Unclassified.fasta", records)
+
+        with open(rank_dir / "bin_membership.tsv", "w", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t")
+            w.writerow(["bin", "contig"])
+            for bin_name, contig_ids in kept.items():
+                for cid in contig_ids:
+                    w.writerow([bin_name, cid])
+
+        log.info(
+            "Rank '%s': merged %d small/short bins (%d contigs) -> %d bins remain.",
+            r, n_dropped_bins, len(merged), len(kept),
+        )
+        membership[r] = kept
+    return membership
+
+
+# --------------------------------------------------------------------------------------
+# Step 8b: BinaRena feature extraction (GC, coverage, k-mer composition + PCA/t-SNE/UMAP)
+#
+# This reimplements, in-process, the HoundSleuth staging chain that was previously run as
+# separate scripts (sequence_basics.py -> count_kmers.py -> reduce_dimension.py ->
+# binarena-combine.py -> binstager.py). Doing it inside MetaHopper means the taxonomy and
+# coverage columns come straight from this run's DIAMOND calls and Bowtie2 remapping
+# instead of SprayNPray output and a jgi_summarize_bam_contig_depths table.
+#
+# The emitted table is loaded directly by BinaRena (Zhu et al. 2022, Microbiome;
+# https://github.com/qiyunlab/binarena) for interactive inspection and manual curation.
+# Column names follow the original convention so existing BinaRena sessions/plots still
+# work: 4PC1/4PC2, 4tsne1/4tsne2, 4UM1/4UM2, and the same for k=5 and k=6.
+# --------------------------------------------------------------------------------------
+
+BINARENA_KMER_CHARS = "ACGT"
+
+
+def count_gc_degenerate(seq: str) -> float:
+    """G+C equivalents in a DNA sequence, accounting for IUPAC code degeneracy.
+
+    Matches the accounting used by HoundSleuth's ``sequence_basics.py``: an unambiguous
+    G or C (or S) contributes a full base, while a degenerate code contributes the
+    fraction of the codes it represents that are G or C. R (A/G), for example,
+    contributes 1/2.
+    """
+    res = 0
+    for c in seq.upper():
+        if c in "GCS":
+            res += 6
+        elif c in "RYKMN":
+            res += 3
+        elif c in "DH":
+            res += 2
+        elif c in "BV":
+            res += 4
+    return res / 6
+
+
+def list_kmers(chars: str, k: int, n: int) -> list:
+    """List every possible k-mer over ``chars`` in bitwise-index order."""
+    res = [""] * n
+    for i in range(n):
+        idx, kmer = i, ""
+        for _ in range(k):
+            kmer = chars[idx & 3] + kmer
+            idx >>= 2
+        res[i] = kmer
+    return res
+
+
+def count_kmers(seq: str, k: int, n: int, tobit) -> list:
+    """Exact k-mer counts for one sequence, counting both strands.
+
+    Bitwise rolling index, as in HoundSleuth's ``count_kmers.py``. k-mers spanning a
+    non-ACGT character are discarded by resetting the rolling index. Optimised for small
+    k (4-6) over many contigs, which is what composition binning needs.
+    """
+    res = [0] * n
+    fwd, rev, m = 0, 0, 0
+    q = (k - 1) * 2
+    x = (1 << q) - 1
+    for bit in map(tobit, seq):
+        if bit == -1:
+            fwd, rev, m = 0, 0, 0
+        elif m == k:
+            fwd = ((fwd & x) << 2) + bit
+            rev = (rev >> 2) + ((3 - bit) << q)
+            res[fwd] += 1
+            res[rev] += 1
+        else:
+            fwd = bit + (fwd << 2)
+            rev += (3 - bit) << 2 * m
+            m += 1
+            if m == k:
+                res[fwd] += 1
+                res[rev] += 1
+    return res
+
+
+def kmer_frequency_matrix(contig_seqs: dict, k: int, contig_ids) -> tuple:
+    """Return ``(ids, matrix)`` of row-normalised k-mer relative frequencies.
+
+    Rows are converted from raw counts to within-contig relative frequencies so that
+    long and short contigs are directly comparable, which is what the downstream
+    ordinations expect.
+    """
+    n = len(BINARENA_KMER_CHARS) ** k
+    tobit = BINARENA_KMER_CHARS.find
+    ids, matrix = [], []
+    for contig_id in contig_ids:
+        sequence = contig_seqs.get(contig_id)
+        if not sequence:
+            continue
+        counts = count_kmers(sequence.upper(), k, n, tobit)
+        total = sum(counts)
+        if total <= 0:
+            continue
+        ids.append(contig_id)
+        matrix.append([value / total for value in counts])
+    return ids, matrix
+
+
+def _binarena_backends():
+    """Import the optional numeric stack once, returning what is actually available."""
+    backends = {"numpy": None, "pca": None, "tsne": None, "scale": None, "umap": None}
+    try:
+        import numpy as np
+        backends["numpy"] = np
+    except ImportError:
+        return backends
+    try:
+        from sklearn.decomposition import PCA
+        from sklearn.manifold import TSNE
+        from sklearn.preprocessing import StandardScaler
+        backends["pca"], backends["tsne"], backends["scale"] = PCA, TSNE, StandardScaler
+    except ImportError:
+        pass
+    try:
+        import umap
+        backends["umap"] = umap
+    except ImportError:
+        pass
+    return backends
+
+
+def reduce_kmer_dimensions(matrix, methods, random_state: int = 42,
+                           tsne_perplexity: float = 30.0,
+                           umap_neighbors: int = 15) -> dict:
+    """Reduce a k-mer frequency matrix to 2-D coordinates per requested method.
+
+    Returns ``{method: [(x, y), ...]}`` aligned with the input row order. Methods that
+    cannot run (missing dependency, or too few contigs for the chosen perplexity) are
+    omitted rather than raising, because the composition table is still useful in
+    BinaRena with GC, coverage, length, and taxonomy alone.
+    """
+    results = {}
+    if not matrix:
+        return results
+    backends = _binarena_backends()
+    np = backends["numpy"]
+    if np is None:
+        log.warning(
+            "numpy is unavailable; skipping k-mer ordination. Install numpy, "
+            "scikit-learn and umap-learn to populate the PCA/t-SNE/UMAP columns."
+        )
+        return results
+    if backends["pca"] is None:
+        log.warning(
+            "scikit-learn is unavailable; skipping PCA/t-SNE. "
+            "Install scikit-learn (and umap-learn for UMAP)."
+        )
+        return results
+
+    data = np.asarray(matrix, dtype="float64")
+    n_rows = data.shape[0]
+    scaled = backends["scale"]().fit_transform(data)
+
+    # A PCA pre-projection is the standard way to run t-SNE/UMAP on wide composition
+    # vectors: it removes most of the noise dimensions (a hexanucleotide vector is 4096
+    # columns wide) and makes the neighbour searches tractable.
+    n_pre = int(min(50, n_rows - 1, scaled.shape[1]))
+    pre = scaled
+    if n_pre >= 2:
+        pre = backends["pca"](n_components=n_pre, random_state=random_state).fit_transform(scaled)
+
+    if "pca" in methods:
+        if n_rows >= 2:
+            coords = backends["pca"](n_components=2, random_state=random_state).fit_transform(scaled)
+            results["pca"] = [tuple(float(v) for v in row) for row in coords]
+        else:
+            log.warning("Only %d contig(s) passed the composition filter; skipping PCA.", n_rows)
+
+    if "tsne" in methods:
+        perplexity = float(min(tsne_perplexity, max(5.0, (n_rows - 1) / 3.0)))
+        if n_rows >= 10:
+            try:
+                tsne = backends["tsne"](
+                    n_components=2, perplexity=perplexity, init="pca",
+                    random_state=random_state,
+                )
+                coords = tsne.fit_transform(pre)
+                results["tsne"] = [tuple(float(v) for v in row) for row in coords]
+            except Exception as exc:  # sklearn raises several distinct error types here
+                log.warning("t-SNE failed (%s); leaving those columns empty.", exc)
+        else:
+            log.warning("Only %d contig(s) passed the composition filter; skipping t-SNE.", n_rows)
+
+    if "umap" in methods:
+        if backends["umap"] is None:
+            log.warning("umap-learn is unavailable; skipping UMAP columns.")
+        elif n_rows >= 10:
+            try:
+                reducer = backends["umap"].UMAP(
+                    n_components=2, n_neighbors=int(min(umap_neighbors, n_rows - 1)),
+                    random_state=random_state,
+                )
+                coords = reducer.fit_transform(pre)
+                results["umap"] = [tuple(float(v) for v in row) for row in coords]
+            except Exception as exc:
+                log.warning("UMAP failed (%s); leaving those columns empty.", exc)
+        else:
+            log.warning("Only %d contig(s) passed the composition filter; skipping UMAP.", n_rows)
+
+    return results
+
+
+# Column-name prefixes, preserved from the original HoundSleuth binstage.v2.sh header
+# rewrites so that saved BinaRena field selections keep working.
+BINARENA_METHOD_SUFFIXES = {
+    "pca": ("PC1", "PC2"),
+    "tsne": ("tsne1", "tsne2"),
+    "umap": ("UM1", "UM2"),
+}
+
+
+def write_kmer_embedding_table(out_path: Path, ids, coords, k: int, method: str) -> None:
+    """Write one ``ID <k><suffix1> <k><suffix2>`` table, as reduce_dimension.py did."""
+    s1, s2 = BINARENA_METHOD_SUFFIXES[method]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(["ID", f"{k}{s1}", f"{k}{s2}"])
+        for contig_id, (x, y) in zip(ids, coords):
+            writer.writerow([contig_id, f"{x:.6f}", f"{y:.6f}"])
+
+
+def extract_binarena_features(contig_seqs: dict, kmer_sizes, methods, min_length: int,
+                              max_contigs: int, outdir: Path, force: bool = False,
+                              random_state: int = 42, tsne_perplexity: float = 30.0,
+                              umap_neighbors: int = 15) -> dict:
+    """Compute k-mer ordinations for every contig at or above ``min_length``.
+
+    Returns ``{column_name: {contig_id: value}}`` ready to be merged into the combined
+    BinaRena table, and also writes the per-k intermediate tables so they can be loaded
+    or re-combined independently.
+    """
+    columns = {}
+    eligible = [
+        contig_id for contig_id, sequence in contig_seqs.items()
+        if len(sequence) >= min_length
+    ]
+    if not eligible:
+        log.warning(
+            "No contigs reach --binarena-min-length %d bp; skipping k-mer composition.",
+            min_length,
+        )
+        return columns
+
+    requested = list(methods)
+    if len(eligible) > max_contigs and not force:
+        dropped = [m for m in requested if m in ("tsne", "umap")]
+        if dropped:
+            log.warning(
+                "%d contigs exceed --binarena-max-contigs %d; computing PCA only and "
+                "skipping %s. Raise --binarena-min-length, raise the cap, or pass "
+                "--binarena-force.",
+                len(eligible), max_contigs, "/".join(dropped),
+            )
+        requested = [m for m in requested if m == "pca"]
+
+    for k in kmer_sizes:
+        log.info("Counting %d-mer frequencies for %d contig(s)...", k, len(eligible))
+        ids, matrix = kmer_frequency_matrix(contig_seqs, k, eligible)
+        if not ids:
+            continue
+        reduced = reduce_kmer_dimensions(
+            matrix, requested, random_state=random_state,
+            tsne_perplexity=tsne_perplexity, umap_neighbors=umap_neighbors,
+        )
+        for method, coords in reduced.items():
+            s1, s2 = BINARENA_METHOD_SUFFIXES[method]
+            write_kmer_embedding_table(
+                outdir / f"kmer_{k}.{method}.tsv", ids, coords, k, method,
+            )
+            columns[f"{k}{s1}"] = {
+                contig_id: x for contig_id, (x, _y) in zip(ids, coords)
+            }
+            columns[f"{k}{s2}"] = {
+                contig_id: y for contig_id, (_x, y) in zip(ids, coords)
+            }
+    return columns
+
+
+def write_binarena_table(out_path: Path, contig_seqs: dict, contig_metrics: dict,
+                         classifications: dict, ranks, refinement_rank: str,
+                         refinement_decisions: dict, triage_calls: dict,
+                         embedding_columns: dict, excluded_ids=None,
+                         min_length: int = 0) -> Path:
+    """Write the single combined table that BinaRena loads.
+
+    Numeric columns (length, GC, coverage, the ordination axes) drive BinaRena's x/y/size
+    /opacity controls; the string columns (taxonomy per rank, bin, triage and refinement
+    status) drive colouring and selection. ``length`` and ``GC`` keep the names the
+    original ``sequence_basics.py`` emitted so existing BinaRena field mappings apply.
+    """
+    excluded_ids = excluded_ids or set()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    embedding_names = list(embedding_columns.keys())
+    rank_columns = [f"taxon_{rank}" for rank in ranks]
+    header = (
+        ["ID", "length", "GC", "coverage", "covered_fraction", "coding_density", "n_cds"]
+        + rank_columns
+        + ["bin", "taxon_support", "triage", "refinement_status", "gc_outlier",
+           "coverage_outlier", "joint_outlier", "retained"]
+        + embedding_names
+    )
+
+    n_written = 0
+    with open(out_path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(header)
+        for contig_id, sequence in contig_seqs.items():
+            length = len(sequence)
+            if length < min_length:
+                continue
+            metric = contig_metrics.get(contig_id, {})
+            decision = refinement_decisions.get(contig_id, {})
+            result = classifications.get(contig_id, {})
+
+            gc_percent = 100.0 * count_gc_degenerate(sequence) / length if length else 0.0
+            depth = metric.get("mean_depth")
+            covered = metric.get("covered_fraction")
+            bin_taxon, bin_support = result.get(refinement_rank, ("Unclassified", 0.0))
+
+            row = [
+                contig_id,
+                length,
+                f"{gc_percent:.2f}",
+                (f"{depth:.4f}" if depth is not None else ""),
+                (f"{covered:.4f}" if covered is not None else ""),
+                (f"{metric.get('coding_density'):.4f}"
+                 if metric.get("coding_density") is not None else "NA"),
+                (metric.get("n_cds") if metric.get("n_cds") is not None else "NA"),
+            ]
+            for rank in ranks:
+                taxon, _support = result.get(rank, ("Unclassified", 0.0))
+                row.append(taxon)
+            row += [
+                sanitize(bin_taxon),
+                f"{bin_support:.4f}",
+                triage_calls.get(contig_id, "NA"),
+                decision.get("status", "not_evaluated"),
+                str(bool(decision.get("gc_outlier", False))).lower(),
+                str(bool(decision.get("coverage_outlier", False))).lower(),
+                str(bool(decision.get("joint_outlier", False))).lower(),
+                "false" if contig_id in excluded_ids else "true",
+            ]
+            for name in embedding_names:
+                value = embedding_columns[name].get(contig_id)
+                row.append(f"{value:.6f}" if value is not None else "")
+            writer.writerow(row)
+            n_written += 1
+
+    log.info(
+        "Wrote BinaRena table with %d contig(s) and %d ordination column(s): %s",
+        n_written, len(embedding_names), out_path,
+    )
+    return out_path
+
+
+def validate_binarena_options(args) -> tuple:
+    """Validate --binarena-* options and return ``(kmer_sizes, methods)``.
+
+    Called once at start-up so a typo fails immediately rather than after Prodigal and
+    DIAMOND have already run.
+    """
+    try:
+        kmer_sizes = [
+            int(k) for k in str(args.binarena_kmers).split(",") if str(k).strip()
+        ]
+    except ValueError:
+        raise ValueError(
+            f"--binarena-kmers must be a comma-separated list of integers, "
+            f"got '{args.binarena_kmers}'."
+        )
+    if not kmer_sizes:
+        raise ValueError("--binarena-kmers must list at least one k-mer size.")
+    bad_k = [k for k in kmer_sizes if not 1 <= k <= 8]
+    if bad_k:
+        raise ValueError(
+            f"--binarena-kmers values {bad_k} are out of range; use 1-8 "
+            "(a 9-mer profile would be 262144 columns wide)."
+        )
+
+    methods = [m.strip() for m in str(args.binarena_methods).split(",") if m.strip()]
+    if not methods:
+        raise ValueError("--binarena-methods must list at least one ordination.")
+    unsupported = [m for m in methods if m not in BINARENA_METHOD_SUFFIXES]
+    if unsupported:
+        raise ValueError(
+            f"--binarena-methods entries {unsupported} are not supported "
+            f"(choose from {sorted(BINARENA_METHOD_SUFFIXES)})."
+        )
+    return kmer_sizes, methods
+
+
+def run_binarena_stage(assembly_fasta: Path, contig_seqs: dict, contig_metrics: dict,
+                       classifications: dict, ranks, refinement_rank: str,
+                       refinement_decisions: dict, triage_calls: dict,
+                       excluded_ids, outdir: Path, args) -> Path:
+    """Feature extraction plus combined-table generation for one assembly."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    kmer_sizes, methods = validate_binarena_options(args)
+
+    embedding_columns = extract_binarena_features(
+        contig_seqs, kmer_sizes, methods, args.binarena_min_length,
+        args.binarena_max_contigs, outdir, force=args.binarena_force,
+        random_state=args.binarena_seed, tsne_perplexity=args.binarena_perplexity,
+        umap_neighbors=args.binarena_umap_neighbors,
+    )
+    return write_binarena_table(
+        outdir / "binarena_input.tsv", contig_seqs, contig_metrics, classifications,
+        ranks, refinement_rank, refinement_decisions, triage_calls, embedding_columns,
+        excluded_ids=excluded_ids, min_length=args.binarena_table_min_length,
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Step 6: Per-bin-set summaries (QUAST + CheckM)
+# --------------------------------------------------------------------------------------
+
+def basic_assembly_stats(fasta_path: Path) -> dict:
+    seqs = read_fasta(fasta_path)
+    lengths = sorted((len(s) for s in seqs.values()), reverse=True)
+    total = sum(lengths)
+    gc_count = sum(s.upper().count("G") + s.upper().count("C") for s in seqs.values())
+    gc_pct = round(100.0 * gc_count / total, 2) if total else 0.0
+    n50 = l50 = 0
+    cum = 0
+    for i, l in enumerate(lengths, 1):
+        cum += l
+        if cum >= total / 2 and n50 == 0:
+            n50, l50 = l, i
+    return {
+        "num_contigs": len(lengths),
+        "total_length_bp": total,
+        "largest_contig_bp": lengths[0] if lengths else 0,
+        "N50": n50,
+        "L50": l50,
+        "GC_percent": gc_pct,
+    }
+
+
+def run_quast_multi(bin_fastas: dict, outdir: Path, threads: int, quast_cmd: str = "quast.py") -> dict:
+    """bin_fastas: {bin_name: Path}. Returns {bin_name: {stat: value}}."""
+    if not bin_fastas:
+        return {}
+    quast_argv = shlex.split(quast_cmd)
+    if shutil.which(quast_argv[0]) is None:
+        log.warning("%s not found on PATH -- falling back to built-in assembly stats.", quast_cmd)
+        return {name: basic_assembly_stats(p) for name, p in bin_fastas.items()}
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    names = list(bin_fastas.keys())
+    paths = [str(bin_fastas[n]) for n in names]
+    cmd = [
+        *quast_argv, "-o", str(outdir), "--threads", str(threads),
+        "--min-contig", "0", "--silent", "--labels", ",".join(names), *paths,
+    ]
+    try:
+        run_cmd(cmd, log_file=outdir / "quast.log")
+    except RuntimeError as exc:
+        log.warning("QUAST failed (%s); falling back to built-in assembly stats.", exc)
+        return {name: basic_assembly_stats(p) for name, p in bin_fastas.items()}
+
+    report = outdir / "transposed_report.tsv"
+    if not report.exists():
+        log.warning("QUAST did not produce transposed_report.tsv; falling back to built-in stats.")
+        return {name: basic_assembly_stats(p) for name, p in bin_fastas.items()}
+
+    stats = {}
+    with open(report) as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        header = next(reader)
+        col = {h: i for i, h in enumerate(header)}
+        for row in reader:
+            name = row[col["Assembly"]]
+
+            def g(key, cast=float, default=0):
+                for k in col:
+                    if k.startswith(key):
+                        try:
+                            return cast(row[col[k]])
+                        except ValueError:
+                            return default
+                return default
+
+            stats[name] = {
+                "num_contigs": g("# contigs (>= 0", int),
+                "total_length_bp": g("Total length (>= 0", int),
+                "largest_contig_bp": g("Largest contig", int),
+                "N50": g("N50", int),
+                "L50": g("L50", int),
+                "GC_percent": g("GC (%)", float),
+            }
+    return stats
+
+
+CHECKM_DEFAULT_ENVS = ["checkm", "checkm_env"]
+UNICYCLER_DEFAULT_ENVS = ["unicycler", "unicycler_env"]
+CONDA_LAUNCHERS = ["conda", "mamba", "micromamba"]
+
+
+def _probe_tool(argv, probe_args, timeout: int = 300) -> bool:
+    """Return True when ``argv`` can actually launch the tool.
+
+    The probe is a help/version call: cheap, needs no reference data, and exits 0. A
+    missing environment, missing package, or broken activation fails here rather than
+    part-way through a long workflow.
+    """
+    try:
+        proc = subprocess.run(
+            [*argv, *probe_args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def resolve_env_command(tool: str, explicit_cmd: str = None, env_names=None,
+                        probe_args=("-h",), label: str = None,
+                        install_hint: str = "", quiet: bool = False) -> list:
+    """Find a working invocation of ``tool``, including inside a separate conda env.
+
+    Bioinformatics tools routinely cannot share one environment: CheckM pins an old
+    Python alongside pplacer and HMMER, and bioconda's Unicycler pins python
+    >=3.10,<3.11. Requiring everything on a single $PATH is therefore the most common
+    reason a stage silently degrades or refuses to start. Resolution order:
+
+      1. an explicit command string (which may itself be a full ``conda run ...`` line);
+      2. the bare executable on $PATH;
+      3. ``<launcher> run -n <env> <tool>`` for each launcher in
+         conda/mamba/micromamba and each environment in ``env_names``.
+
+    Returns the argv prefix to use, or None if nothing works.
+    """
+    label = label or tool
+    env_names = list(env_names or [])
+    warn = log.info if quiet else log.warning
+
+    if explicit_cmd:
+        argv = shlex.split(explicit_cmd)
+        if shutil.which(argv[0]) is not None and _probe_tool(argv, probe_args):
+            log.info("Using %s via explicit command: %s", label, " ".join(argv))
+            return argv
+        warn("Explicit %s command '%s' did not launch; falling back to autodetection.",
+             label, explicit_cmd)
+
+    if shutil.which(tool) is not None and _probe_tool([tool], probe_args):
+        log.info("Using %s found directly on $PATH.", label)
+        return [tool]
+
+    launchers = [name for name in CONDA_LAUNCHERS if shutil.which(name) is not None]
+    if not launchers:
+        warn("%s is not on $PATH and no conda/mamba/micromamba launcher was found, "
+             "so environments %s cannot be tried.", label, env_names)
+        return None
+
+    for env_name in env_names:
+        for launcher in launchers:
+            # --no-capture-output keeps the tool's own progress output flowing into our
+            # log file; without it conda buffers everything until the process exits.
+            argv = [launcher, "run", "-n", env_name]
+            if launcher == "conda":
+                argv.append("--no-capture-output")
+            argv.append(tool)
+            if _probe_tool(argv, probe_args):
+                log.info("Using %s from the '%s' environment via %s.",
+                         label, env_name, launcher)
+                return argv
+            log.debug("%s not usable via: %s", label, " ".join(argv))
+
+    warn("Could not launch %s. Tried $PATH and environments %s via %s. %s",
+         label, env_names, "/".join(launchers), install_hint)
+    return None
+
+
+def resolve_checkm_runner(checkm_cmd: str = None, env_names=None) -> list:
+    """Locate CheckM, on $PATH or in its own conda environment."""
+    return resolve_env_command(
+        "checkm", checkm_cmd, env_names or CHECKM_DEFAULT_ENVS, probe_args=("-h",),
+        label="CheckM",
+        install_hint=(
+            "Create one with e.g. `conda create -n checkm -c bioconda -c conda-forge "
+            "checkm-genome`, or point --checkm-cmd at a working invocation."
+        ),
+    )
+
+
+def resolve_unicycler_runner(unicycler_cmd: str = None, env_names=None) -> list:
+    """Locate Unicycler, on $PATH or in its own conda environment.
+
+    bioconda's unicycler recipe pins python >=3.10,<3.11 and spades >=4.0.0, so it often
+    cannot be installed beside CheckM/QUAST builds that need an older interpreter. Giving
+    it a dedicated environment avoids upgrading the interpreter under everything else.
+    """
+    return resolve_env_command(
+        "unicycler", unicycler_cmd, env_names or UNICYCLER_DEFAULT_ENVS,
+        probe_args=("--version",), label="Unicycler",
+        install_hint=(
+            "bioconda's unicycler needs python >=3.10,<3.11, so it usually needs its own "
+            "environment: `conda create -n unicycler -c bioconda -c conda-forge "
+            "unicycler` (that also brings in the spades >=4 it drives). Alternatively "
+            "point --unicycler-cmd at a working invocation, or use --assembler spades."
+        ),
+    )
+
+
+def _checkm_bin_extension(bin_dir: Path) -> str:
+    """Pick the ``-x`` extension that matches the bins actually present.
+
+    A mismatch here is silent: CheckM finds zero bins, exits 0, and writes an empty
+    table, which then reads as "CheckM produced no results".
+    """
+    for extension in ("fasta", "fa", "fna"):
+        if any(bin_dir.glob(f"*.{extension}")):
+            return extension
+    return "fasta"
+
+
+def configure_checkm_data(checkm_argv, data_path: Path, log_file: Path) -> dict:
+    """Return the subprocess environment for CheckM, setting its data root if given.
+
+    CheckM 1.x refuses to run until its reference data location is configured. Setting
+    CHECKM_DATA_PATH covers recent releases; ``checkm data setRoot`` is also attempted
+    for older ones that only read the config file. Failure is non-fatal because a
+    properly configured environment needs neither.
+    """
+    env = os.environ.copy()
+    if not data_path:
+        return env
+    resolved = str(Path(data_path).expanduser().resolve())
+    env["CHECKM_DATA_PATH"] = resolved
+    try:
+        subprocess.run(
+            [*checkm_argv, "data", "setRoot", resolved],
+            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=env, timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("`checkm data setRoot` was not usable (%s); relying on CHECKM_DATA_PATH.", exc)
+    log.info("CHECKM_DATA_PATH set to %s", resolved)
+    return env
+
+
+def parse_checkm_table(results_tsv: Path) -> dict:
+    """Parse a ``--tab_table`` CheckM QA table into {bin_id: {...}}."""
+    stats = {}
+    if not results_tsv.exists():
+        return stats
+    with open(results_tsv) as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            bin_id = (row.get("Bin Id") or row.get("Bin ID") or "").strip()
+            if not bin_id:
+                continue
+            stats[bin_id] = {
+                "completeness_percent": (row.get("Completeness") or "NA").strip(),
+                "contamination_percent": (row.get("Contamination") or "NA").strip(),
+                "strain_heterogeneity_percent": (
+                    row.get("Strain heterogeneity") or "NA"
+                ).strip(),
+                "marker_lineage": (row.get("Marker lineage") or "NA").strip(),
+                "n_markers": (row.get("# markers") or "NA").strip(),
+            }
+    return stats
+
+
+def run_checkm(bin_dir: Path, outdir: Path, threads: int, checkm_argv=None,
+               data_path: Path = None, reduced_tree: bool = False,
+               pplacer_threads: int = 1, extra_args: str = None) -> dict:
+    """Run ``checkm lineage_wf`` on a directory of bins and return per-bin stats.
+
+    Fixes over the previous implementation, all of which produced a silent "NA" column:
+
+      * CheckM is located through ``resolve_checkm_runner()``, so an install that lives
+        only in a ``checkm``/``checkm_env`` conda environment is found and used.
+      * ``-x`` is derived from the bins on disk rather than hard-coded to ``fasta``.
+      * The output directory is recreated, because CheckM aborts when asked to write
+        into a directory that already holds a previous run.
+      * CHECKM_DATA_PATH is propagated to the child process.
+      * pplacer thread count is capped separately from ``-t``; pplacer allocates its
+        reference tree per thread and is the usual cause of an out-of-memory kill.
+      * On failure the run is retried once with ``--reduced_tree``, which needs roughly
+        14 GB instead of 40 GB, and the CheckM log tail is surfaced in the warning.
+    """
+    if checkm_argv is None:
+        checkm_argv = resolve_checkm_runner()
+    if not checkm_argv:
+        return {}
+
+    extension = _checkm_bin_extension(bin_dir)
+    fastas = sorted(bin_dir.glob(f"*.{extension}"))
+    if not fastas:
+        log.warning("No *.%s bins in %s; skipping CheckM.", extension, bin_dir)
+        return {}
+
+    # CheckM will not reuse a populated output directory.
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    results_tsv = outdir / "checkm_results.tsv"
+    log_file = outdir / "checkm.log"
+    env = configure_checkm_data(checkm_argv, data_path, log_file)
+
+    def build_cmd(use_reduced_tree: bool):
+        cmd = [
+            *checkm_argv, "lineage_wf",
+            "-x", extension,
+            "--tab_table", "-f", str(results_tsv),
+            "-t", str(threads),
+            "--pplacer_threads", str(max(1, pplacer_threads)),
+        ]
+        if use_reduced_tree:
+            cmd.append("--reduced_tree")
+        if extra_args:
+            cmd += shlex.split(extra_args)
+        cmd += [str(bin_dir), str(outdir / "lineage")]
+        return cmd
+
+    log.info(
+        "Running CheckM lineage_wf on %d bin(s) in %s (-x %s, %d thread(s), "
+        "%d pplacer thread(s))...",
+        len(fastas), bin_dir, extension, threads, max(1, pplacer_threads),
+    )
+    try:
+        run_cmd(build_cmd(reduced_tree), log_file=log_file, env=env)
+    except RuntimeError as exc:
+        if reduced_tree:
+            log.warning(
+                "CheckM failed (%s); completeness/contamination will be NA for %s. "
+                "See %s.", exc, bin_dir, log_file,
+            )
+            return {}
+        log.warning(
+            "CheckM failed (%s); retrying with --reduced_tree, which needs far less "
+            "memory for the pplacer placement step.", exc,
+        )
+        if (outdir / "lineage").exists():
+            shutil.rmtree(outdir / "lineage")
+        try:
+            run_cmd(build_cmd(True), log_file=log_file, env=env)
+        except RuntimeError as retry_exc:
+            log.warning(
+                "CheckM --reduced_tree retry also failed (%s); completeness/"
+                "contamination will be NA for %s. See %s.",
+                retry_exc, bin_dir, log_file,
+            )
+            return {}
+
+    stats = parse_checkm_table(results_tsv)
+    if not stats:
+        log.warning(
+            "CheckM exited successfully but %s has no bin rows. This usually means the "
+            "-x extension did not match; bins found were *.%s.", results_tsv, extension,
+        )
+    else:
+        log.info("CheckM reported completeness/contamination for %d bin(s).", len(stats))
+    return stats
+
+
+def summarize_bin_set(rank: str, rank_dir: Path, threads: int, skip_quast: bool,
+                       skip_checkm: bool, quast_cmd: str = "quast.py",
+                       checkm_argv=None, checkm_data_path: Path = None,
+                       checkm_reduced_tree: bool = False, checkm_pplacer_threads: int = 1,
+                       checkm_extra: str = None) -> None:
+    bin_fastas = {p.stem: p for p in sorted(rank_dir.glob("*.fasta"))}
+    if not bin_fastas:
+        log.warning("No bins found for rank '%s'; skipping summary.", rank)
+        return
+
+    if skip_quast:
+        quast_stats = {name: basic_assembly_stats(p) for name, p in bin_fastas.items()}
+    else:
+        quast_stats = run_quast_multi(bin_fastas, rank_dir / "quast_out", threads, quast_cmd)
+
+    checkm_stats = {}
+    if not skip_checkm:
+        checkm_stats = run_checkm(
+            rank_dir, rank_dir / "checkm_out", threads, checkm_argv=checkm_argv,
+            data_path=checkm_data_path, reduced_tree=checkm_reduced_tree,
+            pplacer_threads=checkm_pplacer_threads, extra_args=checkm_extra,
+        )
+
+    out_path = rank_dir / "summary.tsv"
+    fields = ["bin", "num_contigs", "total_length_bp", "largest_contig_bp", "N50", "L50",
+              "GC_percent", "completeness_percent", "contamination_percent",
+              "strain_heterogeneity_percent", "marker_lineage", "n_markers"]
+    with open(out_path, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(fields)
+        for name in bin_fastas:
+            q = quast_stats.get(name, {})
+            c = checkm_stats.get(name, {})
+            w.writerow([
+                name,
+                q.get("num_contigs", "NA"),
+                q.get("total_length_bp", "NA"),
+                q.get("largest_contig_bp", "NA"),
+                q.get("N50", "NA"),
+                q.get("L50", "NA"),
+                q.get("GC_percent", "NA"),
+                c.get("completeness_percent", "NA"),
+                c.get("contamination_percent", "NA"),
+                c.get("strain_heterogeneity_percent", "NA"),
+                c.get("marker_lineage", "NA"),
+                c.get("n_markers", "NA"),
+            ])
+    log.info("Wrote %s", out_path)
+
+
+# --------------------------------------------------------------------------------------
+# Step 7: Targeted bin reassembly -- competitive seed mapping + ITSME-inspired BBDuk
+# frontier extension + focused Unicycler assembly + Pilon polishing.
+# --------------------------------------------------------------------------------------
+#
+# Whole-metagenome co-assembly (MEGAHIT, Step 0c) fragments low-abundance or
+# fast-diverging genomes -- especially host-restricted symbionts (Wolbachia, Rickettsia,
+# etc.) that share conserved genes/k-mers with other community members and rarely have a
+# close enough reference genome to assemble against directly. Rather than requiring a
+# reference, this step combines every mutually exclusive bin at a selected rank into one
+# seed index. Reads map competitively: only a unique best-scoring bin wins the template,
+# while equal best-score ties are excluded. Winning read pools are optionally extended
+# outward with cheap exact-kmer "frontier" scans (BBDuk) to catch divergent regions the
+# initial contigs missed entirely, and the resulting small, mostly-single-organism read
+# pool is reassembled alone with Unicycler. A subset-only assembly graph is far
+# simpler than the whole-community graph, so it can often resolve tangles (shared genes,
+# similar-coverage strains) that fragmented the original bin. Frontier extension is
+# guarded by growth-rate/accepted-fraction stop conditions so recruitment cannot snowball.
+# Optional external anchors are named BIN=FASTA so they participate for only their intended
+# competitor. Unicycler sweeps SPAdes k-mers, bridges the graph and attempts circularization
+# in one step; Pilon then corrects residual base/indel errors. Pass --assembler spades to
+# call spades.py/metaSPAdes directly instead.
+#
+# This does NOT replace the original bin FASTA. It writes a separate reassembled contig
+# set plus a before/after comparison table so you can judge whether it actually helped.
+
+def build_bowtie2_index(fasta: Path, index_prefix: Path, threads: int, log_file: Path) -> None:
+    run_cmd(["bowtie2-build", "--threads", str(threads), str(fasta), str(index_prefix)], log_file=log_file)
+
+
+def map_reads_to_index(r1: Path, r2: Path, index_prefix: Path, out_bam: Path, threads: int,
+                        score_min: str, max_insert: int, log_file: Path,
+                        report_multiple: int = 1) -> None:
+    """Maps ALL raw read pairs (mapped and unmapped alike -- no --no-unal) against
+    index_prefix. Keeping unmapped records in the BAM is what lets extract_templates()
+    later pull out reads recruited purely by frontier k-mer matching, not just direct
+    alignment, using this same BAM."""
+    bt2 = ["bowtie2", "--very-sensitive-local", "--score-min", score_min,
+           "-X", str(max_insert), "-p", str(threads), "-x", str(index_prefix),
+           "-1", str(r1), "-2", str(r2)]
+    if report_multiple > 1:
+        bt2 += ["-k", str(report_multiple)]
+    sam = ["samtools", "view", "-@", str(threads), "-b", "-o", str(out_bam), "-"]
+    run_pipeline([bt2, sam], log_file=log_file)
+
+
+def estimate_contig_coverage(fasta: Path, r1: Path, r2: Path, outdir: Path,
+                             threads: int, max_insert: int = 1000) -> dict:
+    """Competitively map the complete read set and return per-contig mean depth.
+
+    Bowtie2 reports one best placement by default, so a multi-mapping read does not add
+    depth to every similar contig. ``samtools depth`` is streamed and aggregated to
+    avoid materializing a potentially very large depth table.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    index_prefix = outdir / "contigs_index"
+    build_bowtie2_index(fasta, index_prefix, threads, outdir / "bowtie2-build.log")
+    sorted_bam = outdir / "reads_to_contigs.sorted.bam"
+    bt2 = [
+        "bowtie2", "--very-sensitive-local", "--no-unal", "-X", str(max_insert),
+        "-p", str(threads), "-x", str(index_prefix), "-1", str(r1), "-2", str(r2),
+    ]
+    view = ["samtools", "view", "-@", str(threads), "-b", "-q", "20", "-F", "2308", "-"]
+    sort = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
+    run_pipeline([bt2, view, sort], log_file=outdir / "bowtie2.log")
+
+    lengths = {contig_id: len(sequence) for contig_id, sequence in read_fasta(fasta).items()}
+    depth_sum = defaultdict(float)
+    covered = defaultdict(int)
+    proc = subprocess.Popen(
+        ["samtools", "depth", str(sorted_bam)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) < 3:
+            continue
+        try:
+            depth = float(fields[2])
+        except ValueError:
+            continue
+        depth_sum[fields[0]] += depth
+        if depth > 0:
+            covered[fields[0]] += 1
+    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    returncode = proc.wait()
+    if returncode != 0:
+        raise RuntimeError(f"samtools depth failed ({returncode}): {stderr.strip()}")
+
+    coverage = {}
+    for contig_id, length in lengths.items():
+        coverage[contig_id] = {
+            "mean_depth": (depth_sum[contig_id] / length) if length else 0.0,
+            "covered_fraction": (covered[contig_id] / length) if length else 0.0,
+        }
+    return coverage
+
+
+def add_coverage_to_metrics(contig_metrics: dict, coverage: dict) -> None:
+    for contig_id, values in coverage.items():
+        if contig_id in contig_metrics:
+            contig_metrics[contig_id].update(values)
+
+
+def aligned_bases_from_cigar(cigar: str) -> int:
+    return sum(int(n) for n, _op in re.findall(r"(\d+)([MI=X])", cigar))
+
+
+def query_bases_from_cigar(cigar: str) -> int:
+    """Query length represented by a CIGAR, including soft-clipped sequence."""
+    return sum(int(n) for n, _op in re.findall(r"(\d+)([MIS=X])", cigar))
+
+
+def build_competitive_seed_reference(bin_fastas, out_fasta: Path,
+                                     anchors_by_bin: dict = None,
+                                     excluded_contig_ids: set = None) -> dict:
+    """Combine all rank bins into one reference and return ``reference -> bin``.
+
+    Prefixing every record with a generated ID makes the owning bin unambiguous even
+    when input FASTAs reuse contig names. Named external anchors, when present, join only
+    their specified bin instead of being duplicated across every competitor.
+    """
+    anchors_by_bin = anchors_by_bin or {}
+    excluded_contig_ids = excluded_contig_ids or set()
+    ref_to_bin = {}
+    out_fasta.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_fasta, "w") as out_fh:
+        for bin_n, bin_fasta in enumerate(bin_fastas, 1):
+            bin_name = bin_fasta.stem
+            sources = [("contig", bin_fasta)]
+            sources.extend(("anchor", p) for p in anchors_by_bin.get(bin_name, []))
+            record_n = 0
+            for source_kind, source_fasta in sources:
+                for original_id, seq in read_fasta(source_fasta).items():
+                    if source_kind == "contig" and original_id in excluded_contig_ids:
+                        continue
+                    record_n += 1
+                    ref_id = f"MHSEED_{bin_n:06d}_{record_n:09d}_{source_kind}"
+                    ref_to_bin[ref_id] = bin_name
+                    out_fh.write(f">{ref_id}\n")
+                    for i in range(0, len(seq), 80):
+                        out_fh.write(seq[i:i + 80] + "\n")
+    if not ref_to_bin:
+        raise RuntimeError("Competitive seed reference contains no sequences.")
+    return ref_to_bin
+
+
+def competitively_assign_templates(bam: Path, ref_to_bin: dict, min_aligned_fraction: float,
+                                   min_identity: float, threads: int) -> tuple:
+    """Assign each template to its unique best-scoring bin across the combined seed index.
+
+    Secondary alignments are retained so conserved reads can expose cross-bin competition.
+    The best AS score for each mate is summed within each candidate bin. Equal best scores
+    across bins are called ambiguous and excluded from every bin.
+
+    The SAM stream is consumed line by line and never buffered. The mapping runs with
+    bowtie2 -k 20 against every seed bin at once, so for a large library this stream is
+    tens of GB; reading it with capture_output=True held all of it as one string and
+    then .splitlines() doubled it, which was enough to exhaust a server's memory before
+    a single contig had been reassembled.
+    """
+    cmd = ["samtools", "view", "-@", str(threads), "-F", "2052", str(bam)]
+    log.info("Running: %s", " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1024 * 1024)
+    intern = sys.intern
+    per_template = {}
+    n_records = 0
+    try:
+        for line in proc.stdout:
+            f = line.split("\t")
+            if len(f) < 11 or f[5] == "*":
+                continue
+            bin_name = ref_to_bin.get(f[2])
+            if bin_name is None:
+                continue
+            aligned = aligned_bases_from_cigar(f[5])
+            query_len = query_bases_from_cigar(f[5]) or len(f[9])
+            nm = 0
+            alignment_score = None
+            for tag in f[11:]:
+                if tag.startswith("NM:i:"):
+                    nm = int(tag.split(":", 2)[2])
+                elif tag.startswith("AS:i:"):
+                    alignment_score = int(tag.split(":", 2)[2])
+            if not query_len or not aligned or alignment_score is None:
+                continue
+            if aligned / query_len < min_aligned_fraction:
+                continue
+            if (aligned - nm) / aligned < min_identity:
+                continue
+            n_records += 1
+            mate = 1 if int(f[1]) & 64 else (2 if int(f[1]) & 128 else 0)
+            # Flat dict keyed by (bin, mate) rather than a dict of dicts of dicts: one
+            # small dict per template instead of three nested ones, which matters when
+            # there are tens of millions of templates.
+            key = intern(f[0])
+            slot = per_template.get(key)
+            if slot is None:
+                per_template[key] = {(bin_name, mate): alignment_score}
+            else:
+                prior = slot.get((bin_name, mate))
+                if prior is None or alignment_score > prior:
+                    slot[(bin_name, mate)] = alignment_score
+            if n_records % 20_000_000 == 0:
+                log.info("  competitive mapping: %d M alignments parsed, %d M templates "
+                         "so far...", n_records // 1_000_000, len(per_template) // 1_000_000)
+        stderr = proc.stderr.read()
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
+    if proc.wait() != 0:
+        raise RuntimeError(f"samtools view failed ({proc.returncode}): {stderr[-2000:]}")
+
+    assignments = defaultdict(set)
+    ambiguous = 0
+    for template, slots in per_template.items():
+        scores = defaultdict(int)
+        for (bin_name, _mate), score in slots.items():
+            scores[bin_name] += score
+        best_score = max(scores.values())
+        winners = [b for b, sc in scores.items() if sc == best_score]
+        if len(winners) != 1:
+            ambiguous += 1
+            continue
+        assignments[winners[0]].add(template)
+    n_templates = len(per_template)
+    per_template.clear()                      # release before the caller builds its sets
+    return ({b: names for b, names in assignments.items()}, n_templates, ambiguous)
+
+def recruit_read_names(bam: Path, min_aligned_fraction: float, min_identity: float, threads: int) -> set:
+    """Primary, mapped (not secondary/supplementary) alignments only (-F 2308), filtered by
+    aligned-fraction-of-read and approximate identity -- the same seed-hit criteria ITSME
+    uses for its strict seed mapping."""
+    proc = subprocess.run(["samtools", "view", "-@", str(threads), "-F", "2308", str(bam)],
+                           capture_output=True, text=True, check=True)
+    names = set()
+    for line in proc.stdout.splitlines():
+        f = line.split("\t")
+        if len(f) < 11:
+            continue
+        seq, cigar = f[9], f[5]
+        query_len = len(seq)
+        if query_len == 0 or cigar == "*":
+            continue
+        aligned = aligned_bases_from_cigar(cigar)
+        nm = 0
+        for tag in f[11:]:
+            if tag.startswith("NM:i:"):
+                nm = int(tag.split(":", 2)[2])
+                break
+        aligned_fraction = aligned / query_len if query_len else 0.0
+        identity = (aligned - nm) / aligned if aligned else 0.0
+        if aligned_fraction >= min_aligned_fraction and identity >= min_identity:
+            names.add(f[0])
+    return names
+
+
+def extract_templates(bam: Path, names: set, out_r1: Path, out_r2: Path, out_single: Path,
+                       threads: int, tmp_prefix: Path) -> None:
+    """Pulls the given read names (+ their mates, however the mate mapped) out of `bam`
+    into paired/single FASTQs -- a Python port of ITSME's extract_templates_from_bam."""
+    out_r1.parent.mkdir(parents=True, exist_ok=True)
+    if not names:
+        for p in (out_r1, out_r2, out_single):
+            p.write_bytes(b"")
+        return
+    names_file = Path(f"{tmp_prefix}.names.txt")
+    names_file.write_text("\n".join(sorted(names)) + "\n")
+    selected_bam = Path(f"{tmp_prefix}.selected.bam")
+    run_cmd(["samtools", "view", "-@", str(threads), "-b", "-F", "2304", "-N", str(names_file),
+             "-o", str(selected_bam), str(bam)])
+    other_fq = Path(f"{tmp_prefix}.other.fastq.gz")
+    single_fq = Path(f"{tmp_prefix}.singleton.fastq.gz")
+    collate = ["samtools", "collate", "-@", str(threads), "-u", "-O", str(selected_bam)]
+    fastq = ["samtools", "fastq", "-@", str(threads), "-c", "1", "-n",
+             "-1", str(out_r1), "-2", str(out_r2), "-0", str(other_fq), "-s", str(single_fq), "-"]
+    run_pipeline([collate, fastq], log_file=Path(f"{tmp_prefix}.fastq.log"))
+    with open(out_single, "wb") as out_fh:
+        for p in (other_fq, single_fq):
+            if p.exists() and p.stat().st_size > 0:
+                with open(p, "rb") as source:
+                    shutil.copyfileobj(source, out_fh)
+    if not out_single.exists():
+        out_single.write_bytes(b"")
+    for p in (selected_bam, other_fq, single_fq, names_file):
+        p.unlink(missing_ok=True)
+
+
+def make_frontier_baits(fastq_paths, out_fasta: Path, word_size: int, entropy: float,
+                         bbtools_memory: str, log_file: Path) -> None:
+    """Converts a pool of recruited reads into a bait FASTA (dropping low-complexity
+    sequence via BBDuk's entropy filter) to seed the next round's exact-kmer frontier scan."""
+    raw = out_fasta.with_suffix(".unfiltered.fasta")
+    tag = 0
+    with open(raw, "w") as out_fh:
+        for fq in fastq_paths:
+            if not fq or not Path(fq).exists() or Path(fq).stat().st_size == 0:
+                continue
+            tag += 1
+            opener = gzip.open if str(fq).endswith((".gz", ".bgz")) else open
+            with opener(fq, "rt") as fh:
+                record = 0
+                for i, line in enumerate(fh):
+                    mod = i % 4
+                    if mod == 0:
+                        stripped = line[1:].strip()
+                        record += 1
+                        name = stripped.split()[0] if stripped else str(record)
+                        out_fh.write(f">bait{tag:02d}|{record:09d}|{name}\n")
+                    elif mod == 1:
+                        out_fh.write(line.strip().upper() + "\n")
+    run_cmd(["bbduk.sh", f"-Xmx{bbtools_memory}", f"in={raw}", f"out={out_fasta}",
+             "overwrite=t", f"minlen={word_size}", f"entropy={entropy}",
+             "entropywindow=50", "entropyk=5"], log_file=log_file)
+    raw.unlink(missing_ok=True)
+    if not out_fasta.exists() or out_fasta.stat().st_size == 0:
+        raise RuntimeError(f"No frontier sequences survived bait preparation; inspect {log_file}")
+
+
+def scan_raw_with_baits(bait_fasta: Path, r1: Path, r2: Path, word_size: int,
+                         min_word_hits: int, bbtools_memory: str, threads: int,
+                         log_file: Path) -> set:
+    """Exact-kmer scan of the ORIGINAL raw reads against a bait FASTA (BBDuk), returning
+    template names with at least `min_word_hits` exact word matches -- cheap compared to
+    another bowtie2 pass, and how the frontier extends beyond direct alignment recruitment."""
+    cmd = ["bbduk.sh", f"-Xmx{bbtools_memory}", f"in1={r1}", f"in2={r2}", "outm=stdout.fq",
+           f"ref={bait_fasta}", f"k={word_size}", "hdist=0", f"minkmerhits={min_word_hits}",
+           "mm=f", "rcomp=t", f"t={threads}", "overwrite=t", "ordered=f"]
+    names = set()
+    with open(log_file, "w") as lf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf, text=True, start_new_session=True)
+        timer = arm_deadline(proc)
+        for i, line in enumerate(proc.stdout):
+            if i % 4 == 0 and len(line) > 1:
+                names.add(re.sub(r"/[12]$", "", line[1:].split()[0]))
+        proc.stdout.close()
+        rc = proc.wait()
+        if timer:
+            timer.cancel()
+        if rc != 0:
+            raise RuntimeError(f"BBDuk frontier scan failed; inspect {log_file}")
+    return names
+
+
+def combine_fastqs(output: Path, inputs) -> None:
+    """Concatenates gzip FASTQs by raw byte concatenation (a valid multi-member gzip stream,
+    same trick ITSME/`cat *.gz` rely on -- avoids a decompress/recompress round trip)."""
+    with open(output, "wb") as out_fh:
+        for p in inputs:
+            if p and Path(p).exists() and Path(p).stat().st_size > 0:
+                with open(p, "rb") as source:
+                    shutil.copyfileobj(source, out_fh)
+    if not output.exists():
+        output.write_bytes(b"")
+
+
+def run_spades_targeted(r1: Path, r2: Path, single: Path, outdir: Path, threads: int,
+                         memory_gb: int, mode: str, kmers: str, log_file: Path) -> Path:
+    """Run spades.py (metaSPAdes when mode == 'meta') on a recruited read pool.
+
+    Retained as the ``--assembler spades`` choice and as the automatic fallback when
+    Unicycler cannot produce an assembly. Returns the path to contigs.fasta.
+    """
+    pairs = count_fastq_reads(r1)
+    singles = count_fastq_reads(single)
+    if pairs == 0 and singles == 0:
+        raise RuntimeError("No recruited reads remain for reassembly.")
+    cmd = ["spades.py", "--only-assembler", "-o", str(outdir), "-t", str(threads), "-m", str(memory_gb)]
+    if pairs > 0:
+        cmd += ["-1", str(r1), "-2", str(r2)]
+    if singles > 0:
+        cmd += ["-s", str(single)]
+    if mode == "meta":
+        if pairs == 0:
+            raise RuntimeError("metaSPAdes (--reassemble-mode meta) requires paired reads.")
+        cmd += ["--meta"]
+    if kmers != "auto":
+        cmd += ["-k", kmers]
+    run_cmd(cmd, log_file=log_file)
+    contigs = outdir / "contigs.fasta"
+    if not contigs.exists():
+        raise RuntimeError(f"SPAdes did not produce {contigs}; inspect {log_file}")
+    return contigs
+
+
+def count_circular_contigs(assembly: Path) -> int:
+    """Count Unicycler contigs whose header is flagged ``circular=true``."""
+    if not assembly or not Path(assembly).exists():
+        return 0
+    return sum(
+        1 for line in Path(assembly).read_text().splitlines()
+        if line.startswith(">") and "circular=true" in line.lower()
+    )
+
+
+def run_unicycler_assembly(r1: Path, r2: Path, single: Path, workdir: Path, threads: int,
+                            unicycler_mode: str, kmers: str = "auto",
+                            min_fasta_length: int = 100,
+                            extra_args: str = None, unicycler_argv=None) -> tuple:
+    """Assemble one bin's recruited read pool with Unicycler.
+
+    Unicycler is the primary assembler for focused per-bin reassembly. It drives SPAdes
+    internally across a k-mer sweep, then bridges and attempts to circularise the
+    resulting graph, so a small recruited pool from a single organism is exactly the case
+    it is designed for -- and completing a circular replicon is the outcome that matters
+    for a symbiont genome. ``spades.py`` must still be installed because Unicycler calls
+    it; Unicycler replaces the *invocation*, not the dependency.
+
+    Returns ``(assembly_path, circular_contig_count)``, or ``(None, 0)`` on failure.
+    """
+    pairs = count_fastq_reads(r1)
+    singles = count_fastq_reads(single)
+    if pairs == 0 and singles == 0:
+        return None, 0
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    unicycler_dir = workdir / "unicycler"
+    cmd = [
+        *(unicycler_argv or ["unicycler"]),
+        "-o", str(unicycler_dir), "--threads", str(threads),
+        "--mode", unicycler_mode, "--min_fasta_length", str(min_fasta_length),
+    ]
+    if pairs:
+        cmd += ["-1", str(r1), "-2", str(r2)]
+    if singles:
+        cmd += ["-s", str(single)]
+    if kmers and kmers != "auto":
+        cmd += ["--kmers", kmers]
+    if extra_args:
+        cmd += shlex.split(extra_args)
+
+    try:
+        run_cmd(cmd, log_file=workdir / "unicycler.log")
+    except RuntimeError as exc:
+        log.warning("Unicycler assembly failed (%s); see %s.", exc, workdir / "unicycler.log")
+        return None, 0
+
+    assembly = unicycler_dir / "assembly.fasta"
+    if not assembly.exists() or assembly.stat().st_size == 0:
+        log.warning("Unicycler produced no assembly in %s.", unicycler_dir)
+        return None, 0
+    return assembly, count_circular_contigs(assembly)
+
+
+def run_pilon_polish(assembly: Path, r1: Path, r2: Path, single: Path, workdir: Path,
+                      threads: int) -> Path:
+    """Remap the recruited reads onto an assembly and correct bases/indels with Pilon.
+
+    Pilon does not circularise or scaffold; it only fixes local base and indel errors,
+    which matters here because the recruited pool is small and the k-mer sweep can leave
+    consensus errors behind. Returns the polished FASTA, or None if polishing failed (in
+    which case the caller keeps the unpolished assembly).
+    """
+    pairs = count_fastq_reads(r1)
+    singles = count_fastq_reads(single)
+    if pairs == 0 and singles == 0:
+        return None
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    polish_dir = workdir / "pilon"
+    polish_dir.mkdir(parents=True, exist_ok=True)
+    index_prefix = polish_dir / "assembly_index"
+    bam = polish_dir / "reads_to_assembly.sorted.bam"
+    try:
+        build_bowtie2_index(
+            assembly, index_prefix, threads, polish_dir / "bowtie2-build.log",
+        )
+        bt2 = ["bowtie2", "--very-sensitive", "-p", str(threads), "-x", str(index_prefix)]
+        if pairs:
+            bt2 += ["-1", str(r1), "-2", str(r2)]
+        if singles:
+            bt2 += ["-U", str(single)]
+        run_pipeline(
+            [bt2, ["samtools", "sort", "-@", str(threads), "-o", str(bam), "-"]],
+            log_file=polish_dir / "bowtie2.log",
+        )
+        run_cmd(["samtools", "index", "-@", str(threads), str(bam)])
+        run_cmd([
+            "pilon", "--genome", str(assembly), "--frags", str(bam),
+            "--output", "pilon_polished", "--outdir", str(polish_dir),
+            "--threads", str(threads), "--fix", "bases,indels",
+        ], log_file=workdir / "pilon.log")
+    except RuntimeError as exc:
+        log.warning("Pilon polishing failed (%s); retaining the unpolished assembly.", exc)
+        return None
+
+    polished = polish_dir / "pilon_polished.fasta"
+    if not polished.exists() or polished.stat().st_size == 0:
+        log.warning("Pilon produced no polished FASTA; retaining the unpolished assembly.")
+        return None
+    return polished
+
+
+def assemble_recruited_pool(r1: Path, r2: Path, single: Path, workdir: Path, threads: int,
+                             assembler: str, unicycler_mode: str, kmers: str,
+                             unicycler_extra: str, spades_mode: str, spades_memory_gb: int,
+                             spades_fallback: bool, polish: bool,
+                             bin_label: str, unicycler_argv=None) -> tuple:
+    """Assemble one bin's expanded read pool, then optionally polish it.
+
+    Returns ``(assembly_path, provenance_label, circular_contig_count)``. The provenance
+    label records what actually produced the returned FASTA -- ``unicycler``,
+    ``unicycler+pilon``, ``spades``, or ``spades+pilon`` -- so the consolidation step and
+    the per-bin recruitment table stay honest about which assembler was used.
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
+    assembly, circular_count, source = None, 0, None
+
+    if assembler == "unicycler":
+        assembly, circular_count = run_unicycler_assembly(
+            r1, r2, single, workdir, threads, unicycler_mode, kmers=kmers,
+            extra_args=unicycler_extra, unicycler_argv=unicycler_argv,
+        )
+        source = "unicycler" if assembly else None
+        if assembly is None and spades_fallback:
+            log.warning(
+                "Bin '%s': falling back to focused %s because Unicycler did not "
+                "produce an assembly (disable with --no-spades-fallback).",
+                bin_label, "metaSPAdes" if spades_mode == "meta" else "SPAdes",
+            )
+            try:
+                assembly = run_spades_targeted(
+                    r1, r2, single, workdir / "spades", threads, spades_memory_gb,
+                    spades_mode, kmers, workdir / "spades.log",
+                )
+                source = "spades"
+            except RuntimeError as exc:
+                log.warning("Bin '%s': SPAdes fallback also failed (%s).", bin_label, exc)
+                return None, None, 0
+    else:
+        try:
+            assembly = run_spades_targeted(
+                r1, r2, single, workdir / "spades", threads, spades_memory_gb,
+                spades_mode, kmers, workdir / "spades.log",
+            )
+            source = "spades"
+        except RuntimeError as exc:
+            log.warning("Bin '%s': SPAdes assembly failed (%s).", bin_label, exc)
+            return None, None, 0
+
+    if assembly is None:
+        return None, None, 0
+
+    if polish:
+        polished = run_pilon_polish(assembly, r1, r2, single, workdir, threads)
+        if polished is not None:
+            return polished, f"{source}+pilon", circular_count
+    return assembly, source, circular_count
+
+
+def link_expand_one_bin(bin_fasta: Path, bin_name: str, rank: str,
+                        pool_r1: Path, pool_r2: Path, pool_single: Path,
+                        assembly_index: Path, assembly_seqs: dict, workdir: Path,
+                        threads: int, min_covered_fraction: float, min_reads: int,
+                        max_insert: int) -> tuple:
+    """Expand a bin by ADOPTING existing assembly contigs, never by rebuilding sequence.
+
+    The recruited read pool is mapped back to the whole preliminary assembly. A contig
+    that the pool covers well is evidence that this genome owns it, so the contig joins
+    the bin -- as the original, byte-identical sequence. Nothing is merged, extended,
+    pruned or polished, which is the entire point: the assembler cannot delete sequence
+    it is never asked to rebuild, and a contig that did not change cannot be reclassified
+    into a sibling taxon.
+
+    Returns ``(linked_fasta, adopted_ids, support)`` where ``support`` maps a candidate
+    contig id to its (covered_fraction, read_count) so that a contig wanted by two bins
+    can be awarded to the better-supported one.
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
+    bam = workdir / "pool_to_assembly.sorted.bam"
+    bt2 = ["bowtie2", "--very-sensitive-local", "--no-unal", "-X", str(max_insert),
+           "-p", str(threads), "-x", str(assembly_index)]
+    if pool_r1.is_file() and pool_r2.is_file() and pool_r1.stat().st_size > 0:
+        bt2 += ["-1", str(pool_r1), "-2", str(pool_r2)]
+        if pool_single.is_file() and pool_single.stat().st_size > 0:
+            bt2 += ["-U", str(pool_single)]
+    elif pool_single.is_file() and pool_single.stat().st_size > 0:
+        bt2 += ["-U", str(pool_single)]
+    else:
+        log.warning("Bin '%s' (%s): no recruited reads to link with; keeping the bin "
+                    "as it stands.", bin_name, rank)
+        return None, set(), {}
+    view = ["samtools", "view", "-@", str(threads), "-b", "-q", "20", "-F", "2308", "-"]
+    sort = ["samtools", "sort", "-@", str(threads), "-o", str(bam), "-"]
+    run_pipeline([bt2, view, sort], log_file=workdir / "bowtie2.log")
+
+    run_cmd(["samtools", "index", "-@", str(threads), str(bam)],
+            log_file=workdir / "samtools-index.log")
+    counts = Counter()
+    idx = subprocess.Popen(["samtools", "idxstats", str(bam)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert idx.stdout is not None
+    for line in idx.stdout:
+        f = line.rstrip("\n").split("\t")
+        if len(f) >= 3 and f[0] != "*":
+            counts[f[0]] = int(f[2])
+    idx_err = idx.stderr.read() if idx.stderr is not None else ""
+    if idx.wait() != 0:
+        raise RuntimeError(f"samtools idxstats failed for bin {bin_name}: {idx_err.strip()}")
+
+    covered = defaultdict(int)
+    dp = subprocess.Popen(["samtools", "depth", str(bam)],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert dp.stdout is not None
+    for line in dp.stdout:
+        f = line.rstrip("\n").split("\t")
+        if len(f) >= 3 and f[2] != "0":
+            covered[f[0]] += 1
+    dp_err = dp.stderr.read() if dp.stderr is not None else ""
+    if dp.wait() != 0:
+        raise RuntimeError(f"samtools depth failed for bin {bin_name}: {dp_err.strip()}")
+
+    own = set(read_fasta(bin_fasta))
+    support, adopted = {}, set()
+    for contig_id, n_reads in counts.items():
+        if contig_id in own or n_reads < min_reads:
+            continue
+        length = len(assembly_seqs.get(contig_id, ""))
+        if not length:
+            continue
+        frac = covered.get(contig_id, 0) / float(length)
+        if frac >= min_covered_fraction:
+            support[contig_id] = (frac, n_reads)
+            adopted.add(contig_id)
+    with open(workdir / "link_candidates.tsv", "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["contig", "covered_fraction", "reads", "length_bp"])
+        for contig_id in sorted(support, key=lambda c: -support[c][1]):
+            frac, n_reads = support[contig_id]
+            w.writerow([contig_id, f"{frac:.4f}", n_reads,
+                        len(assembly_seqs.get(contig_id, ""))])
+    return workdir / "link_candidates.tsv", adopted, support
+
+
+def resolve_link_claims(link_claims: dict, owned_ids: set) -> dict:
+    candidates = defaultdict(list)
+    for bin_name, (adopted, support, _before, _fasta) in link_claims.items():
+        for cid in adopted - owned_ids:
+            candidates[cid].append((support[cid], bin_name))
+    awarded = defaultdict(set)
+    for cid, claims in candidates.items():
+        claims.sort(reverse=True)
+        if len(claims) == 1 or claims[0][0] > claims[1][0]:
+            awarded[claims[0][1]].add(cid)
+    return awarded
+
+
+def write_linked_bin(bin_fasta: Path, adopted_ids: set, assembly_seqs: dict,
+                     out_fasta: Path) -> None:
+    """Write the bin's own contigs plus its adopted ones, all as original sequence."""
+    records = read_fasta(bin_fasta)
+    for contig_id in sorted(adopted_ids):
+        if contig_id in assembly_seqs:
+            records[contig_id] = assembly_seqs[contig_id]
+    write_fasta(out_fasta, records)
+
+
+def reassemble_one_bin(bin_fasta: Path, bin_name: str, rank: str, r1_raw: Path, r2_raw: Path,
+                        competitive_bam: Path, seed_names: set, blocked_seed_names: set,
+                        outdir: Path, threads: int,
+                        trimmomatic_folder: Path, qc_quality: int, qc_minlen: int,
+                        flash_max_overlap: int, max_rounds: int, word_size: int,
+                        min_word_hits: int,
+                        bait_min_entropy: float, max_round_growth: float,
+                        max_accepted_fraction: float, min_new_templates: int, min_growth: float,
+                        bbtools_memory: str, assembler: str, spades_mode: str,
+                        spades_memory_gb: int, kmers: str, polish: bool,
+                        unicycler_mode: str, unicycler_extra: str = None,
+                        spades_fallback: bool = True, unicycler_argv=None,
+                        expansion_mode: str = "reassemble",
+                        assembly_index: Path = None, assembly_seqs: dict = None,
+                        link_min_covered_fraction: float = 0.5,
+                        link_min_reads: int = 20, link_max_insert: int = 1000,
+                        total_templates: int = None, seed_raw_paths=None) -> Path:
+    """Runs one bin through seed-and-extend recruitment + reassembly. Returns the path to
+    the reassembled contigs FASTA, or None if recruitment/reassembly didn't produce one.
+
+    The expanded read pool is assembled with Unicycler by default (see
+    ``assemble_recruited_pool``), then polished with Pilon unless ``--skip-polish``."""
+    workdir = outdir / "reassembly" / rank / bin_name
+    seed_dir, recruit_dir = workdir / "seed", workdir / "recruitment"
+    for d in (seed_dir, recruit_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    started = time.monotonic()
+    total_templates = count_fastq_reads(r1_raw) if total_templates is None else total_templates
+    accepted_names = set(seed_names)
+    if not accepted_names:
+        log.warning("Bin '%s' (%s): no reads won competitive seed mapping; skipping reassembly.",
+                    bin_name, rank)
+        return None
+    accepted_count = len(accepted_names)
+    accepted_fraction = accepted_count / total_templates if total_templates else 0.0
+
+    metrics_path = workdir / "recruitment.tsv"
+    metrics_rows = [
+        ["round", "frontier_templates", "candidate_templates", "new_templates",
+         "accepted_total", "growth_fraction", "accepted_fraction", "decision"],
+        [0, accepted_count, accepted_count, accepted_count, accepted_count,
+         "NA", f"{accepted_fraction:.8f}", "seed"],
+    ]
+
+    seed_raw_r1 = seed_dir / "accepted_raw_R1.fastq.gz"
+    seed_raw_r2 = seed_dir / "accepted_raw_R2.fastq.gz"
+    seed_raw_single = seed_dir / "accepted_raw_single.fastq.gz"
+    if seed_raw_paths is not None:
+        seed_raw_r1, seed_raw_r2, seed_raw_single = seed_raw_paths
+    else:
+        extract_templates(competitive_bam, accepted_names, seed_raw_r1, seed_raw_r2, seed_raw_single,
+                          threads, seed_dir / "extract")
+    log.info("Bin '%s' (%s): competitive seed mapping assigned %d/%d templates (%.4f); running QC.",
+              bin_name, rank, accepted_count, total_templates, accepted_fraction)
+    seed_r1, seed_r2, seed_single = run_qc(
+        seed_raw_r1, seed_raw_r2, workdir / "qc" / "seed", threads,
+        trimmomatic_cmd="trimmomatic", trimmomatic_folder=trimmomatic_folder,
+        flash_cmd="flash", flash_max_overlap=flash_max_overlap, pigz_cmd="pigz",
+        qc_quality=qc_quality, qc_minlen=qc_minlen, keep_tmp=False,
+    )
+    for p in (seed_raw_r1, seed_raw_r2, seed_raw_single):
+        p.unlink(missing_ok=True)
+    assembly_r1_files, assembly_r2_files, assembly_single_files = [seed_r1], [seed_r2], [seed_single]
+
+    stop_reason = "extension disabled (--reassemble-max-rounds 0)"
+    rounds_accepted = 0
+    if max_rounds > 0:
+        frontier_names = accepted_names
+        frontier_baits = recruit_dir / "round_00_frontier_baits.fasta"
+        make_frontier_baits([seed_r1, seed_r2, seed_single], frontier_baits, word_size,
+                             bait_min_entropy, bbtools_memory, recruit_dir / "round_00_bait_filter.log")
+
+        stop_reason = "maximum recruitment rounds reached"
+        for round_n in range(1, max_rounds + 1):
+            round_dir = recruit_dir / f"round_{round_n:02d}"
+            round_dir.mkdir(parents=True, exist_ok=True)
+            frontier_count_this_round = len(frontier_names)
+
+            candidate_names = scan_raw_with_baits(
+                frontier_baits, r1_raw, r2_raw, word_size, min_word_hits, bbtools_memory,
+                threads, round_dir / "bbduk.log",
+            )
+            # Never let frontier extension steal a template that competitive seed mapping
+            # assigned to another bin. Previously unassigned reads remain eligible to bridge
+            # outward from this bin's newest frontier.
+            new_names = candidate_names - accepted_names - blocked_seed_names
+            growth = (len(new_names) / accepted_count) if accepted_count else 0.0
+            proposed_count = accepted_count + len(new_names)
+            proposed_fraction = proposed_count / total_templates if total_templates else 0.0
+
+            if growth > max_round_growth:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                      len(new_names), accepted_count, f"{growth:.8f}",
+                                      f"{accepted_fraction:.8f}", "rejected_growth"])
+                stop_reason = f"round-{round_n} growth {growth:.4f} exceeded {max_round_growth}; recruitment rejected"
+                log.warning("Bin '%s' (%s): %s.", bin_name, rank, stop_reason)
+                break
+            if proposed_fraction > max_accepted_fraction:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                      len(new_names), accepted_count, f"{growth:.8f}",
+                                      f"{accepted_fraction:.8f}", "rejected_total_fraction"])
+                stop_reason = (f"round-{round_n} accepted fraction {proposed_fraction:.4f} exceeded "
+                                f"{max_accepted_fraction}; recruitment rejected")
+                log.warning("Bin '%s' (%s): %s.", bin_name, rank, stop_reason)
+                break
+            if not new_names:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names), 0,
+                                      accepted_count, "0.00000000", f"{accepted_fraction:.8f}",
+                                      "converged"])
+                stop_reason = "no new templates were recruited"
+                break
+
+            if len(new_names) < min_new_templates or growth < min_growth:
+                metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                     len(new_names), accepted_count, f"{growth:.8f}",
+                                     f"{accepted_fraction:.8f}", "stopped_low_gain"])
+                stop_reason = "new-template gain below threshold"
+                break
+
+            accepted_names = accepted_names | new_names
+            accepted_count = proposed_count
+            accepted_fraction = proposed_fraction
+            rounds_accepted += 1
+
+            raw_r1 = round_dir / "new_raw_R1.fastq.gz"
+            raw_r2 = round_dir / "new_raw_R2.fastq.gz"
+            raw_single = round_dir / "new_raw_single.fastq.gz"
+            extract_templates(competitive_bam, new_names, raw_r1, raw_r2, raw_single, threads,
+                               round_dir / "extract")
+            log.info("Bin '%s' (%s): round %d QC of %d newly accepted templates.",
+                      bin_name, rank, round_n, len(new_names))
+            clean_r1, clean_r2, clean_single = run_qc(
+                raw_r1, raw_r2, round_dir / "qc", threads,
+                trimmomatic_cmd="trimmomatic", trimmomatic_folder=trimmomatic_folder,
+                flash_cmd="flash", flash_max_overlap=flash_max_overlap, pigz_cmd="pigz",
+                qc_quality=qc_quality, qc_minlen=qc_minlen, keep_tmp=False,
+            )
+            for p in (raw_r1, raw_r2, raw_single):
+                p.unlink(missing_ok=True)
+            assembly_r1_files.append(clean_r1)
+            assembly_r2_files.append(clean_r2)
+            assembly_single_files.append(clean_single)
+
+            metrics_rows.append([round_n, frontier_count_this_round, len(candidate_names),
+                                  len(new_names), accepted_count, f"{growth:.8f}",
+                                  f"{accepted_fraction:.8f}", "accepted"])
+            log.info("Bin '%s' (%s): round %d accepted %d new templates; total=%d, growth=%.4f.",
+                      bin_name, rank, round_n, len(new_names), accepted_count, growth)
+
+            if round_n == max_rounds:
+                break
+            frontier_names = new_names
+            frontier_baits = round_dir / "frontier_baits.fasta"
+            make_frontier_baits([clean_r1, clean_r2, clean_single], frontier_baits, word_size,
+                                 bait_min_entropy, bbtools_memory, round_dir / "bait_filter.log")
+
+            if len(new_names) < min_new_templates:
+                stop_reason = f"new-template count {len(new_names)} fell below {min_new_templates}"
+                break
+            if growth < min_growth:
+                stop_reason = f"growth {growth:.6f} fell below {min_growth}"
+                break
+    else:
+        log.info("Bin '%s' (%s): frontier extension disabled; assembling seed recruitment directly.",
+                  bin_name, rank)
+
+    log.info("Bin '%s' (%s): recruitment stopped (%s) after %d extension round(s); assembling.",
+              bin_name, rank, stop_reason, rounds_accepted)
+
+    final_r1 = workdir / "accepted_R1.fastq.gz"
+    final_r2 = workdir / "accepted_R2.fastq.gz"
+    final_single = workdir / "accepted_single.fastq.gz"
+    combine_fastqs(final_r1, assembly_r1_files)
+    combine_fastqs(final_r2, assembly_r2_files)
+    combine_fastqs(final_single, assembly_single_files)
+
+    with open(metrics_path, "w", newline="") as mf:
+        csv.writer(mf, delimiter="\t").writerows(metrics_rows)
+
+    recruitment_seconds = time.monotonic() - started
+    (workdir / "timing.json").write_text(json.dumps({"recruitment_seconds": recruitment_seconds}))
+    if expansion_mode == "link":
+        # Stop here. The pool is the valuable product of seed-and-extension; what we do
+        # with it is a choice, and rebuilding sequence is the destructive option.
+        return link_expand_one_bin(
+            bin_fasta, bin_name, rank, final_r1, final_r2, final_single,
+            assembly_index, assembly_seqs, workdir / "link", threads,
+            link_min_covered_fraction, link_min_reads, link_max_insert,
+        )
+
+    assembly_started = time.monotonic()
+    chosen_contigs, chosen_stage, circular_count = assemble_recruited_pool(
+        final_r1, final_r2, final_single, workdir, threads,
+        assembler=assembler, unicycler_mode=unicycler_mode, kmers=kmers,
+        unicycler_extra=unicycler_extra, spades_mode=spades_mode,
+        spades_memory_gb=spades_memory_gb, spades_fallback=spades_fallback,
+        polish=polish, bin_label=f"{bin_name} ({rank})",
+        unicycler_argv=unicycler_argv,
+    )
+    (workdir / "timing.json").write_text(json.dumps({
+        "recruitment_seconds": recruitment_seconds,
+        "assembly_seconds": time.monotonic() - assembly_started}))
+    if chosen_contigs is None:
+        log.warning("Bin '%s' (%s): focused reassembly produced nothing; keeping the "
+                    "original bin contigs.", bin_name, rank)
+        return None
+
+    with open(workdir / "assembly_stage.tsv", "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["selected_stage", "circular_contigs", "selected_fasta"])
+        w.writerow([chosen_stage, circular_count, chosen_contigs])
+    if circular_count:
+        log.info("Bin '%s' (%s): Unicycler closed %d circular contig(s).",
+                 bin_name, rank, circular_count)
+
+    reassembled = workdir / "reassembled.fasta"
+    shutil.copyfile(chosen_contigs, reassembled)
+    return reassembled
+
+
+def load_tsv(path):
+    if not Path(path).is_file():
+        return []
+    with open(path, newline="") as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
+
+
+def finite_number(value):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def file_signature(path):
+    path = Path(path).resolve()
+    st = path.stat()
+    return [str(path), st.st_size, st.st_mtime_ns]
+
+
+def sequence_digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def seed_pools_once(bam, assignments, root, threads):
+    """Extract all eligible seed pairs once, then demultiplex with bounded file handles."""
+    root.mkdir(parents=True, exist_ok=True)
+    owner = {name: bin_name for bin_name, names in assignments.items() for name in names}
+    paths = {}
+    for bin_name in assignments:
+        d = root / bin_name
+        d.mkdir(parents=True, exist_ok=True)
+        paths[bin_name] = tuple(d / f"raw_{suffix}.fastq.gz" for suffix in ("R1", "R2", "single"))
+        for path in paths[bin_name]:
+            path.unlink(missing_ok=True)
+    if not owner:
+        return paths
+    combined = tuple(root / f"all_{suffix}.fastq.gz" for suffix in ("R1", "R2", "single"))
+    extract_templates(bam, set(owner), *combined, threads, root / "all")
+    handles = OrderedDict()
+    try:
+        for side, path in enumerate(combined):
+            if not path.stat().st_size:
+                continue
+            with gzip.open(path, "rt") as fh:
+                while True:
+                    header = fh.readline()
+                    if not header:
+                        break
+                    body = [fh.readline() for _ in range(3)]
+                    if not all(body):
+                        raise RuntimeError("Truncated seed FASTQ")
+                    name = re.sub(r"/[12]$", "", header[1:].split()[0])
+                    bin_name = owner.get(name)
+                    if bin_name is None:
+                        raise RuntimeError(f"Unexpected seed template: {name}")
+                    key = (bin_name, side)
+                    if key not in handles:
+                        if len(handles) >= 48:
+                            _, old = handles.popitem(last=False)
+                            old.close()
+                        handles[key] = gzip.open(paths[bin_name][side], "at", compresslevel=1)
+                    handles.move_to_end(key)
+                    handles[key].write(header + "".join(body))
+    finally:
+        for fh in handles.values():
+            fh.close()
+        for path in combined:
+            path.unlink(missing_ok=True)
+    for bin_paths in paths.values():
+        for path in bin_paths:
+            if not path.exists():
+                with gzip.open(path, "wb"):
+                    pass
+    return paths
+
+
+def paf_retention(paf, original_lengths, min_identity=0.95):
+    """Union aligned query spans, without double-counting repeated alignments."""
+    intervals = defaultdict(list)
+    with open(paf) as fh:
+        for line in fh:
+            f = line.rstrip().split("\t")
+            if len(f) < 12 or f[0] not in original_lengths:
+                continue
+            if int(f[10]) <= 0 or int(f[9]) / int(f[10]) < min_identity:
+                continue
+            lo, hi = max(0, int(f[2])), min(original_lengths[f[0]], int(f[3]))
+            if hi > lo:
+                intervals[f[0]].append((lo, hi))
+    aligned = 0
+    for spans in intervals.values():
+        end = 0
+        for lo, hi in sorted(spans):
+            aligned += max(0, hi - max(lo, end))
+            end = max(end, hi)
+    return aligned / max(1, sum(original_lengths.values()))
+
+
+def original_retention(original, candidate, workdir, threads):
+    paf = workdir / "original_to_candidate.paf"
+    # Query = original contigs, target = candidate; -c supplies alignment identity.
+    run_pipeline([["minimap2", "-x", "asm5", "-c", "--secondary=no", "-t", str(threads),
+                   str(candidate), str(original)]], stdout_path=paf,
+                 log_file=workdir / "retention.log")
+    return paf_retention(paf, {cid: len(seq) for cid, seq in read_fasta(original).items()})
+
+
+def candidate_decision(before, after, retained, before_qa=None, after_qa=None,
+                       min_retained=0.95):
+    ratio = after["total_length_bp"] / max(1, before["total_length_bp"])
+    if retained < min_retained or ratio < min_retained:
+        return "rejected_sequence_loss", "not_evaluated"
+    if ratio > 1.25:
+        return "rejected_length_inflation", "not_evaluated"
+    b, a = before_qa or {}, after_qa or {}
+    values = [finite_number(row.get(key)) for row in (b, a)
+              for key in ("completeness_percent", "contamination_percent")]
+    comparable = (all(v is not None for v in values)
+                  and b.get("marker_lineage") not in (None, "", "NA")
+                  and b.get("marker_lineage") == a.get("marker_lineage"))
+    marker_state = "compared" if comparable else "unavailable_or_different_lineage"
+    completeness_gain = False
+    if comparable:
+        bc, bx, ac, ax = values
+        if ac < bc - 1.0:
+            return "rejected_completeness_loss", marker_state
+        if ax > bx + 1.0:
+            return "rejected_contamination_gain", marker_state
+        completeness_gain = ac >= bc + 2.0
+    less_fragmented = (after["num_contigs"] <= before["num_contigs"] * 0.9
+                       or after["N50"] >= max(1, before["N50"]) * 1.2)
+    if less_fragmented or completeness_gain:
+        return "accepted", marker_state
+    return "rejected_no_gain", marker_state
+
+
+def linked_classifications(provenance_path, preliminary, source_rank, ranks):
+    """Preserve original calls; read-supported adopted membership has explicit provenance."""
+    source_names = {}
+    for calls in preliminary.values():
+        taxon = calls.get(source_rank, ("Unclassified", 0))[0]
+        source_names[sanitize(taxon)] = taxon
+    result = {}
+    for row in load_tsv(provenance_path):
+        original = preliminary.get(row["source_record"], {})
+        calls = original.copy()
+        if row["source_type"] == "linked_adopted":
+            # Only the adopted rank changes. More-specific calls remain unclassified;
+            # sequence-derived taxonomy stays in preliminary and link_membership.tsv.
+            calls[source_rank] = (source_names.get(row["source_bin"], row["source_bin"]), 0.0)
+            if source_rank in WANTED_RANKS:
+                for rank in WANTED_RANKS[WANTED_RANKS.index(source_rank) + 1:]:
+                    if rank in calls:
+                        calls[rank] = ("Unclassified", 0.0)
+        for rank in ranks:
+            calls.setdefault(rank, ("Unclassified", 0.0))
+        result[row["final_contig"]] = calls
+    return result
+
+
+def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads: int,
+                        anchors_by_bin: dict, trimmomatic_folder: Path, qc_quality: int, qc_minlen: int,
+                        flash_max_overlap: int, seed_score_min: str, min_read_aligned: float,
+                        min_read_identity: float, max_insert: int, max_rounds: int,
+                        word_size: int, min_word_hits: int, bait_min_entropy: float,
+                        max_round_growth: float, max_accepted_fraction: float,
+                        min_new_templates: int, min_growth: float, bbtools_memory: str,
+                        assembler: str, spades_mode: str, spades_memory_gb: int, kmers: str,
+                        min_bin_contigs_to_reassemble: int, include_unclassified: bool,
+                        polish: bool, unicycler_mode: str, unicycler_extra: str = None,
+                        spades_fallback: bool = True, unicycler_argv=None,
+                        min_recovered_fraction: float = 0.95,
+                        seed_excluded_ids: set = None, resume: bool = False,
+                        bin_threads: int = None, expansion_mode: str = "reassemble",
+                        assembly_fasta: Path = None,
+                        link_min_covered_fraction: float = 0.8,
+                        link_min_reads: int = 20, target_bins=None,
+                        checkm_options=None, preliminary_classifications=None, bin_minutes=0) -> dict:
+    global BIN_DEADLINE
+    successful = defaultdict(dict)
+    total_templates = count_fastq_reads(r1_raw)  # once, not once per bin
+    bin_threads = bin_threads or threads
+    assembly_index = assembly_seqs = None
+    if expansion_mode == "link":
+        link_root = outdir / "reassembly" / "_link_reference"
+        link_root.mkdir(parents=True, exist_ok=True)
+        assembly_index = link_root / "assembly_index"
+        # Rebuild once per invocation, avoiding stale assembly indexes on resume.
+        build_bowtie2_index(assembly_fasta, assembly_index, threads, link_root / "index.log")
+        assembly_seqs = read_fasta(assembly_fasta)
+    selected = {sanitize(x.strip()) for x in (target_bins or "").split(",") if x.strip()}
+    for rank in ranks:
+        rank_started = time.monotonic()
+        qa_seconds = 0
+        rank_dir = outdir / "bins" / rank
+        all_fastas = sorted(rank_dir.glob("*.fasta"))
+        if not all_fastas:
+            continue
+        if selected - {p.stem for p in all_fastas}:
+            raise ValueError(f"Unknown target bins at {rank}: {sorted(selected - {p.stem for p in all_fastas})}")
+        eligible, rows, originals = [], {}, {}
+        for fasta in all_fastas:
+            name = fasta.stem
+            before = basic_assembly_stats(fasta)
+            originals[name] = before
+            rows[name] = dict(bin=name, rank=rank, outcome="pending", elapsed_seconds=0,
+                              **{f"{k}_before": v for k, v in before.items()})
+            reason = None
+            if name == "Unclassified":
+                reason = "skipped_unclassified"  # a catch-all is not a genome
+            elif selected and name not in selected:
+                reason = "skipped_not_targeted"
+            elif before["num_contigs"] < min_bin_contigs_to_reassemble:
+                reason = "skipped_contig_count"
+            if reason:
+                rows[name]["outcome"] = reason
+            else:
+                eligible.append(fasta)
+        root = outdir / "reassembly" / rank
+        root.mkdir(parents=True, exist_ok=True)
+        candidates, claims = {}, {}
+        if eligible:
+            cd = root / "competitive_seed"
+            cd.mkdir(parents=True, exist_ok=True)
+            seed = cd / "all_bins.fasta"
+
+            # Unclassified is a catch-all, not a biological seed bin.  It can contain most
+            # of a host-associated metagenome, making the competitive Bowtie2 reference
+            # enormous even though it is never itself reassembled.  Keep all *named* bins
+            # as competitors (including named bins that are not targeted for reassembly),
+            # but exclude Unclassified entirely from the seed reference/index.
+            competitor_fastas = [p for p in all_fastas if p.stem != "Unclassified"]
+            unclassified_fasta = next((p for p in all_fastas if p.stem == "Unclassified"), None)
+            if unclassified_fasta is not None:
+                unclassified_gib = unclassified_fasta.stat().st_size / (1024 ** 3)
+                named_mib = sum(p.stat().st_size for p in competitor_fastas) / (1024 ** 2)
+                log.info(
+                    "Competitive seed mapping at rank '%s': excluding Unclassified.fasta "
+                    "(%.2f GiB) from the Bowtie2 reference; %d named competitor bin(s) "
+                    "remain (%.1f MiB total).",
+                    rank, unclassified_gib, len(competitor_fastas), named_mib,
+                )
+            refs = build_competitive_seed_reference(
+                competitor_fastas, seed, anchors_by_bin, seed_excluded_ids
+            )
+            fingerprint = dict(seed_sha256=sequence_digest(seed), r1=file_signature(r1_raw),
+                               r2=file_signature(r2_raw), score=seed_score_min, insert=max_insert,
+                               mapping_version=3)
+            manifest = cd / "mapping_manifest.json"
+            bam = cd / "reads_to_all_bins.bam"
+            reusable = False
+            if resume and bam.is_file() and manifest.is_file():
+                try:
+                    reusable = json.loads(manifest.read_text()) == fingerprint
+                    if reusable:
+                        run_cmd(["samtools", "quickcheck", str(bam)])
+                except (ValueError, RuntimeError):
+                    reusable = False
+            if not reusable:
+                manifest.unlink(missing_ok=True)
+                index = cd / "all_bins_index"
+                build_bowtie2_index(seed, index, threads, cd / "index.log")
+                map_reads_to_index(r1_raw, r2_raw, index, bam, threads, seed_score_min,
+                                   max_insert, cd / "bowtie2.log", report_multiple=20)
+                manifest.write_text(json.dumps(fingerprint, sort_keys=True))
+            assignments, passing, ambiguous = competitively_assign_templates(
+                bam, refs, min_read_aligned, min_read_identity, threads)
+            with open(cd / "competitive_mapping.tsv", "w") as fh:
+                fh.write("rank\tbin\tuniquely_assigned_templates\n")
+                for fasta in all_fastas:
+                    fh.write(f"{rank}\t{fasta.stem}\t{len(assignments.get(fasta.stem, set()))}\n")
+                fh.write(f"{rank}\t__PASSING_TEMPLATES__\t{passing}\n{rank}\t__AMBIGUOUS_TIES_EXCLUDED__\t{ambiguous}\n")
+            # Use a primary-only BAM for all subsequent extraction rounds.
+            primary = cd / "primary_reads.bam"
+            run_cmd(["samtools", "view", "-@", str(threads), "-b", "-F", "2304",
+                     "-o", str(primary), str(bam)])
+            all_assigned = set().union(*(names for name, names in assignments.items()
+                if expansion_mode != "link" or name != "Unclassified")) if assignments else set()
+            eligible_assignments = {p.stem: assignments.get(p.stem, set()) for p in eligible}
+            seed_pools = seed_pools_once(primary, eligible_assignments, cd / "seed_pools", bin_threads)
+            for fasta in eligible:
+                name = fasta.stem
+                work = root / name
+                work.mkdir(parents=True, exist_ok=True)
+                started = time.monotonic()
+                row = rows[name]
+                row["seed_templates"] = len(assignments.get(name, set()))
+                # Mapping is safely reusable; bin candidates are rebuilt to avoid stale
+                # settings, partial FASTAs, or claims from previous competitors.
+                for stale in ("timing.json", "recruitment.tsv", "assembly_stage.tsv", "reassembled.fasta", "linked.fasta"):
+                    (work / stale).unlink(missing_ok=True)
+                for stale in ("unicycler", "spades", "pilon"):
+                    if (work / stale).exists():
+                        shutil.rmtree(work / stale)
+                BIN_DEADLINE = time.monotonic() + bin_minutes * 60 if bin_minutes else None
+                try:
+                    result = reassemble_one_bin(
+                        fasta, name, rank, r1_raw, r2_raw, primary,
+                        assignments.get(name, set()), all_assigned - assignments.get(name, set()),
+                        outdir, bin_threads, trimmomatic_folder, qc_quality, qc_minlen,
+                        flash_max_overlap, max_rounds, word_size, min_word_hits, bait_min_entropy,
+                        max_round_growth, max_accepted_fraction, min_new_templates, min_growth,
+                        bbtools_memory, assembler, spades_mode, spades_memory_gb, kmers,
+                        False, unicycler_mode, unicycler_extra, spades_fallback, unicycler_argv,
+                        expansion_mode=expansion_mode, assembly_index=assembly_index,
+                        assembly_seqs=assembly_seqs, link_min_covered_fraction=link_min_covered_fraction,
+                        link_min_reads=link_min_reads, link_max_insert=max_insert,
+                        total_templates=total_templates, seed_raw_paths=seed_pools[name])
+                    if result is None:
+                        row["outcome"] = "no_candidate"
+                    elif expansion_mode == "link":
+                        _, adopted, support = result
+                        # Never recover excluded host/triage contigs through the full-assembly index.
+                        eligible_ids = set(read_fasta(rank_dir / "Unclassified.fasta")) if (rank_dir / "Unclassified.fasta").exists() else set()
+                        if preliminary_classifications is not None:
+                            eligible_ids = {cid for cid in eligible_ids
+                                if preliminary_classifications.get(cid, {}).get(rank, ("Unclassified", 0))[0] == "Unclassified"}
+                        adopted &= eligible_ids
+                        claims[name] = (adopted, support, originals[name], fasta)
+                    else:
+                        after = basic_assembly_stats(result)
+                        row.update({f"{k}_after": v for k, v in after.items()})
+                        retained = original_retention(fasta, result, work, bin_threads)
+                        row["original_sequence_retained"] = retained
+                        row["recovered_fraction"] = after["total_length_bp"] / max(1, originals[name]["total_length_bp"])
+                        preliminary_decision, _ = candidate_decision(originals[name], after, retained,
+                                                                    min_retained=min_recovered_fraction)
+                        if preliminary_decision in ("rejected_sequence_loss", "rejected_length_inflation"):
+                            row["outcome"] = preliminary_decision
+                        else:
+                            candidates[name] = (fasta, result, after)
+                            row["outcome"] = "awaiting_quality"
+                except (RuntimeError, OSError) as exc:
+                    row["outcome"] = "timed_out" if BIN_DEADLINE and time.monotonic() >= BIN_DEADLINE else "failed"
+                    row["reason"] = str(exc)[-1000:]
+                    log.warning("Bin %s: %s; retaining original", name, exc)
+                finally:
+                    BIN_DEADLINE = None
+                row["elapsed_seconds"] = time.monotonic() - started
+                if (work / "timing.json").is_file():
+                    row.update(json.loads((work / "timing.json").read_text()))
+                recruitment = load_tsv(work / "recruitment.tsv")
+                if recruitment:
+                    row["extension_rounds"] = sum(x["decision"] == "accepted" for x in recruitment)
+                    row["recruitment_stop"] = recruitment[-1]["decision"]
+                    row["accepted_templates"] = recruitment[-1]["accepted_total"]
+            del assignments, all_assigned, eligible_assignments
+        if expansion_mode == "link":
+            owned = set().union(*(set(read_fasta(p)) for p in all_fastas if p.stem != "Unclassified"))
+            awarded = resolve_link_claims(claims, owned)
+            for name, (_, _, before, fasta) in claims.items():
+                gained = awarded.get(name, set())
+                row = rows[name]
+                row["adopted_contigs"] = len(gained)
+                row["outcome"] = "linked" if gained else "no_gain"
+                if gained:
+                    linked = root / name / "linked.fasta"
+                    write_linked_bin(fasta, gained, assembly_seqs, linked)
+                    successful[rank][name] = linked
+                    after = basic_assembly_stats(linked)
+                else:
+                    after = before
+                row.update({f"{k}_after": v for k, v in after.items()})
+                row["recovered_fraction"] = after["total_length_bp"] / max(1, before["total_length_bp"])
+        elif candidates:
+            # Assess original/candidate pairs together once per rank. This also works
+            # when preliminary assessment was disabled, without per-bin CheckM startups.
+            paired_qa = {}
+            qa_started = time.monotonic()
+            if checkm_options:
+                qa_dir = root / "candidate_quality"
+                qa_dir.mkdir(parents=True, exist_ok=True)
+                for stale in qa_dir.glob("*.fasta"):
+                    stale.unlink()
+                ids = {}
+                for i, (name, (original, candidate, _)) in enumerate(candidates.items()):
+                    ids[name] = (f"before_{i:06d}", f"after_{i:06d}")
+                    for label, path in zip(ids[name], (original, candidate)):
+                        shutil.copyfile(path, qa_dir / f"{label}.fasta")
+                paired_qa = run_checkm(qa_dir, qa_dir / "checkm_out", threads, **checkm_options)
+            else:
+                ids = {}
+            qa_seconds = time.monotonic() - qa_started
+            for name, (original, candidate, after) in candidates.items():
+                row = rows[name]
+                bkey, akey = ids.get(name, (None, None))
+                bqa, aqa = paired_qa.get(bkey, {}), paired_qa.get(akey, {})
+                for side, qa in (("before", bqa), ("candidate", aqa)):
+                    for metric in ("completeness_percent", "contamination_percent"):
+                        row[f"{metric}_{side}"] = qa.get(metric, "NA")
+                decision, marker_state = candidate_decision(originals[name], after,
+                    row["original_sequence_retained"], bqa, aqa, min_recovered_fraction)
+                row["outcome"], row["marker_check"] = decision, marker_state
+                if decision == "accepted":
+                    if polish:
+                        work = root / name
+                        started = time.monotonic()
+                        polished = run_pilon_polish(candidate, work / "accepted_R1.fastq.gz",
+                            work / "accepted_R2.fastq.gz", work / "accepted_single.fastq.gz", work, bin_threads)
+                        # Polishing may change structure; preserve unpolished accepted
+                        # candidate unless its original bases and contiguity still pass.
+                        if polished:
+                            retention = original_retention(original, polished, work, bin_threads)
+                            pstats = basic_assembly_stats(polished)
+                            pdecision, _ = candidate_decision(originals[name], pstats, retention,
+                                                              min_retained=min_recovered_fraction)
+                            if pdecision == "accepted":
+                                candidate = polished
+                                row["polish_outcome"] = "used_sequence_gate_passed_markers_not_rechecked"
+                            else:
+                                row["polish_outcome"] = "retained_unpolished"
+                        else:
+                            row["polish_outcome"] = "failed_retained_unpolished"
+                        row["polish_seconds"] = time.monotonic() - started
+                        row["elapsed_seconds"] += row["polish_seconds"]
+                    successful[rank][name] = candidate
+        else:
+            qa_seconds = 0
+        # Keep historical field names used by existing report consumers.
+        for row in rows.values():
+            for side in ("before", "after"):
+                for source, dest in (("num_contigs", "contigs"), ("total_length_bp", "total_length"), ("largest_contig_bp", "largest_contig")):
+                    key = f"{source}_{side}"
+                    if key in row:
+                        row[f"{dest}_{side}" + ("_bp" if source.endswith("_bp") else "")] = row[key]
+        fields = list(dict.fromkeys(k for row in rows.values() for k in row))
+        with open(rank_dir / "reassembly_summary.tsv", "w", newline="") as fh:
+            w = csv.DictWriter(fh, fields, delimiter="\t")
+            w.writeheader(); w.writerows(rows.values())
+        (root / "rank_timing.json").write_text(json.dumps({
+            "elapsed_seconds": time.monotonic() - rank_started,
+            "candidate_quality_seconds": locals().get("qa_seconds", 0),
+            "note": "Rank time includes shared mapping/extraction and quality assessment; per-bin times exclude shared work."}, indent=2))
+    return {rank: dict(paths) for rank, paths in successful.items()}
+
+
+def choose_final_source_rank(ranks, reassemble_ranks, requested: str = "auto") -> str:
+    """Selects the single preliminary partition used to construct the consolidated final
+    assembly. A single source rank is essential: combining nested family/genus/species
+    reassemblies would represent the same original contigs and reads multiple times.
+
+    Auto mode prefers genus as a practical genome-oriented compromise, then species,
+    family, phylum, kingdom, superkingdom, and domain. The chosen rank must be both a
+    requested binning rank and one of the ranks actually sent through reassembly.
+    """
+    available = [r for r in ranks if r in reassemble_ranks]
+    if not available:
+        raise ValueError("No shared rank exists between --ranks and --reassemble-ranks.")
+    if requested and requested != "auto":
+        if requested not in available:
+            raise ValueError(
+                f"--final-source-rank '{requested}' must occur in both --ranks and "
+                f"--reassemble-ranks (available: {','.join(available)})."
+            )
+        return requested
+    for rank in ("genus", "species", "family", "phylum", "kingdom", "superkingdom", "domain"):
+        if rank in available:
+            return rank
+    return available[-1]
+
+
+def write_html_report(outdir: Path, min_length: int, max_points: int) -> Path:
+    """Render metahopper_report.html in the run directory.
+
+    metahopper_report.py is imported from beside this script (falling back to PATH and to
+    the current directory) and called in-process, so the report is generated without a
+    subprocess and without requiring the reporter to be installed. A failure here is
+    logged and swallowed: the run's actual results are already on disk, and a broken
+    report must not retroactively fail a finished pipeline.
+    """
+    import importlib.util
+
+    candidates = [Path(__file__).resolve().parent / "metahopper_report.py"]
+    on_path = shutil.which("metahopper_report.py")
+    if on_path:
+        candidates.append(Path(on_path))
+    candidates.append(Path.cwd() / "metahopper_report.py")
+    script = next((c for c in candidates if c.is_file()), None)
+    if script is None:
+        log.warning(
+            "metahopper_report.py not found next to %s or on PATH; skipping the HTML "
+            "report. Pass --skip-report to silence this.", Path(__file__).name,
+        )
+        return None
+
+    out_html = outdir / "metahopper_report.html"
+    try:
+        spec = importlib.util.spec_from_file_location("metahopper_report", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        layout = module.RunLayout(outdir, "auto")
+        opts = argparse.Namespace(
+            input=outdir, output=out_html, bin_set="auto", title=None,
+            min_length=min_length, max_points=max_points,
+            include_uncoordinated=False, no_fasta_stats=False,
+            apply_split=None, split_outdir=None, contigs=None,
+        )
+        out_html.write_text(module.build_report(layout, opts), encoding="utf-8")
+    except Exception as exc:
+        log.warning("Could not write the HTML report (%s: %s). The run itself is "
+                    "unaffected.", type(exc).__name__, exc)
+        return None
+    log.info("HTML report: %s", out_html)
+    return out_html
+
+
+def read_contig_provenance(provenance_tsv: Path) -> dict:
+    """final_contig -> source_bin, from the table build_consolidated_final_assembly wrote."""
+    provenance = {}
+    with open(provenance_tsv, newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            provenance[row["final_contig"]] = row["source_bin"]
+    return provenance
+
+
+def bin_consensus_lineages(classifications: dict, source_rank: str, ranks) -> dict:
+    """Per source-rank bin, the lineage its preliminary contigs agree on.
+
+    Every contig in a preliminary bin shares that bin's taxon at ``source_rank`` by
+    construction, but ranks above it are only implied, and ranks below it vary. So take a
+    length-agnostic plurality vote per rank across the bin's contigs, counting only
+    contigs that were actually classified at that rank, and keep the winner only when it
+    is unanimous among those. Anything short of unanimity stays Unclassified rather than
+    inventing a call the evidence does not support.
+    """
+    per_bin = defaultdict(lambda: defaultdict(Counter))
+    for result in classifications.values():
+        bin_name = result.get(source_rank, ("Unclassified", 0.0))[0]
+        if bin_name == "Unclassified":
+            continue
+        for rank in ranks:
+            taxon = result.get(rank, ("Unclassified", 0.0))[0]
+            if taxon != "Unclassified":
+                per_bin[bin_name][rank][taxon] += 1
+
+    lineages = {}
+    for bin_name, rank_counts in per_bin.items():
+        lineage = {}
+        for rank in ranks:
+            counts = rank_counts.get(rank)
+            if not counts:
+                lineage[rank] = "Unclassified"
+                continue
+            (taxon, n), = counts.most_common(1)
+            lineage[rank] = taxon if len(counts) == 1 else "Unclassified"
+        lineages[bin_name] = lineage
+    return lineages
+
+
+def inherit_classifications(final_contig_ids, provenance: dict, lineages: dict,
+                            orf_to_contig: dict, ranks) -> dict:
+    """Assign each consolidated contig the lineage of the bin it was assembled from.
+
+    Support is reported as 1.0 for an inherited name so downstream --min-support
+    comparisons behave, but these are provenance labels, not vote fractions.
+    """
+    n_orfs = Counter(orf_to_contig.values())
+    classifications = {}
+    n_inherited = 0
+    for contig_id in final_contig_ids:
+        bin_name = provenance.get(contig_id)
+        lineage = lineages.get(bin_name) if bin_name else None
+        result = {}
+        for rank in ranks:
+            taxon = (lineage or {}).get(rank, "Unclassified")
+            result[rank] = (taxon, 1.0 if taxon != "Unclassified" else 0.0)
+        if lineage:
+            n_inherited += 1
+        result["_n_orfs_total"] = n_orfs.get(contig_id, 0)
+        result["_n_orfs_with_hits"] = 0
+        classifications[contig_id] = result
+    log.info("Inherited a lineage for %d/%d consolidated contig(s) from %d source bin(s).",
+             n_inherited, len(final_contig_ids), len(lineages))
+    return classifications
+
+
+def build_consolidated_final_assembly(outdir: Path, source_rank: str,
+                                      successful_reassemblies: dict) -> Path:
+    """Builds one nonredundant-by-partition final contig set from a preliminary rank.
+
+    For each preliminary bin at `source_rank`, a successful targeted reassembly replaces
+    that bin's original contigs. Skipped or failed bins contribute their original contigs.
+    The source rank partitions each retained initial contig exactly once, avoiding the
+    duplication that would result from pooling nested reassemblies across several ranks.
+
+    New globally unique FASTA identifiers are assigned and a provenance table records the
+    source bin, source type, source FASTA, and original/reassembled record identifier.
+    """
+    rank_dir = outdir / "bins" / source_rank
+    bin_fastas = sorted(rank_dir.glob("*.fasta"))
+    if not bin_fastas:
+        raise RuntimeError(
+            f"No preliminary bin FASTAs found at source rank '{source_rank}' in {rank_dir}."
+        )
+
+    final_assembly_dir = outdir / "final" / "assembly"
+    final_assembly_dir.mkdir(parents=True, exist_ok=True)
+    final_fasta = final_assembly_dir / "consolidated_contigs.fasta"
+    provenance_tsv = final_assembly_dir / "contig_provenance.tsv"
+
+    success_at_rank = successful_reassemblies.get(source_rank, {})
+    final_records = {}
+    provenance_rows = []
+    adopted_owners = {}
+    for bin_name, path in success_at_rank.items():
+        if Path(path).name != "linked.fasta":
+            continue
+        own = set(read_fasta(rank_dir / f"{bin_name}.fasta"))
+        for cid in set(read_fasta(path)) - own:
+            if cid in adopted_owners:
+                raise RuntimeError(f"Duplicate link ownership for {cid}")
+            adopted_owners[cid] = bin_name
+    seen_original_ids = set()
+    n_reassembled_bins = 0
+    n_fallback_bins = 0
+
+    for bin_fasta in bin_fastas:
+        bin_name = bin_fasta.stem
+        reassembled = success_at_rank.get(bin_name)
+        if reassembled and Path(reassembled).exists() and Path(reassembled).stat().st_size > 0:
+            source_fasta = Path(reassembled)
+            source_type = "reassembled"
+            n_reassembled_bins += 1
+        else:
+            source_fasta = bin_fasta
+            source_type = "original"
+            n_fallback_bins += 1
+
+        source_records = read_fasta(source_fasta)
+        linked = source_fasta.name == "linked.fasta"
+        own_ids = set(read_fasta(bin_fasta)) if linked else set()
+        safe_bin = sanitize(bin_name)
+        for record_n, (source_id, seq) in enumerate(source_records.items(), 1):
+            record_type = source_type
+            if linked or source_type == "original":
+                if source_id in adopted_owners and adopted_owners[source_id] != bin_name:
+                    continue
+                if source_id in seen_original_ids:
+                    raise RuntimeError(f"Original contig emitted twice: {source_id}")
+                seen_original_ids.add(source_id)
+                record_type = "linked_adopted" if linked and source_id not in own_ids else "original"
+            final_id = f"MH_{record_type}_{safe_bin}_{record_n:07d}"
+            # A repeated/stale filename should never collide, but guard explicitly so a
+            # final FASTA record can never be silently overwritten.
+            collision_n = 1
+            candidate = final_id
+            while candidate in final_records:
+                collision_n += 1
+                candidate = f"{final_id}_{collision_n}"
+            final_id = candidate
+            final_records[final_id] = seq
+            provenance_rows.append([
+                final_id, source_rank, bin_name, record_type, str(source_fasta), source_id,
+            ])
+
+    if not final_records:
+        raise RuntimeError("Final-assembly consolidation produced no contigs.")
+
+    write_fasta(final_fasta, final_records)
+    with open(provenance_tsv, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow([
+            "final_contig", "source_rank", "source_bin", "source_type",
+            "source_fasta", "source_record",
+        ])
+        w.writerows(provenance_rows)
+
+    log.info(
+        "Consolidated final assembly from rank '%s': %d contigs; %d reassembled bin(s), "
+        "%d original-fallback bin(s).",
+        source_rank, len(final_records), n_reassembled_bins, n_fallback_bins,
+    )
+    return final_fasta
+
+
+# --------------------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------------------
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="MetaHopper 6: classify and bin contigs; with reads, run guarded seed-only reassembly. "
+                    "Keep metahopper_report.py beside this script. Reassembly requires minimap2. "
+                    "Use --help-all for advanced/legacy flags.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("-i", "--input", type=Path, default=None,
+                    help="Optional input contigs FASTA. Use alone for classification/binning, or "
+                         "together with -1/-2 to use these contigs as the initial assembly and "
+                         "enable read recruitment without running MEGAHIT.")
+    p.add_argument("-b", "--diamond-hits", type=Path, default=None,
+                    help="Optional preliminary DIAMOND hits.tsv from a previous MetaHopper run. "
+                         "Requires -i/--input with the exact assembly FASTA that produced those "
+                         "hits. Skips preliminary Prodigal and DIAMOND and classifies directly "
+                         "from the supplied hit table. Preliminary gene-density triage is not "
+                         "available in this shortcut because no Prodigal GFF is regenerated. "
+                         "A final Prodigal/DIAMOND pass still runs after reassembly unless "
+                         "--inherit-reassembly-taxonomy is used.")
+    p.add_argument("-1", "--r1", type=Path, default=None, help="Raw/forward paired-end FASTQ (R1)")
+    p.add_argument("-2", "--r2", type=Path, default=None, help="Raw/reverse paired-end FASTQ (R2)")
+    p.add_argument("-d", "--diamond-db", type=Path, default=None,
+                    help="Path to taxonomy-enabled nr-tax.dmnd (DIAMOND >=2.1.17). Optional "
+                         "only when every DIAMOND pass the run needs can be satisfied from "
+                         "existing output: omitting it implies --reuse-diamond, and a "
+                         "seed-and-extension run additionally needs "
+                         "--inherit-reassembly-taxonomy.")
+    p.add_argument("-o", "--outdir", required=True, type=Path, help="Output directory")
+    p.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS,
+                    help=f"Threads for every stage (default {DEFAULT_THREADS}). Raise this "
+                         "to match what the machine can spare; it is passed through to "
+                         "MEGAHIT, DIAMOND, bowtie2, samtools and the assemblers.")
+    p.add_argument("--skip-qc", action="store_true",
+                    help="Feed -1/-2 straight to MEGAHIT, skipping the Trimmomatic/FLASH QC step "
+                         "(--trim-polyg, if given, still runs).")
+
+    pg = p.add_argument_group("Poly-G trimming (fastp; optional, runs before everything else)")
+    pg.add_argument("--trim-polyg", action="store_true",
+                     help="Trim poly-G tails with fastp before adapter clipping. Poly-G runs are a "
+                          "known artifact of two-channel Illumina chemistry (NextSeq/NovaSeq) where "
+                          "dark/no-signal cycles get miscalled as 'G' -- Trimmomatic's adapter/quality "
+                          "trimming doesn't reliably catch these. Turn this on if your reads are known "
+                          "to have long poly-G tails.")
+    pg.add_argument("--poly-g-min-len", type=int, default=10,
+                     help="Minimum length of a 3' G-run to trim (fastp --poly_g_min_len, default 10)")
+
+    qc = p.add_argument_group("Read cleaning")
+    qc.add_argument("--trimmomatic-folder", type=Path, default=None,
+                     help="Path to the Trimmomatic install folder containing "
+                          "adapters/TruSeq3-PE-2.fa (required for read cleaning/reassembly)")
+    qc.add_argument("--flash-max-overlap", type=int, default=150)
+    qc.add_argument("--qc-quality", type=int, default=20,
+                     help="Trimmomatic SLIDINGWINDOW:4:<qc_quality> for all quality-trim passes")
+    qc.add_argument("--qc-minlen", type=int, default=50, help="Trimmomatic MINLEN for quality-trim passes")
+    qc.add_argument("--keep-qc-tmp", action="store_true", help="Keep intermediate QC files")
+
+    mh = p.add_argument_group("MEGAHIT options (used with -1/-2)")
+    mh.add_argument("--megahit-min-contig-len", type=int, default=None,
+                     help="MEGAHIT --min-contig-len (default: MEGAHIT's own default, 200bp)")
+    mh.add_argument("--megahit-extra", default=None,
+                     help="Extra raw arguments passed through to MEGAHIT verbatim, "
+                          "e.g. --megahit-extra '--k-list 21,41,61'")
+
+    p.add_argument("--prodigal-mode", choices=["single", "meta"], default="meta",
+                    help="Prodigal procedure (default: meta, appropriate for mixed organisms).")
+
+    tr = p.add_argument_group("Contig triage and bin refinement")
+    tr.add_argument("--skip-contig-triage", action="store_true",
+                    help="Disable the default pre-DIAMOND gene-density screen. By default, "
+                         f"contigs >= {TRIAGE_MIN_LENGTH_BP} bp with < "
+                         f"{TRIAGE_MAX_EUKARYOTIC_CODING_DENSITY * 100:.0f}%% coding density are "
+                         "quarantined as eukaryotic-like; short/uncertain contigs are retained.")
+    tr.add_argument("--skip-bin-refinement", action="store_true",
+                    help="Disable conservative GC+coverage coherence checks. With reads, joint "
+                         "GC-and-depth outliers are excluded from preliminary seed references "
+                         "and demoted to Unclassified at the selected rank after reassembly. "
+                         "Single-signal outliers are only reported.")
+    tr.add_argument("--refinement-rank", default="auto",
+                    help="Rank used for within-bin GC+coverage coherence (default auto: species, "
+                         "then genus/family/...); must also occur in --ranks.")
+
+    p.add_argument("-e", "--evalue", type=float, default=1e-5, help="DIAMOND e-value cutoff")
+    p.add_argument("--max-target-seqs", type=int, default=25, help="DIAMOND -k (hits kept per ORF)")
+
+    p.add_argument("--ranks", default=",".join(BIN_RANKS_DEFAULT),
+                    help="Comma-separated ranks to classify/bin at (default: genus,species). "
+                         "domain/superkingdom/phylum/family are also supported.")
+    p.add_argument("--bitscore-range", type=float, default=0.9,
+                    help="Keep hits within this fraction of an ORF's best bitscore (default 0.9)")
+    p.add_argument("--max-hits-per-orf", type=int, default=5)
+    p.add_argument("--support-denominator", choices=["all", "named"], default="all",
+                    help="What --min-support is measured against at each rank. 'all' "
+                         "(default, historical) divides the winning taxon's bitscore by "
+                         "that of every kept hit, including hits with no name at that "
+                         "rank -- which deflates species-level support because many NR "
+                         "entries have a genus but no species. 'named' divides by only "
+                         "the hits that can vote at that rank, giving many more "
+                         "species-level calls.")
+    p.add_argument("--min-support", type=float, default=0.5,
+                    help="Minimum bitscore-weighted vote share required to assign a taxon at a "
+                         "rank (0.5 = majority). Use 0 for a pure plurality/'most votes wins' call.")
+
+    p.add_argument("--min-bin-contigs", type=int, default=1,
+                    help="Drop bins with fewer than this many contigs (default 1, i.e. keep all). "
+                         "Contigs from dropped bins fall back to 'Unclassified'.")
+    p.add_argument("--min-bin-length", type=int, default=50_000,
+                    help="Merge bins whose total length (bp) is below this into "
+                         "'Unclassified' (default 50000). A metagenome produces a long "
+                         "tail of genus bins holding a few hundred bp of spurious best "
+                         "hits; they are not genomes, and because the reassembly stage "
+                         "runs per bin they dominate its runtime. Pass 0 to keep every "
+                         "bin.")
+    p.add_argument("--exclude-unclassified-bins", action="store_true",
+                    help="Do not write an Unclassified.fasta bin (default: include it)")
+
+    p.add_argument("--exclude-kingdoms", default=",".join(DEFAULT_EXCLUDED_KINGDOMS),
+                    help="Comma-separated Eukaryota kingdoms to drop from binning entirely "
+                         "(default: Metazoa,Viridiplantae -- removes host-animal/plant "
+                         "contamination while keeping Bacteria, Archaea, Fungi, and protists). "
+                         "Dropped contigs are written to "
+                         "<outdir>/classification/excluded_animal_plant_contamination.fasta "
+                         "and flagged in contig_classification.tsv, not silently discarded. "
+                         "Pass '' to disable this filter and keep everything.")
+
+    p.add_argument("--reuse-prodigal", action="store_true",
+                    help="Skip Prodigal if <outdir>/prodigal/proteins.faa already exists (reuse it).")
+    p.add_argument("--inherit-reassembly-taxonomy", action="store_true",
+                    help="Do not run the final DIAMOND pass on the consolidated assembly. "
+                         "Each consolidated contig instead inherits the lineage of the "
+                         "preliminary bin it came from, read from contig_provenance.tsv. "
+                         "Lets a seed-and-extension run finish with no DIAMOND database, "
+                         "but no longer detects contigs whose taxonomy changed during "
+                         "frontier extension, and cannot resolve ranks finer than the "
+                         "source rank. Compositional refinement still runs.")
+    p.add_argument("--skip-report", action="store_true",
+                    help="Do not write metahopper_report.html at the end of the run.")
+    p.add_argument("--report-min-length", type=int, default=1000,
+                    help="Minimum contig length plotted in the report's BinaRena tab "
+                         "(default 1000).")
+    p.add_argument("--report-max-points", type=int, default=25000,
+                    help="Maximum contigs embedded in the report scatter (default 25000).")
+    p.add_argument("--reuse-diamond", action="store_true",
+                    help="Skip DIAMOND if <outdir>/diamond/hits.tsv already exists (reuse it). "
+                         "Combine with --reuse-prodigal and a new --ranks/--min-support to "
+                         "re-classify/re-bin at a different granularity without re-running "
+                         "Prodigal+DIAMOND.")
+
+    qa = p.add_argument_group("Quality assessment (QUAST + CheckM)")
+    qa.add_argument("--skip-quast", action="store_true",
+                     help="Use the built-in N50/L50/GC calculator instead of QUAST.")
+    qa.add_argument("--skip-checkm", action="store_true",
+                     help="Skip completeness/contamination estimation entirely.")
+    qa.add_argument("--checkm-cmd", default=None,
+                     help="Explicit CheckM invocation, e.g. 'checkm' or "
+                          "'conda run -n checkm checkm'. Autodetected when omitted.")
+    qa.add_argument("--checkm-env", default=",".join(CHECKM_DEFAULT_ENVS),
+                     help="Comma-separated conda/mamba/micromamba environment names to "
+                          "search for CheckM when it is not on $PATH (default: "
+                          f"{','.join(CHECKM_DEFAULT_ENVS)}).")
+    qa.add_argument("--checkm-data-path", type=Path, default=None,
+                     help="CheckM reference data root. Exported as CHECKM_DATA_PATH and "
+                          "registered with `checkm data setRoot`; needed when the CheckM "
+                          "environment has never been configured.")
+    qa.add_argument("--checkm-reduced-tree", action="store_true",
+                     help="Use CheckM's reduced reference tree from the start (~14 GB "
+                          "instead of ~40 GB of RAM). A full-tree failure retries with "
+                          "this automatically.")
+    qa.add_argument("--checkm-pplacer-threads", type=int, default=1,
+                     help="Threads for CheckM's pplacer step (default 1). pplacer holds "
+                          "one copy of the reference tree per thread, so raising this is "
+                          "the usual cause of an out-of-memory kill.")
+    qa.add_argument("--checkm-extra", default=None,
+                     help="Extra arguments passed verbatim to `checkm lineage_wf`.")
+
+    rb = p.add_argument_group(
+        "Assembly settings"
+    )
+    rb_toggle = rb.add_mutually_exclusive_group()
+    rb_toggle.add_argument("--reassemble-bins", dest="reassemble_bins", action="store_true",
+                     help="Explicitly enable the default workflow used whenever -1/-2 are present: "
+                          "competitively map reads against all seed bins, exclude tied assignments, "
+                          "extend winning pools, assemble each pool with Unicycler, then "
+                          "polish with Pilon.")
+    rb_toggle.add_argument("--skip-reassembly", dest="reassemble_bins", action="store_false",
+                     help="Disable the default seed-and-extension/final-reclassification workflow "
+                          "and stop after preliminary classification, binning, and QUAST/CheckM. "
+                          "This is the implicit behavior only when contigs are supplied without reads.")
+    p.set_defaults(reassemble_bins=None)
+    rb.add_argument("--reassemble-ranks", default=None,
+                     help="Comma-separated subset of --ranks to reassemble. By default, only the "
+                          "automatically selected final source rank is reassembled (genus is "
+                          "preferred). Additional ranks are diagnostic and are not pooled into "
+                          "the consolidated final assembly. Each rank must also appear in --ranks.")
+    rb.add_argument("--final-source-rank", default="auto",
+                     help="Single preliminary rank whose mutually exclusive bins are used to "
+                          "construct the consolidated final assembly. Successful reassemblies "
+                          "replace their original bin contigs; skipped/failed bins fall back to "
+                          "the originals. Default 'auto' prefers genus, then species, family, "
+                          "phylum, kingdom, superkingdom, or domain. The rank must also occur in "
+                          "--reassemble-ranks when that option is given.")
+    rb.add_argument("--reassemble-min-bin-contigs", type=int, default=2,
+                     help="Skip reassembly for bins with fewer contigs than this -- nothing to "
+                          "gain from reassembling an already-single-contig bin (default 2).")
+    p.add_argument("--resume", action="store_true",
+                    help="Work out where a previous run in -o stopped by inspecting its "
+                         "output files, and restart from there. Implies the relevant "
+                         "--reuse-*/--resume-reassembly options, feeds an existing assembly "
+                         "and poly-G trimmed reads back in so QC and MEGAHIT are skipped, and "
+                         "recovers -1/-2/-d from run_manifest.json when they are not repeated. "
+                         "Outputs that look truncated are redone rather than trusted.")
+    rb.add_argument("--reassemble-threads", type=int, default=None,
+                     help="Threads for the per-bin work inside the reassembly stage "
+                          "(recruitment QC, BBDuk, Unicycler/SPAdes, Pilon). Defaults to "
+                          "min(-t, 8). The competitive seed mapping still uses the full "
+                          "-t because it is one large job, whereas each bin's rounds "
+                          "process small read batches where 24 threads per tool is pure "
+                          "overhead and multiplies the process/thread count the "
+                          "scheduler sees.")
+    rb.add_argument("--expansion-mode", choices=["link", "reassemble"], default="reassemble",
+                     help="What to do with each bin's recruited read pool. 'link' "
+                          "(default) maps the pool back to the assembly and ADOPTS the "
+                          "existing contigs it covers, so the bin grows but every "
+                          "sequence stays byte-identical -- nothing is merged, pruned or "
+                          "polished, and an unchanged contig cannot be reclassified into "
+                          "a sibling taxon. 'reassemble' runs the assembler on the pool "
+                          "and REPLACES the bin's contigs with its output, which can "
+                          "close a genome but can also delete most of an unevenly "
+                          "covered one.")
+    rb.add_argument("--link-min-covered-fraction", type=float, default=0.8,
+                     help="In link mode, fraction of a candidate contig that the "
+                          "recruited reads must cover before the bin adopts it "
+                          "(default: 0.8).")
+    rb.add_argument("--link-min-reads", type=int, default=20,
+                     help="In link mode, recruited reads a candidate contig needs "
+                          "before the bin adopts it (default: 20).")
+    rb.add_argument("--skip-preliminary-assessment", action="store_true",
+                     help="Do not run QUAST/CheckM on the preliminary bins before "
+                          "expansion. By default they are assessed at the rank being "
+                          "reassembled, which is what makes the report's Expansion tab "
+                          "able to say whether expansion helped rather than only that it "
+                          "ran. Only the bins that survive --min-bin-length are assessed, "
+                          "so this is a handful of bins, not the whole long tail.")
+    rb.add_argument("--resume-reassembly", action="store_true",
+                    help="Reuse matching, validated competitive seed mappings. Bin candidates are rebuilt and reassessed to avoid stale results.")
+    rb.add_argument("--reassemble-include-unclassified", action="store_true",
+                     help="Also attempt reassembly of the catch-all 'Unclassified' bin (default: "
+                          "skipped, since it's a mixed leftover pool, not one coherent genome).")
+    rb.add_argument("--anchor-db", action="append", default=[], metavar="BIN=FASTA",
+                     help="Optional external seed assigned to exactly one competing bin; repeatable. "
+                          "BIN is a bin FASTA stem, e.g. Escherichia_coli=reference.fasta.")
+    rb.add_argument("--reassemble-seed-score-min", default="G,20,8",
+                     help="Bowtie2 --score-min for the seed-recruitment mapping (default G,20,8).")
+    rb.add_argument("--reassemble-min-read-aligned", type=float, default=0.75,
+                     help="Minimum aligned fraction of a read for it to be recruited (default 0.75).")
+    rb.add_argument("--reassemble-min-read-identity", type=float, default=0.85,
+                     help="Minimum approximate identity for a recruited read (default 0.85).")
+    rb.add_argument("--reassemble-max-insert", type=int, default=1000,
+                     help="Maximum bowtie2 fragment length during recruitment (default 1000).")
+    rb.add_argument("--reassemble-max-rounds", type=int, default=0,
+                     help="Exact-kmer frontier-extension rounds after competitive seed "
+                          "recruitment (default 0; pass 0 to disable extension).")
+    rb.add_argument("--reassemble-word-size", type=int, default=31,
+                     help="Exact k-mer/word length for frontier extension (default 31; 15-31).")
+    rb.add_argument("--reassemble-min-word-hits", type=int, default=3,
+                     help="Minimum exact-word hits required to recruit a read during extension "
+                          "(default 3).")
+    rb.add_argument("--reassemble-bait-min-entropy", type=float, default=0.45,
+                     help="Excludes low-complexity bait sequence from frontier extension "
+                          "(default 0.45).")
+    rb.add_argument("--reassemble-max-round-growth", type=float, default=0.25,
+                     help="Reject an extension round if new/accepted exceeds this fraction -- "
+                          "guards against snowballing into an unrelated, similar-coverage genome "
+                          "(default 0.25).")
+    rb.add_argument("--reassemble-max-accepted-fraction", type=float, default=0.05,
+                     help="Reject an extension round if accepted/total-raw-reads would exceed "
+                          "this fraction (default 0.05).")
+    rb.add_argument("--reassemble-min-new-templates", type=int, default=100,
+                     help="Stop extension once a round recruits fewer new templates than this "
+                          "(default 100).")
+    rb.add_argument("--reassemble-min-growth", type=float, default=0.01,
+                     help="Stop extension once round-over-round growth falls below this fraction "
+                          "(default 0.01).")
+    rb.add_argument("--reassemble-bbtools-memory", default=DEFAULT_BBTOOLS_MEMORY,
+                     help=f"Java heap for BBDuk during frontier extension, e.g. 16g "
+                          f"(default {DEFAULT_BBTOOLS_MEMORY}).")
+    rb.add_argument("--assembler", choices=["unicycler", "spades"], default="unicycler",
+                     help="Assembler for each bin's expanded read pool. 'unicycler' "
+                          "(default) sweeps SPAdes k-mers, bridges the graph and attempts "
+                          "circularisation, which suits a small recruited pool from one "
+                          "organism. 'spades' calls spades.py directly (see "
+                          "--reassemble-mode) and skips bridging/circularisation.")
+    rb.add_argument("--unicycler-mode", choices=["conservative", "normal", "bold"],
+                     default="normal", help="Unicycler bridging mode (default normal).")
+    rb.add_argument("--unicycler-cmd", default=None,
+                     help="Explicit Unicycler invocation, e.g. 'unicycler' or "
+                          "'conda run -n unicycler unicycler'. Autodetected when omitted.")
+    rb.add_argument("--unicycler-env", default=",".join(UNICYCLER_DEFAULT_ENVS),
+                     help="Comma-separated conda/mamba/micromamba environment names to "
+                          "search for unicycler when it is not on $PATH (default: "
+                          f"{','.join(UNICYCLER_DEFAULT_ENVS)}). bioconda's unicycler "
+                          "pins python >=3.10,<3.11, so it commonly needs its own env.")
+    rb.add_argument("--unicycler-extra", default=None,
+                     help="Extra arguments passed verbatim to unicycler, e.g. "
+                          "\"--min_component_size 500\".")
+    rb.add_argument("--no-spades-fallback", dest="spades_fallback", action="store_false",
+                     help="Fail a bin outright instead of retrying with focused "
+                          "SPAdes/metaSPAdes when Unicycler produces no assembly.")
+    rb.add_argument("--skip-polish", dest="polish", action="store_false",
+                     help="Skip Pilon polishing of the reassembled contigs.")
+    rb.add_argument("--skip-circularization", dest="polish", action="store_false",
+                     help=argparse.SUPPRESS)
+    rb.add_argument("--reassemble-mode", choices=["standard", "meta"], default="meta",
+                     help="spades.py mode used by --assembler spades and by the Unicycler "
+                          "fallback: 'meta' (metaSPAdes, default -- more forgiving of "
+                          "residual strain heterogeneity/uneven coverage) or 'standard'.")
+    rb.add_argument("--reassemble-memory-gb", type=int, default=DEFAULT_MEMORY_GB,
+                     help=f"SPAdes memory limit in GB for each bin's reassembly (default "
+                          f"{DEFAULT_MEMORY_GB}). Reduced automatically if the machine has "
+                          "less than this available.")
+    rb.add_argument("--reassemble-min-recovered-fraction", type=float, default=0.95,
+                    help="Minimum original-base alignment retention AND total-length ratio (default 0.95). Other quality gates still apply.")
+    rb.add_argument("--reassemble-kmers", default="auto",
+                     help="k-mer list or 'auto' (default auto). Passed to unicycler "
+                          "--kmers or spades.py -k depending on --assembler.")
+    rb.add_argument("--spades-fallback", action="store_true",
+                    help="Retry a failed Unicycler assembly with metaSPAdes (default off).")
+    rb.add_argument("--bin-minutes", type=float, default=0,
+                    help="Optional time budget per bin for recruitment/assembly/retention; 0 is unlimited. Shared mapping, CheckM and polishing are outside this budget.")
+    p.set_defaults(polish=False, spades_fallback=False)
+
+    ba = p.add_argument_group(
+        "BinaRena staging (step 9: sequence-compositional feature extraction)")
+    ba.add_argument("--skip-binarena", action="store_true",
+                     help="Do not compute k-mer composition or write binarena_input.tsv.")
+    ba.add_argument("--binarena-kmers", default="4,5,6",
+                     help="k-mer sizes for composition profiling (default 4,5,6, i.e. "
+                          "tetra-, penta- and hexanucleotide frequencies).")
+    ba.add_argument("--binarena-methods", default="pca",
+                     help="Ordinations of the k-mer frequency matrix (default "
+                          "pca). Columns are named <k>PC1/<k>PC2, "
+                          "<k>tsne1/<k>tsne2 and <k>UM1/<k>UM2.")
+    ba.add_argument("--binarena-min-length", type=int, default=1000,
+                     help="Minimum contig length entering the k-mer ordinations "
+                          "(default 1000; composition is unstable on short contigs).")
+    ba.add_argument("--binarena-table-min-length", type=int, default=0,
+                     help="Minimum contig length written to binarena_input.tsv "
+                          "(default 0, i.e. every contig, ordination columns blank for "
+                          "contigs below --binarena-min-length).")
+    ba.add_argument("--binarena-max-contigs", type=int, default=20000,
+                     help="Above this many eligible contigs, compute PCA only and skip "
+                          "t-SNE/UMAP unless --binarena-force (default 20000).")
+    ba.add_argument("--binarena-force", action="store_true",
+                     help="Run t-SNE/UMAP even above --binarena-max-contigs.")
+    ba.add_argument("--binarena-perplexity", type=float, default=30.0,
+                     help="t-SNE perplexity (default 30; clamped for small contig sets).")
+    ba.add_argument("--binarena-umap-neighbors", type=int, default=15,
+                     help="UMAP n_neighbors (default 15).")
+    ba.add_argument("--binarena-seed", type=int, default=42,
+                     help="Random seed for PCA/t-SNE/UMAP (default 42).")
+
+    p.add_argument("-v", "--verbose", action="store_true")
+    simple = p.add_argument_group("Workflow controls")
+    simple.add_argument("--mode", choices=["bin", "link", "reassemble"], default=None,
+                        help="Workflow (default reassemble with reads, bin without reads).")
+    simple.add_argument("--rounds", type=int, default=None,
+                        help="Optional recruitment rounds (default 0; try 1 before 5).")
+    simple.add_argument("--assessment", choices=["full", "basic"], default=None,
+                        help="full: QUAST/CheckM when available; basic: sequence/contiguity gates only (default full).")
+    simple.add_argument("--polish", action="store_true", help="Polish accepted reassemblies with Pilon (default off).")
+    simple.add_argument("--plots", choices=["pca", "all", "off"], default=None,
+                        help="Composition plots (default pca).")
+    simple.add_argument("--qc", choices=["on", "off"], default=None,
+                        help="Initial whole-library QC (default on); recruited pools are always cleaned.")
+    simple.add_argument("--target-bins", default=None,
+                        help="Comma-separated source-rank bin names to improve; other bins are retained.")
+    simple.add_argument("--inspect", choices=["endosymbionts", "all", "off"], default="endosymbionts",
+                        help="Coverage/junction inspection (default endosymbionts).")
+    simple.add_argument("--references", type=Path, default=None,
+                        help="Reference genomes in genus subfolders for optional protein trees.")
+    simple.add_argument("--help-all", action="store_true", help="Show advanced and legacy options.")
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if "--help-all" in tokens:
+        p.print_help()
+        p.exit()
+
+    visible = {"help", "input", "diamond_hits", "r1", "r2", "diamond_db", "outdir", "threads",
+               "trimmomatic_folder", "mode", "rounds", "assessment", "polish", "plots",
+               "qc", "target_bins", "help_all", "resume", "ranks", "assembler", "inspect", "references"}
+
+    # Python 3.10 argparse can assert while formatting usage if every member of a
+    # mutually-exclusive group has been hidden with argparse.SUPPRESS.  Only apply
+    # compact-help hiding when help was actually requested; never mutate the parser
+    # before normal parsing or error reporting.  For compact help, temporarily omit
+    # mutually-exclusive groups whose members are all hidden.
+    if "-h" in tokens or "--help" in tokens:
+        original_help = {action: action.help for action in p._actions}
+        original_mutex = list(p._mutually_exclusive_groups)
+        try:
+            for action in p._actions:
+                if action.dest not in visible or any(
+                        opt.startswith("--skip-") for opt in action.option_strings):
+                    action.help = argparse.SUPPRESS
+            p._mutually_exclusive_groups = [
+                group for group in original_mutex
+                if any(action.help is not argparse.SUPPRESS
+                       for action in group._group_actions)
+            ]
+            p.print_help()
+        finally:
+            p._mutually_exclusive_groups = original_mutex
+            for action, help_text in original_help.items():
+                action.help = help_text
+        p.exit()
+
+    # Normal parsing uses the untouched parser.  This is important: if an argument is
+    # missing/invalid, argparse must be able to print its usage/error message normally.
+    args = p.parse_args(tokens)
+    present = {token.split("=", 1)[0] for token in tokens}
+    def conflict(new, legacy):
+        if new in present and present.intersection(legacy):
+            p.error(f"Use {new} or its legacy flags, not both: {', '.join(legacy)}")
+    conflict("--mode", {"--expansion-mode", "--skip-reassembly", "--reassemble-bins"})
+    conflict("--rounds", {"--reassemble-max-rounds"})
+    conflict("--polish", {"--skip-polish"})
+    conflict("--assessment", {"--skip-checkm", "--skip-quast", "--skip-preliminary-assessment"})
+    conflict("--plots", {"--skip-binarena", "--binarena-methods"})
+    conflict("--qc", {"--skip-qc"})
+    if args.mode is not None:
+        args.reassemble_bins = args.mode != "bin"
+        if args.mode != "bin":
+            args.expansion_mode = args.mode
+    if args.rounds is not None:
+        args.reassemble_max_rounds = args.rounds
+    if args.assessment is not None:
+        args.skip_checkm = args.skip_quast = args.assessment == "basic"
+    if args.plots is not None:
+        args.skip_binarena = args.plots == "off"
+        args.binarena_methods = "pca,tsne,umap" if args.plots == "all" else "pca"
+    if args.qc is not None:
+        args.skip_qc = args.qc == "off"
+    if args.reassemble_max_rounds < 0:
+        p.error("--rounds must be nonnegative")
+    if not 0 < args.reassemble_min_recovered_fraction <= 1:
+        p.error("Minimum retained fraction must be in (0, 1]")
+    if args.bin_minutes < 0 or not math.isfinite(args.bin_minutes):
+        p.error("--bin-minutes must be finite and nonnegative")
+    if args.threads < 1:
+        p.error("Threads must be positive")
+    if args.reassemble_include_unclassified:
+        p.error("Reassembling the mixed Unclassified catch-all is no longer supported.")
+    if args.references and not args.references.is_dir():
+        p.error("--references must be an existing directory")
+    if args.references and args.inspect == "off":
+        p.error("--references requires inspection; omit --inspect off")
+    args._provided_dests = {action.dest for action in p._actions
+                            if present.intersection(action.option_strings)}
+    for flag, destinations in {
+        "--mode": ["reassemble_bins", "expansion_mode"],
+        "--rounds": ["reassemble_max_rounds"],
+        "--assessment": ["skip_checkm", "skip_quast"],
+        "--plots": ["skip_binarena", "binarena_methods"],
+        "--qc": ["skip_qc"],
+    }.items():
+        if flag in present:
+            args._provided_dests.update(destinations)
+    return args
+
+
+def parse_anchor_specs(specs) -> dict:
+    """Parse repeatable ``BIN=FASTA`` anchors for competitive seed mapping."""
+    anchors = defaultdict(list)
+    for spec in specs or []:
+        if "=" not in spec:
+            raise ValueError(f"--anchor-db must be BIN=FASTA, got: {spec}")
+        raw_bin, raw_path = spec.split("=", 1)
+        bin_name = sanitize(raw_bin.strip())
+        anchor_path = Path(raw_path.strip())
+        if not raw_bin.strip() or not raw_path.strip():
+            raise ValueError(f"--anchor-db must be BIN=FASTA, got: {spec}")
+        if not anchor_path.is_file():
+            raise ValueError(f"Anchor FASTA does not exist: {anchor_path}")
+        anchors[bin_name].append(anchor_path)
+    return dict(anchors)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    setup_logging(args.verbose)
+    if args.inspect != "off" and not (Path(__file__).resolve().parent / "metahopper_inspect.py").is_file():
+        log.error("Keep metahopper_inspect.py beside MetaHopper.py, or use --inspect off.")
+        sys.exit(1)
+
+    if args.resume:
+        if not args.outdir.is_dir():
+            log.error("--resume needs an existing output directory; %s does not exist.",
+                      args.outdir)
+            sys.exit(1)
+        resume_state = RunState(
+            args.outdir,
+            [r.strip() for r in args.ranks.split(",") if r.strip()],
+        )
+        apply_resume(args, resume_state)
+    else:
+        resume_state = None
+
+    resolve_memory_budget(args)
+
+    using_reads = args.r1 is not None or args.r2 is not None
+    using_contigs = args.input is not None
+    if using_reads and (args.r1 is None or args.r2 is None):
+        log.error("Both -1 and -2 are required together.")
+        sys.exit(1)
+    if not using_reads and not using_contigs:
+        log.error("Provide contigs (-i), paired reads (-1/-2), or both.")
+        sys.exit(1)
+    if args.diamond_hits is not None and args.input is None:
+        log.error("-b/--diamond-hits requires -i/--input: use the exact assembly FASTA "
+                  "that generated the supplied DIAMOND table.")
+        sys.exit(1)
+    for label, path in (("-i/--input", args.input), ("-b/--diamond-hits", args.diamond_hits),
+                        ("-1/--r1", args.r1), ("-2/--r2", args.r2)):
+        if path is not None and not Path(path).is_file():
+            log.error("%s does not exist: %s", label, path)
+            sys.exit(1)
+
+    # Seed-and-extension is the default whenever reads are available. Contigs-only
+    # mode implicitly disables it unless the user explicitly requested it, which is an
+    # error because no reads exist to recruit.
+    reassembly_was_explicit = args.reassemble_bins is True
+    if args.reassemble_bins is None:
+        args.reassemble_bins = using_reads
+    if reassembly_was_explicit and not using_reads:
+        log.error("--reassemble-bins requires paired reads (-1/-2); contigs alone cannot extend.")
+        sys.exit(1)
+
+    reads_only = using_reads and not using_contigs
+    if reads_only and not args.skip_qc and args.trimmomatic_folder is None:
+        log.error("--trimmomatic-folder is required for QC (or pass --skip-qc to bypass QC).")
+        sys.exit(1)
+    if args.reassemble_bins and args.trimmomatic_folder is None:
+        log.error("Seed-and-extension is enabled by default whenever reads are supplied and requires "
+                  "--trimmomatic-folder because every recruited batch is QC processed. "
+                  "Provide the folder or pass --skip-reassembly.")
+        sys.exit(1)
+    if args.reassemble_bins and not (15 <= args.reassemble_word_size <= 31):
+        log.error("--reassemble-word-size must be between 15 and 31.")
+        sys.exit(1)
+    try:
+        anchors_by_bin = parse_anchor_specs(args.anchor_db)
+    except ValueError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+    if not args.skip_binarena:
+        try:
+            validate_binarena_options(args)
+        except ValueError as exc:
+            log.error("%s", exc)
+            sys.exit(1)
+
+    ranks = [r.strip() for r in args.ranks.split(",") if r.strip()]
+    if not ranks:
+        log.error("--ranks must contain at least one supported rank.")
+        sys.exit(1)
+    for r in ranks:
+        if r not in WANTED_RANKS:
+            log.error("Unsupported rank '%s'. Supported: %s", r, WANTED_RANKS)
+            sys.exit(1)
+    try:
+        refinement_rank = choose_refinement_rank(ranks, args.refinement_rank)
+    except ValueError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+    reassemble_ranks = []
+    final_source_rank = None
+    if args.reassemble_bins:
+        if args.reassemble_ranks:
+            reassemble_ranks = [r.strip() for r in args.reassemble_ranks.split(",") if r.strip()]
+        else:
+            try:
+                auto_source = choose_final_source_rank(ranks, ranks, args.final_source_rank)
+            except ValueError as exc:
+                log.error("%s", exc)
+                sys.exit(1)
+            reassemble_ranks = [auto_source]
+        for r in reassemble_ranks:
+            if r not in ranks:
+                log.error("--reassemble-ranks '%s' was not classified/binned (--ranks was '%s').",
+                          r, args.ranks)
+                sys.exit(1)
+        try:
+            final_source_rank = choose_final_source_rank(
+                ranks, reassemble_ranks, args.final_source_rank,
+            )
+        except ValueError as exc:
+            log.error("%s", exc)
+            sys.exit(1)
+        log.info(
+            "Seed-and-extension enabled at rank(s) %s; consolidated final assembly source rank: %s.",
+            reassemble_ranks, final_source_rank,
+        )
+
+    outdir = args.outdir
+    outdir.mkdir(parents=True, exist_ok=True)
+    write_run_manifest(outdir, args)
+
+    faa = outdir / "prodigal" / "proteins.faa"
+    gff = outdir / "prodigal" / "genes.gff"
+    supplied_hits = args.diamond_hits is not None
+    reuse_prodigal = (
+        args.reuse_prodigal and faa.exists()
+        and (args.skip_contig_triage or gff.exists())
+    )
+    hits_tsv = args.diamond_hits if supplied_hits else outdir / "diamond" / "hits.tsv"
+    if not supplied_hits and args.diamond_db is None and (hits_tsv.exists() or faa.exists()):
+        if not args.reuse_diamond and hits_tsv.exists():
+            log.info("No -d given and %s exists; enabling --reuse-diamond.", hits_tsv)
+            args.reuse_diamond = True
+        if not args.reuse_prodigal and faa.exists():
+            log.info("No -d given and %s exists; enabling --reuse-prodigal.", faa)
+            args.reuse_prodigal = True
+            reuse_prodigal = faa.exists() and (args.skip_contig_triage or gff.exists())
+    reuse_diamond = supplied_hits or (args.reuse_diamond and hits_tsv.exists())
+
+    # A run needs the database for the preliminary pass unless that pass is reused/supplied,
+    # and for the final pass unless taxonomy is inherited. Decide before doing any work.
+    needs_db_prelim = not reuse_diamond
+    needs_db_final = args.reassemble_bins and args.expansion_mode != "link" and not args.inherit_reassembly_taxonomy
+    if args.diamond_db is None:
+        if needs_db_prelim:
+            reason = (f"{hits_tsv} does not exist" if not hits_tsv.exists()
+                      else "--reuse-diamond was not given")
+            log.error(
+                "-d/--diamond-db is required: the preliminary DIAMOND pass has to run "
+                "because %s.", reason,
+            )
+            sys.exit(1)
+        if needs_db_final:
+            log.error(
+                "-d/--diamond-db is required: the preliminary pass can use %s, "
+                "but seed-and-extension reassembly classifies the *consolidated* assembly, "
+                "whose contigs are new sequences absent from that table. Either supply -d, "
+                "or add --inherit-reassembly-taxonomy to have each consolidated contig "
+                "inherit its preliminary bin's lineage instead.", hits_tsv,
+            )
+            sys.exit(1)
+        log.info("Running without a DIAMOND database; every DIAMOND pass is satisfied "
+                 "from existing output.")
+    if args.inherit_reassembly_taxonomy and not args.reassemble_bins:
+        log.info("--inherit-reassembly-taxonomy has no effect without seed-and-extension "
+                 "reassembly; ignoring it.")
+
+    if using_reads:
+        if args.trim_polyg:
+            which_or_die("fastp")
+        if reads_only and not args.skip_qc:
+            which_or_die("trimmomatic")
+            which_or_die("flash")
+        if reads_only:
+            which_or_die("megahit")
+    if args.reassemble_bins or (not reuse_prodigal and not supplied_hits):
+        which_or_die("prodigal")
+    if needs_db_prelim or needs_db_final:
+        which_or_die("diamond")
+        require_diamond_taxonomy_fields()
+    if not args.skip_quast and shutil.which("quast.py") is None:
+        log.warning("quast.py not on PATH; will use built-in assembly stats instead.")
+    if not args.skip_checkm and shutil.which("checkm") is None:
+        log.warning("checkm not on PATH; completeness/contamination will be NA.")
+    # Refinement (step 9) runs exactly once, on whatever assembly is final: the
+    # consolidated seed-and-extension assembly, or the preliminary assembly when
+    # extension is disabled. There is deliberately no pre-expansion refinement pass.
+    refinement_enabled = using_reads and not args.skip_bin_refinement
+    if args.reassemble_bins or refinement_enabled:
+        which_or_die("bowtie2")
+        which_or_die("bowtie2-build")
+        which_or_die("samtools")
+    unicycler_argv = None
+    if args.reassemble_bins:
+        which_or_die("trimmomatic")
+        which_or_die("flash")
+        if args.reassemble_max_rounds > 0:
+            which_or_die("bbduk.sh")
+        if args.expansion_mode == "reassemble":
+            which_or_die("minimap2")
+        # spades.py is only needed in *this* environment when we call it ourselves. When
+        # Unicycler runs from its own environment it uses the SPAdes installed there.
+        if args.expansion_mode == "reassemble" and (args.assembler == "spades" or args.spades_fallback):
+            which_or_die("spades.py")
+        if args.expansion_mode == "reassemble" and args.assembler == "unicycler":
+            unicycler_env_names = [
+                e.strip() for e in str(args.unicycler_env).split(",") if e.strip()
+            ]
+            unicycler_argv = resolve_unicycler_runner(
+                args.unicycler_cmd, unicycler_env_names,
+            )
+            if unicycler_argv is None:
+                log.error(
+                    "Unicycler is the default per-bin assembler but could not be "
+                    "launched. Install it (see the hint above), pass --unicycler-cmd, "
+                    "or switch to --assembler spades."
+                )
+                sys.exit(1)
+        if args.polish and args.expansion_mode == "reassemble":
+            which_or_die("pilon")
+
+    checkm_argv = None
+    skip_checkm = args.skip_checkm
+    if not skip_checkm:
+        checkm_envs = [e.strip() for e in str(args.checkm_env).split(",") if e.strip()]
+        checkm_argv = resolve_checkm_runner(args.checkm_cmd, checkm_envs)
+        if checkm_argv is None:
+            skip_checkm = True
+            log.warning(
+                "Continuing without CheckM; completeness/contamination will be NA. "
+                "Pass --skip-checkm to silence this."
+            )
+
+    n_qc_steps = (
+        (1 if using_reads and args.trim_polyg else 0)
+        + (1 if reads_only and not args.skip_qc else 0)
+        + (1 if reads_only else 0)
+    )
+    refinement_steps = 1 if refinement_enabled else 0
+    binarena_steps = 0 if args.skip_binarena else 1
+    report_steps = 0 if args.skip_report else 1
+    # Inheriting taxonomy replaces the final DIAMOND pass and the final classification
+    # pass with a single inheritance step.
+    inherit_taxonomy = args.reassemble_bins and args.inherit_reassembly_taxonomy
+    inherit_savings = 1 if inherit_taxonomy or (args.reassemble_bins and args.expansion_mode == "link") else 0
+    # Fixed steps: 4 preliminary (Prodigal, DIAMOND, classify, bin) plus, when
+    # seed-and-extension runs, 7 more (reassembly, consolidation, final Prodigal, final
+    # DIAMOND, final classification, final bins, quality assessment); otherwise 1 more
+    # (quality assessment). Refinement and BinaRena staging add one step each.
+    supplied_hits_savings = 1 if supplied_hits else 0
+    steps = StepCounter(
+        n_qc_steps + (11 if args.reassemble_bins else 5) + refinement_steps
+        + binarena_steps + report_steps - inherit_savings - supplied_hits_savings
+    )
+
+    # 0a/0b/0c. Poly-G may prepare reads in either read mode; QC+MEGAHIT are reads-only.
+    assembly_fasta = args.input
+    if using_reads:
+        r1_in, r2_in = args.r1, args.r2
+        if args.trim_polyg:
+            steps.next("Trimming poly-G tails (fastp)...")
+            r1_in, r2_in = trim_poly_g(
+                r1_in, r2_in, outdir / "polyg", args.threads,
+                poly_g_min_len=args.poly_g_min_len,
+            )
+            record_stage(outdir, "polyg", [r1_in, r2_in])
+
+        if reads_only:
+            if not args.skip_qc:
+                steps.next("Running QC (Trimmomatic adapter/quality trim + FLASH merge)...")
+                r1_final, r2_final, u_final = run_qc(
+                    r1_in, r2_in, outdir / "qc", args.threads,
+                    trimmomatic_cmd="trimmomatic", trimmomatic_folder=args.trimmomatic_folder,
+                    flash_cmd="flash", flash_max_overlap=args.flash_max_overlap, pigz_cmd="pigz",
+                    qc_quality=args.qc_quality, qc_minlen=args.qc_minlen,
+                    keep_tmp=args.keep_qc_tmp,
+                )
+                record_stage(outdir, "qc", [r1_final, r2_final, u_final])
+            else:
+                r1_final, r2_final, u_final = r1_in, r2_in, None
+
+            steps.next("Running MEGAHIT assembly...")
+            assembly_fasta = run_megahit(
+                r1_final, r2_final, u_final, outdir / "megahit", args.threads,
+                min_contig_len=args.megahit_min_contig_len, extra_args=args.megahit_extra,
+            )
+            log.info("MEGAHIT assembly: %s", assembly_fasta)
+            record_stage(outdir, "assembly", [assembly_fasta])
+        else:
+            log.info(
+                "Using supplied contigs as the initial assembly; reads are reserved for "
+                "competitive seed-and-extension."
+            )
+
+    contig_seqs = read_fasta(assembly_fasta)
+
+    classification_dir = outdir / "classification"
+    if supplied_hits:
+        steps.next(f"Using supplied preliminary DIAMOND hits: {hits_tsv}")
+        hits_by_orf = parse_diamond_hits(hits_tsv)
+        orf_to_contig, unmatched_orfs = infer_orf_to_contig_from_hits(hits_by_orf, contig_seqs.keys())
+        if not hits_by_orf or not orf_to_contig:
+            log.error(
+                "Supplied DIAMOND table %s has no Prodigal-style query ORFs that map to "
+                "contigs in %s. Use the exact assembly that generated this hits.tsv.",
+                hits_tsv, assembly_fasta,
+            )
+            sys.exit(1)
+        matched, total_hit_orfs = len(orf_to_contig), len(hits_by_orf)
+        if unmatched_orfs:
+            frac = matched / max(1, total_hit_orfs)
+            if frac < 0.5:
+                log.error(
+                    "Only %d/%d hit-bearing ORFs in %s map to contigs in %s (%.1f%%); "
+                    "the hit table is probably from a different assembly.",
+                    matched, total_hit_orfs, hits_tsv, assembly_fasta, 100 * frac,
+                )
+                sys.exit(1)
+            log.warning(
+                "%d/%d hit-bearing ORFs in %s map to this assembly (%.1f%%); unmatched "
+                "ORFs will be ignored.", matched, total_hit_orfs, hits_tsv, 100 * frac,
+            )
+        else:
+            log.info("Supplied DIAMOND table matches the assembly: %d hit-bearing ORFs.", matched)
+        contig_metrics = metrics_without_prodigal(contig_seqs)
+        triage_calls = {cid: "not_evaluated_supplied_diamond_hits" for cid in contig_seqs}
+        triage_excluded_ids = set()
+        diamond_query_faa = None
+        log.info(
+            "Preliminary gene-density triage skipped with -b (no Prodigal GFF regenerated). "
+            "Final reassembled sequences still receive the normal Prodigal/triage/DIAMOND pass."
+        )
+    else:
+        # 1. Preliminary Prodigal and default pre-DIAMOND gene-density triage.
+        if reuse_prodigal:
+            steps.next(f"Reusing preliminary Prodigal output: {faa}")
+        else:
+            steps.next("Running preliminary Prodigal...")
+            faa, gff = run_prodigal(assembly_fasta, outdir / "prodigal", mode=args.prodigal_mode)
+            record_stage(outdir, "prodigal", [faa, gff])
+        (orf_to_contig, contig_metrics, triage_calls, triage_excluded_ids,
+         diamond_query_faa) = triage_and_write_candidates(
+            contig_seqs, faa, gff, outdir, classification_dir,
+            args.skip_contig_triage, "Preliminary assembly",
+        )
+
+        # 2. Preliminary DIAMOND
+        if reuse_diamond:
+            steps.next(f"Reusing preliminary DIAMOND output: {hits_tsv}")
+        else:
+            steps.next(f"Running preliminary DIAMOND blastp vs {args.diamond_db}...")
+            hits_tsv = run_diamond(
+                diamond_query_faa, args.diamond_db, outdir / "diamond", args.threads, args.evalue,
+                args.max_target_seqs,
+            )
+            record_stage(outdir, "diamond", [hits_tsv])
+        hits_by_orf = parse_diamond_hits(hits_tsv)
+        if reuse_diamond:
+            overlap = sum(1 for orf_id in hits_by_orf if orf_id in orf_to_contig)
+            if not hits_by_orf or overlap == 0:
+                log.error(
+                    "Reused DIAMOND table %s shares no ORF names with the %d ORFs predicted "
+                    "from %s. It was almost certainly produced from a different assembly. "
+                    "Delete it and rerun with -d, or point -o at the matching run directory.",
+                    hits_tsv, len(orf_to_contig), assembly_fasta,
+                )
+                sys.exit(1)
+            frac = overlap / len(hits_by_orf)
+            if frac < 0.5:
+                log.warning(
+                    "Only %d/%d ORFs in the reused DIAMOND table (%.0f%%) match the current "
+                    "ORF predictions; results may be based on a partly stale table.",
+                    overlap, len(hits_by_orf), 100 * frac,
+                )
+            else:
+                log.info("Reused DIAMOND table matches current ORFs (%d/%d).", overlap, len(hits_by_orf))
+    log.info("Got hits for %d/%d usable ORFs.", len(hits_by_orf), len(orf_to_contig))
+
+    # 3. Preliminary classification and microbial-contig retention
+    # "domain" and "kingdom" are always classified internally (even if not in --ranks) so
+    # the animal/plant-contamination filter below can always run; they're only written as
+    # bins if you actually asked for them in --ranks.
+    internal_ranks = ranks + [r for r in ("domain", "kingdom") if r not in ranks]
+    steps.next(f"Preliminary contig classification/retention at ranks: {internal_ranks}...")
+    classifications = classify_all_contigs(
+        list(contig_seqs.keys()), orf_to_contig, hits_by_orf, internal_ranks,
+        args.bitscore_range, args.max_hits_per_orf, args.min_support,
+        args.support_denominator,
+    )
+
+    exclude_kingdoms = [k.strip() for k in args.exclude_kingdoms.split(",") if k.strip()]
+    classifications_for_binning, excluded_ids = split_and_write_excluded(
+        classifications, contig_seqs, triage_excluded_ids, exclude_kingdoms,
+        classification_dir, "Preliminary pass",
+    )
+
+    # No pre-expansion GC/coverage refinement: seeds are taken as classified, and all
+    # compositional refinement happens once at step 9 on the final assembly.
+    write_classification_table(
+        classifications, internal_ranks, classification_dir / "contig_classification.tsv",
+        excluded_ids=excluded_ids, contig_metrics=contig_metrics,
+        triage_calls=triage_calls, triage_excluded_ids=triage_excluded_ids,
+        refinement_decisions={},
+    )
+
+    # 4. Preliminary binning (excluded contigs never become seed bins)
+    steps.next("Writing preliminary seed-bin FASTA files...")
+    membership = bin_contigs(
+        contig_seqs, classifications_for_binning, ranks, outdir / "bins",
+        include_unclassified=not args.exclude_unclassified_bins,
+    )
+    if args.min_bin_contigs > 1 or args.min_bin_length > 0:
+        log.info(
+            "Merging bins smaller than %d contigs / %d bp into Unclassified...",
+            args.min_bin_contigs, args.min_bin_length,
+        )
+        filter_small_bins(
+            contig_seqs, membership, ranks, outdir / "bins",
+            args.min_bin_contigs, args.min_bin_length,
+            include_unclassified=not args.exclude_unclassified_bins,
+        )
+
+    # 5. Default targeted seed-and-extension reassembly, then a complete final pass.
+    if args.reassemble_bins:
+        # Everything below re-reads what it needs from disk, and the reassembly stage
+        # shells out to bowtie2, BBDuk, Unicycler/SPAdes and Pilon, each of which wants
+        # many GB. Holding the preliminary DIAMOND hits and the whole preliminary
+        # assembly in this process for the duration is what turns a large metagenome into
+        # an out-of-memory kill, so drop them here. `classifications` is kept because
+        # --inherit-reassembly-taxonomy still needs it.
+        freed = []
+        for name in ("hits_by_orf", "orf_to_contig", "contig_seqs", "contig_metrics"):
+            if name in locals():
+                freed.append(name)
+        del hits_by_orf, orf_to_contig, contig_seqs, contig_metrics
+        gc.collect()
+        log.info("Released preliminary %s before the reassembly stage to free memory.",
+                 ", ".join(freed))
+        if args.assembler == "unicycler":
+            assembler_label = "Unicycler"
+        else:
+            assembler_label = "metaSPAdes" if args.reassemble_mode == "meta" else "SPAdes"
+        if not args.skip_preliminary_assessment:
+            # Assess the bins as they stand *before* expansion, so the final numbers have
+            # something to be compared against. Restricted to the ranks actually being
+            # reassembled: those are the only ones with a before/after pair.
+            log.info("Assessing preliminary bins at rank(s) %s for the before/after "
+                     "comparison (--skip-preliminary-assessment to skip)...",
+                     reassemble_ranks)
+            for r in reassemble_ranks:
+                summarize_bin_set(
+                    r, outdir / "bins" / r, args.threads, args.skip_quast,
+                    skip_checkm or args.expansion_mode == "reassemble",
+                    checkm_argv=checkm_argv, checkm_data_path=args.checkm_data_path,
+                    checkm_reduced_tree=args.checkm_reduced_tree,
+                    checkm_pplacer_threads=args.checkm_pplacer_threads,
+                    checkm_extra=args.checkm_extra,
+                )
+        bin_threads = args.reassemble_threads or min(args.threads, 8)
+        if bin_threads != args.threads:
+            log.info("Reassembly: per-bin tools will use %d thread(s) (competitive seed "
+                     "mapping still uses %d). Override with --reassemble-threads.",
+                     bin_threads, args.threads)
+        steps.next(f"Bin improvement: {args.expansion_mode}, ranks {reassemble_ranks}, "
+                   f"{args.reassemble_max_rounds} extension rounds...")
+        successful_reassemblies = run_bin_reassembly(
+            outdir, reassemble_ranks, r1_in, r2_in, args.threads, anchors_by_bin,
+            args.trimmomatic_folder, args.qc_quality, args.qc_minlen, args.flash_max_overlap,
+            args.reassemble_seed_score_min, args.reassemble_min_read_aligned,
+            args.reassemble_min_read_identity, args.reassemble_max_insert,
+            args.reassemble_max_rounds, args.reassemble_word_size, args.reassemble_min_word_hits,
+            args.reassemble_bait_min_entropy, args.reassemble_max_round_growth,
+            args.reassemble_max_accepted_fraction, args.reassemble_min_new_templates,
+            args.reassemble_min_growth, args.reassemble_bbtools_memory,
+            args.assembler, args.reassemble_mode,
+            args.reassemble_memory_gb, args.reassemble_kmers,
+            args.reassemble_min_bin_contigs, args.reassemble_include_unclassified,
+            args.polish, args.unicycler_mode, args.unicycler_extra, args.spades_fallback,
+            unicycler_argv, args.reassemble_min_recovered_fraction,
+            seed_excluded_ids=None, resume=args.resume_reassembly,
+            bin_threads=bin_threads, expansion_mode=args.expansion_mode,
+            assembly_fasta=assembly_fasta,
+            link_min_covered_fraction=args.link_min_covered_fraction,
+            link_min_reads=args.link_min_reads,
+            target_bins=args.target_bins, bin_minutes=args.bin_minutes,
+            preliminary_classifications=classifications,
+            checkm_options=None if skip_checkm else dict(
+                checkm_argv=checkm_argv, data_path=args.checkm_data_path,
+                reduced_tree=args.checkm_reduced_tree,
+                pplacer_threads=args.checkm_pplacer_threads, extra_args=args.checkm_extra),
+        )
+
+        steps.next(f"Consolidating final assembly from preliminary rank '{final_source_rank}'...")
+        final_assembly_fasta = build_consolidated_final_assembly(
+            outdir, final_source_rank, successful_reassemblies,
+        )
+
+        # 6. Final Prodigal, gene-density triage, and DIAMOND pass.
+        steps.next("Running final Prodigal on consolidated contigs...")
+        final_faa, final_gff = run_prodigal(
+            final_assembly_fasta, outdir / "final" / "prodigal", mode=args.prodigal_mode,
+        )
+        record_stage(outdir, "final_prodigal", [final_faa, final_gff])
+        final_contig_seqs = read_fasta(final_assembly_fasta)
+        final_classification_dir = outdir / "final" / "classification"
+        (final_orf_to_contig, final_contig_metrics, final_triage_calls,
+         final_triage_excluded_ids, final_diamond_query_faa) = \
+            triage_and_write_candidates(
+                final_contig_seqs, final_faa, final_gff, outdir / "final",
+                final_classification_dir, args.skip_contig_triage, "Final assembly",
+            )
+
+        if args.expansion_mode == "link":
+            steps.next("Preserving original sequence taxonomy and read-supported link membership...")
+            final_classifications = linked_classifications(
+                outdir / "final" / "assembly" / "contig_provenance.tsv",
+                classifications, final_source_rank, internal_ranks)
+            with open(outdir / "final" / "assembly" / "link_membership.tsv", "w", newline="") as fh:
+                w = csv.writer(fh, delimiter="\t")
+                w.writerow(["final_contig", "original_contig", "assigned_bin", "sequence_taxon", "evidence"])
+                for row in load_tsv(outdir / "final" / "assembly" / "contig_provenance.tsv"):
+                    original = classifications.get(row["source_record"], {})
+                    w.writerow([row["final_contig"], row["source_record"], row["source_bin"],
+                                original.get(final_source_rank, ("Unclassified", 0))[0], row["source_type"]])
+        elif inherit_taxonomy:
+            # 7a. No database available: take each consolidated contig's lineage from the
+            # preliminary bin it was assembled out of. This cannot notice a contig whose
+            # taxonomy changed during frontier extension -- the compositional refinement
+            # pass below is the only remaining check on that.
+            steps.next(
+                f"Inheriting taxonomy from preliminary '{final_source_rank}' bins "
+                f"(no final DIAMOND pass)..."
+            )
+            provenance = read_contig_provenance(
+                outdir / "final" / "assembly" / "contig_provenance.tsv"
+            )
+            lineages = bin_consensus_lineages(
+                classifications, final_source_rank, internal_ranks,
+            )
+            final_classifications = inherit_classifications(
+                list(final_contig_seqs.keys()), provenance, lineages,
+                final_orf_to_contig, internal_ranks,
+            )
+        else:
+            steps.next(f"Running final DIAMOND blastp vs {args.diamond_db}...")
+            final_hits_tsv = run_diamond(
+                final_diamond_query_faa, args.diamond_db, outdir / "final" / "diamond",
+                args.threads, args.evalue, args.max_target_seqs,
+            )
+            record_stage(outdir, "final_diamond", [final_hits_tsv])
+            final_hits_by_orf = parse_diamond_hits(final_hits_tsv)
+            log.info(
+                "Final assembly: got hits for %d/%d ORFs.",
+                len(final_hits_by_orf), len(final_orf_to_contig),
+            )
+
+            # 7. Reclassify and reapply the animal/plant filter because frontier extension
+            # can introduce contigs whose taxonomy differs from the preliminary seed bin.
+            steps.next(f"Final contig classification/retention at ranks: {internal_ranks}...")
+            final_classifications = classify_all_contigs(
+                list(final_contig_seqs.keys()), final_orf_to_contig, final_hits_by_orf,
+                internal_ranks, args.bitscore_range, args.max_hits_per_orf,
+                args.min_support, args.support_denominator,
+            )
+        final_classifications_for_binning, final_excluded_ids = split_and_write_excluded(
+            final_classifications, final_contig_seqs, final_triage_excluded_ids,
+            exclude_kingdoms, final_classification_dir, "Final pass",
+        )
+
+        # 9. The single sequence-compositional refinement pass. Coverage is recomputed by
+        # remapping the complete read set to the consolidated assembly rather than reusing
+        # the recruited pools, which would give circular, self-confirming depths.
+        final_refinement_decisions = {}
+        final_refinement_outliers = set()
+        if refinement_enabled:
+            steps.next(
+                f"Remapping all reads and refining final {refinement_rank}-level bins..."
+            )
+            final_coverage = estimate_contig_coverage(
+                final_assembly_fasta, r1_in, r2_in,
+                final_classification_dir / "coverage", args.threads,
+                args.reassemble_max_insert,
+            )
+            add_coverage_to_metrics(final_contig_metrics, final_coverage)
+            final_refinement_decisions, final_refinement_outliers = refine_taxonomic_bins(
+                final_classifications_for_binning, final_contig_metrics, refinement_rank,
+                enabled=not args.skip_bin_refinement,
+            )
+            write_refinement_table(
+                final_refinement_decisions, final_contig_metrics,
+                final_classification_dir / "bin_refinement.tsv",
+            )
+            final_refinement_path = final_classification_dir / "refinement_outliers.fasta"
+            final_refinement_path.unlink(missing_ok=True)
+            if final_refinement_outliers:
+                write_fasta(
+                    final_refinement_path,
+                    {
+                        contig_id: final_contig_seqs[contig_id]
+                        for contig_id in final_refinement_outliers
+                    },
+                )
+                log.info(
+                    "Final refinement demoted %d joint GC/coverage outlier(s) at %s "
+                    "and more-specific ranks.",
+                    len(final_refinement_outliers), refinement_rank,
+                )
+                final_classifications = demote_refinement_outliers(
+                    final_classifications, final_refinement_outliers, refinement_rank,
+                )
+                final_classifications_for_binning = {
+                    contig_id: final_classifications[contig_id]
+                    for contig_id in final_classifications_for_binning
+                }
+        write_classification_table(
+            final_classifications, internal_ranks,
+            final_classification_dir / "contig_classification.tsv",
+            excluded_ids=final_excluded_ids, contig_metrics=final_contig_metrics,
+            triage_calls=final_triage_calls,
+            triage_excluded_ids=final_triage_excluded_ids,
+            refinement_decisions=final_refinement_decisions,
+        )
+
+        # 8. Final multirank bins and quality assessment.
+        steps.next("Writing final taxonomic bin FASTA files...")
+        final_bins_dir = outdir / "final" / "bins"
+        final_membership = bin_contigs(
+            final_contig_seqs, final_classifications_for_binning, ranks, final_bins_dir,
+            include_unclassified=not args.exclude_unclassified_bins,
+        )
+        if args.min_bin_contigs > 1 or args.min_bin_length > 0:
+            filter_small_bins(
+                final_contig_seqs, final_membership, ranks, final_bins_dir,
+                args.min_bin_contigs, args.min_bin_length,
+                include_unclassified=not args.exclude_unclassified_bins,
+            )
+
+        if not args.skip_binarena:
+            steps.next(
+                "Extracting BinaRena features (GC, coverage, k-mer composition + "
+                "PCA/t-SNE/UMAP)..."
+            )
+            run_binarena_stage(
+                final_assembly_fasta, final_contig_seqs, final_contig_metrics,
+                final_classifications, ranks, refinement_rank,
+                final_refinement_decisions, final_triage_calls, final_excluded_ids,
+                outdir / "final" / "binarena", args,
+            )
+
+        steps.next("Assessing final bins with QUAST and CheckM...")
+        for r in ranks:
+            summarize_bin_set(
+                r, final_bins_dir / r, args.threads, args.skip_quast, skip_checkm,
+                checkm_argv=checkm_argv, checkm_data_path=args.checkm_data_path,
+                checkm_reduced_tree=args.checkm_reduced_tree,
+                checkm_pplacer_threads=args.checkm_pplacer_threads,
+                checkm_extra=args.checkm_extra,
+            )
+        log.info("Final classified and assessed bins: %s", final_bins_dir)
+    else:
+        # With contigs alone, or with --skip-reassembly, the preliminary assembly *is* the
+        # final assembly, so step 9 runs here instead -- still exactly once.
+        if refinement_enabled:
+            steps.next(
+                f"Mapping all reads and refining {refinement_rank}-level bins..."
+            )
+            coverage = estimate_contig_coverage(
+                assembly_fasta, r1_in, r2_in, classification_dir / "coverage",
+                args.threads, args.reassemble_max_insert,
+            )
+            add_coverage_to_metrics(contig_metrics, coverage)
+            refinement_decisions, refinement_outliers = refine_taxonomic_bins(
+                classifications_for_binning, contig_metrics, refinement_rank,
+                enabled=not args.skip_bin_refinement,
+            )
+            write_refinement_table(
+                refinement_decisions, contig_metrics,
+                classification_dir / "bin_refinement.tsv",
+            )
+            outlier_path = classification_dir / "refinement_outliers.fasta"
+            outlier_path.unlink(missing_ok=True)
+            if refinement_outliers:
+                write_fasta(
+                    outlier_path,
+                    {cid: contig_seqs[cid] for cid in refinement_outliers},
+                )
+                log.info(
+                    "Refinement demoted %d joint GC/coverage outlier(s) at %s and "
+                    "more-specific ranks.", len(refinement_outliers), refinement_rank,
+                )
+                classifications = demote_refinement_outliers(
+                    classifications, refinement_outliers, refinement_rank,
+                )
+                classifications_for_binning = {
+                    contig_id: classifications[contig_id]
+                    for contig_id in classifications_for_binning
+                }
+                # Rebuild the bins so the FASTAs on disk match the demoted assignments.
+                membership = bin_contigs(
+                    contig_seqs, classifications_for_binning, ranks, outdir / "bins",
+                    include_unclassified=not args.exclude_unclassified_bins,
+                )
+                if args.min_bin_contigs > 1 or args.min_bin_length > 0:
+                    filter_small_bins(
+                        contig_seqs, membership, ranks, outdir / "bins",
+                        args.min_bin_contigs, args.min_bin_length,
+                        include_unclassified=not args.exclude_unclassified_bins,
+                    )
+            write_classification_table(
+                classifications, internal_ranks,
+                classification_dir / "contig_classification.tsv",
+                excluded_ids=excluded_ids, contig_metrics=contig_metrics,
+                triage_calls=triage_calls, triage_excluded_ids=triage_excluded_ids,
+                refinement_decisions=refinement_decisions,
+            )
+        else:
+            refinement_decisions = {}
+
+        if not args.skip_binarena:
+            steps.next(
+                "Extracting BinaRena features (GC, coverage, k-mer composition + "
+                "PCA/t-SNE/UMAP)..."
+            )
+            run_binarena_stage(
+                assembly_fasta, contig_seqs, contig_metrics, classifications, ranks,
+                refinement_rank, refinement_decisions, triage_calls, excluded_ids,
+                outdir / "binarena", args,
+            )
+
+        steps.next("Assessing bins with QUAST and CheckM (reassembly disabled)...")
+        for r in ranks:
+            summarize_bin_set(
+                r, outdir / "bins" / r, args.threads, args.skip_quast, skip_checkm,
+                checkm_argv=checkm_argv, checkm_data_path=args.checkm_data_path,
+                checkm_reduced_tree=args.checkm_reduced_tree,
+                checkm_pplacer_threads=args.checkm_pplacer_threads,
+                checkm_extra=args.checkm_extra,
+            )
+
+    if args.inspect != "off":
+        log.info("Inspecting coverage, terminal junctions, and endosymbiont candidates...")
+        try:
+            import importlib.util
+            helper = Path(__file__).resolve().parent / "metahopper_inspect.py"
+            spec = importlib.util.spec_from_file_location("metahopper_inspect", helper)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            inspection = module.inspect_run(
+                outdir, mode=args.inspect, references=args.references, threads=args.threads,
+                rank=final_source_rank if args.reassemble_bins else refinement_rank,
+                assembly=final_assembly_fasta if args.reassemble_bins else assembly_fasta,
+                r1=r1_in if using_reads else None, r2=r2_in if using_reads else None,
+                assembly_sequences=final_contig_seqs if args.reassemble_bins else contig_seqs)
+            for issue in inspection["errors"]:
+                log.warning("Inspection: %s", issue)
+            for tree in inspection["trees"]:
+                log.info("Reference tree %s: %s %s", tree["group"], tree["status"], tree.get("reason", ""))
+        except (RuntimeError, ValueError, OSError) as exc:
+            log.warning("Inspection could not complete: %s. Assembly/bin outputs are retained.", exc)
+            inspection_dir = outdir / "inspection"
+            inspection_dir.mkdir(exist_ok=True)
+            (inspection_dir / "inspection.json").write_text(json.dumps({"errors": [str(exc)]}))
+
+    if not args.skip_report:
+        steps.next("Writing the HTML report...")
+        write_html_report(outdir, args.report_min_length, args.report_max_points)
+
+    log.info("Done. Results in %s", outdir)
+
+
+if __name__ == "__main__":
+    main()
