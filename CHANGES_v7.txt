@@ -1,0 +1,32 @@
+MetaHopper 7 - recruitment/reassembly update
+
+Key changes relative to MetaHopper 6:
+1. One guarded frontier-extension round is now the default (--rounds 1).
+2. Extension guard defaults are less likely to reject a legitimate abundant insect symbiont:
+   --reassemble-max-round-growth 1.0
+   --reassemble-max-accepted-fraction 0.20
+3. --assembler auto is now the default.
+   - Runs direct SPAdes first.
+   - If SPAdes does not already pass sequence-retention + contiguity gates, also tests Unicycler.
+   - Selects the better candidate using original-sequence retention first, then contiguity.
+   - Writes reassembly/<rank>/<bin>/assembly_candidates.tsv.
+4. Direct SPAdes defaults to standard mode rather than metaSPAdes for focused single-bin pools.
+5. Recruited singleton reads are no longer discarded before assembly; they are cleaned and retained.
+6. Optional BWA-MEM seed recruitment:
+   --seed-mapper bwa
+   Default BWA settings reproduce the Verdanus notes:
+   -k 50 -B 10 -O 10 -T 90
+7. Optional tied-read sensitivity control:
+   --seed-tie-policy exclude   (default, old conservative behavior)
+   --seed-tie-policy include   (give equal-best reads to every tied best bin)
+8. Competitive mapping cache bumped to version 4 so old BAMs are not silently reused with new settings.
+9. Includes the no-samtools-depth--aa inspection helper as metahopper_inspect.py.
+
+Suggested first comparison on an existing problem sample:
+  --assembler auto --rounds 1
+
+To additionally test the Verdanus-style mapper:
+  --seed-mapper bwa --assembler auto --rounds 1
+
+For a more sensitive recruitment test:
+  --seed-mapper bwa --seed-tie-policy include --assembler auto --rounds 1
