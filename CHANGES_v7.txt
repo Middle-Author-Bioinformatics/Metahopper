@@ -30,3 +30,9 @@ To additionally test the Verdanus-style mapper:
 
 For a more sensitive recruitment test:
   --seed-mapper bwa --seed-tie-policy include --assembler auto --rounds 1
+
+BUGFIX (classification directory)
+--------------------------------
+- Fresh -i/--input + -b/--diamond-hits runs now create classification/ before
+  writing excluded_animal_plant_contamination.fasta. Previously this directory
+  was normally created by the preliminary Prodigal/triage path, which -b skips.
