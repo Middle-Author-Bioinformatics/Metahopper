@@ -1,0 +1,19 @@
+MetaHopper v7.2
+
+Fixes over v7.1:
+- Fix NameError in reassemble_one_bin(): min_recovered_fraction is now passed through
+  from run_bin_reassembly to the v7 candidate-selection logic.
+- Clean stale v7 auto-assembler directories (spades_auto, unicycler_auto,
+  spades_fallback, unicycler_run, candidate_eval_*) before rebuilding a bin.
+- Remove stale assembly_candidates.tsv before each per-bin rebuild.
+
+Retains v7/v7.1 features:
+- -i plus -b can point to an existing assembly and matching preliminary DIAMOND table
+  while -o points to a fresh output directory.
+- Fresh classification output directories are created before host/plant exclusions.
+- Default one guarded frontier-extension round.
+- --assembler auto candidate comparison between direct SPAdes and Unicycler.
+- Recruited singleton preservation.
+- Optional --seed-mapper bwa and --seed-tie-policy include.
+- Unclassified excluded from competitive named-bin seed reference.
+- samtools depth does not use -aa in the bundled inspection helper.

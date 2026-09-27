@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MetaHopper 7 — audited targeted assembly and binning.
+"""MetaHopper 7.2 — audited targeted assembly and binning.
 
 Quick start (paired reads with an existing assembly):
   python MetaHopper.py -i contigs.fasta -1 R1.fq.gz -2 R2.fq.gz \
@@ -3420,6 +3420,7 @@ def reassemble_one_bin(bin_fasta: Path, bin_name: str, rank: str, r1_raw: Path, 
                         spades_memory_gb: int, kmers: str, polish: bool,
                         unicycler_mode: str, unicycler_extra: str = None,
                         spades_fallback: bool = True, unicycler_argv=None,
+                        min_recovered_fraction: float = 0.95,
                         expansion_mode: str = "reassemble",
                         assembly_index: Path = None, assembly_seqs: dict = None,
                         link_min_covered_fraction: float = 0.5,
@@ -3942,9 +3943,17 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                 # settings, partial FASTAs, or claims from previous competitors.
                 for stale in ("timing.json", "recruitment.tsv", "assembly_stage.tsv", "reassembled.fasta", "linked.fasta"):
                     (work / stale).unlink(missing_ok=True)
-                for stale in ("unicycler", "spades", "pilon"):
+                # v7 may create several assembler/evaluation directories depending on
+                # --assembler mode. Remove all per-candidate products before rebuilding
+                # so a resumed run cannot inherit a stale SPAdes/Unicycler result.
+                for stale in ("unicycler", "spades", "pilon", "spades_auto",
+                              "spades_fallback", "unicycler_auto", "unicycler_run"):
                     if (work / stale).exists():
                         shutil.rmtree(work / stale)
+                for stale in work.glob("candidate_eval_*"):
+                    if stale.is_dir():
+                        shutil.rmtree(stale)
+                (work / "assembly_candidates.tsv").unlink(missing_ok=True)
                 BIN_DEADLINE = time.monotonic() + bin_minutes * 60 if bin_minutes else None
                 try:
                     result = reassemble_one_bin(
@@ -3955,6 +3964,7 @@ def run_bin_reassembly(outdir: Path, ranks, r1_raw: Path, r2_raw: Path, threads:
                         max_round_growth, max_accepted_fraction, min_new_templates, min_growth,
                         bbtools_memory, assembler, spades_mode, spades_memory_gb, kmers,
                         False, unicycler_mode, unicycler_extra, spades_fallback, unicycler_argv,
+                        min_recovered_fraction=min_recovered_fraction,
                         expansion_mode=expansion_mode, assembly_index=assembly_index,
                         assembly_seqs=assembly_seqs, link_min_covered_fraction=link_min_covered_fraction,
                         link_min_reads=link_min_reads, link_max_insert=max_insert,
