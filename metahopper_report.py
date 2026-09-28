@@ -1432,7 +1432,7 @@ def render_inspection(layout):
         data = json.loads(path.read_text())
     except (ValueError, OSError) as exc:
         return '<div class="card"><p>Inspection could not be read: ' + esc(str(exc)) + '</p></div>'
-    out = ['<div class="card"><h2>Endosymbiont inspection</h2><p>Taxonomic candidates, not confirmed host associations. A taxon not detected in bins may still be present in the sample.</p>']
+    out = ['<div class="card"><h2>Bin inspection</h2><p>Coverage and junction evidence for inspected classified bins and retained taxonomic candidates.</p>']
     for message in data.get('errors', []):
         out.append('<p class="note">' + esc(message) + '</p>')
     def table(rows, columns):
@@ -1451,20 +1451,25 @@ def render_inspection(layout):
         ('length_bp','bp'),('contigs','contigs'),('gc_percent','GC %'),('mean_depth','mean depth'),
         ('breadth_1x','covered fraction'),('reference_size_ratio','size / reference median'),
         ('translation_table','tree translation table'),('junctions_supported','supported terminal junctions'),('review_flags','review flags')]))
-    out.append('<details><summary>Screening panel</summary>')
-    out.append(table(data.get('panel',[]), [('taxon','taxon'),('status','screening status'),('role','association'),('translation_table_hint','code hint')]))
-    out.append('</details></div><div class="card"><h2>Terminal junction evidence</h2><p>Tests the last-to-first sequence connection, accounting for exact terminal duplication when present. Unique high-quality reads must span the join with at least 25 aligned bases on both sides. Five templates at three distinct alignment starts are required for the supported label. This does not certify circularity or validate internal joins.</p>')
+    out.append('</div><div class="card"><h2>Terminal junction evidence</h2><p>Tests the last-to-first sequence connection, accounting for exact terminal duplication when present. Unique high-quality reads must span the join with at least 25 aligned bases on both sides. Five templates at three distinct alignment starts are required for the supported label. This does not certify circularity or validate internal joins.</p>')
     out.append(table(data.get('junctions',[]), [('contig','contig'),('terminal_overlap_bp','exact overlap bp'),
         ('spanning_templates','spanning templates'),('distinct_alignment_starts','distinct starts'),('bracketing_pairs','bracketing pairs'),('status','status'),('reason','reason')]))
-    out.append('</div><div class="card"><h2>Coverage profiles</h2><p>Depth uses MAPQ ≥20 and base quality ≥20, with overlapping mates suppressed. Red bands mark zero-depth windows; low depth in repetitive sequence can reflect ambiguous mapping. Window coordinates are zero-based, end-exclusive.</p>')
+    out.append('</div><div class="card"><h2>Coverage profiles</h2><p>Depth uses MAPQ ≥20 and base quality ≥20, with overlapping mates suppressed. Profiles use 100-bp windows by default. Red bands mark zero-depth windows; low depth in repetitive sequence can reflect ambiguous mapping. Window coordinates are zero-based, end-exclusive.</p>')
     windows={}
     for row in data.get('windows',[]):windows.setdefault(row['contig'],[]).append(row)
-    for row in data.get('coverage',[]):
-        cid=row['contig'];w=windows.get(cid,[])
-        out.append('<details><summary>'+esc(cid)+' — mean '+f'{row["mean_depth"]:.1f}×; breadth {100*row["breadth_1x"]:.1f}%</summary>')
+    coverage_rows=data.get('coverage',[])
+    zero_rows=[row for row in coverage_rows if float(row.get('mean_depth') or 0)==0.0 and float(row.get('breadth_1x') or 0)==0.0]
+    if zero_rows:
+        zero_bp=sum(int(row.get('length_bp') or 0) for row in zero_rows)
+        out.append(f'<p class="note"><b>{len(zero_rows):,}</b> contig(s), totaling <b>{zero_bp:,} bp</b>, had mean depth 0× and breadth 0% and are omitted from the plots below. They remain recorded in <code>inspection/coverage.tsv</code> and <code>inspection.json</code>.</p>')
+    for row in coverage_rows:
+        if float(row.get('mean_depth') or 0)==0.0 and float(row.get('breadth_1x') or 0)==0.0:
+            continue
+        cid=row['contig'];w=windows.get(cid,[]);size=int(row.get('length_bp') or 0)
+        out.append('<details><summary>'+esc(cid)+f' — {size:,} bp — mean '+f'{row["mean_depth"]:.1f}×; breadth {100*row["breadth_1x"]:.1f}%</summary>')
         if w:
             # Bound SVG size; preserve zero-window flags as separate bands.
-            size=row['length_bp'];maximum=max(x['mean_depth'] for x in w) or 1
+            maximum=max(x['mean_depth'] for x in w) or 1
             stride=max(1,math.ceil(len(w)/400))
             points=[]
             for i in range(0,len(w),stride):

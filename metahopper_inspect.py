@@ -142,7 +142,7 @@ def map_reads(reference, r1, r2, work, threads, local=False):
     return bam
 
 
-def coverage_from_lines(lines, lengths, window=1000):
+def coverage_from_lines(lines, lengths, window=100):
     """Zero-fill positions omitted by samtools depth; bounded window arrays, no per-base arrays."""
     data = {cid: {'length': n, 'sum': 0, 'sum2': 0, 'covered': 0, 'ge10': 0,
                   'hist': Counter(), 'positions': 0, 'windows': [0] * ((n + window - 1)//window),
@@ -444,7 +444,8 @@ def build_tree(group, genomes, work, threads):
 
 
 def inspect_run(root, mode='endosymbionts', references=None, threads=8, rank=None,
-                assembly=None, r1=None, r2=None, bam=None, assembly_sequences=None):
+                assembly=None, r1=None, r2=None, bam=None, assembly_sequences=None,
+                min_completeness=10.0, coverage_window=100):
     started=time.monotonic();root=Path(root).resolve();out=root/'inspection';out.mkdir(parents=True,exist_ok=True)
     base=root/'final' if (root/'final/bins').is_dir() else root
     ranks=[p.name for p in (base/'bins').iterdir() if p.is_dir()] if (base/'bins').is_dir() else []
@@ -460,18 +461,34 @@ def inspect_run(root, mode='endosymbionts', references=None, threads=8, rank=Non
     result['reference_issues']=refissues
     custom={row['group'] for row in refrows}
     binmeta={row['bin']:row for row in tsv(Path(references)/'bins.tsv')} if references else {}
+    # Final/preliminary bin summaries are written by MetaHopper after CheckM/QUAST.
+    # In the default endosymbiont mode, retain the curated screening panel *and* any
+    # other classified bin with CheckM completeness >= min_completeness. This broadens
+    # inspection to substantial insect-associated microbial genomes without wasting the
+    # expensive read/junction checks on the long tail of tiny taxonomic bins.
+    summary_rows={row.get('bin'):row for row in tsv(base/'bins'/rank/'summary.tsv') if row.get('bin')}
     bins=[];used=set()
     for path in sorted((base/'bins'/rank).glob('*.fasta')):
         entry=binmeta.get(path.stem,{})
         group=entry.get('group') or group_name(path.stem) or next((g for g in custom if safe(g).lower()==path.stem.lower()),None)
-        if path.stem.lower()=='unclassified' or (mode=='endosymbionts' and not group):continue
+        if path.stem.lower()=='unclassified':
+            continue
+        completeness=None
+        raw_complete=summary_rows.get(path.stem,{}).get('completeness_percent')
+        try:
+            completeness=float(raw_complete)
+        except (TypeError,ValueError):
+            pass
+        if mode=='endosymbionts' and not group and not (completeness is not None and completeness >= min_completeness):
+            continue
         group=group_name(group) or group if group else None
         code=int(entry.get('translation_table') or code_for(group))
         if code not in (4,11):raise ValueError('Bin translation table must be 4 or 11')
         seqs=fasta(path);used.update(seqs)
         bins.append(dict(path=path,label=path.stem,group=group or path.stem,
                          translation_table=code,kind='bin',source='final_bin' if base!=root else 'preliminary_bin',
-                         length_bp=sum(map(len,seqs.values())),seqs=seqs))
+                         length_bp=sum(map(len,seqs.values())),seqs=seqs,
+                         completeness_percent=completeness))
     if assembly is None:
         assembly=next((p for p in [base/'assembly/consolidated_contigs.fasta',root/'megahit/final.contigs.fa'] if p.is_file()),None)
     manifest={}
@@ -526,7 +543,7 @@ def inspect_run(root, mode='endosymbionts', references=None, threads=8, rank=Non
             bed=out/'selected_contigs.bed'
             bed.write_text(''.join(f'{cid}\t0\t{len(seq)}\n' for cid,seq in selected.items()))
             lines=stream(['samtools','depth','-s','-q','20','-Q','20','-G','3844','-b',bed,bam],out/'coverage.log')
-            coverage,windows=coverage_from_lines(lines,{cid:len(seq) for cid,seq in selected.items()})
+            coverage,windows=coverage_from_lines(lines,{cid:len(seq) for cid,seq in selected.items()}, window=coverage_window)
             result['coverage']=list(coverage.values());result['windows']=windows
             write_tsv(out/'coverage.tsv',result['coverage'])
             write_tsv(out/'coverage_windows.tsv',windows)
@@ -606,6 +623,10 @@ def main():
     p.add_argument('-i','--input',type=Path,required=True,help='Existing MetaHopper run directory')
     p.add_argument('--references',type=Path,help='Reference-genome folder; one genome per FASTA')
     p.add_argument('--inspect',choices=['endosymbionts','all'],default='endosymbionts')
+    p.add_argument('--min-completeness',type=float,default=10.0,
+                   help='Also inspect classified bins at or above this CheckM completeness in endosymbionts mode (default 10).')
+    p.add_argument('--coverage-window',type=int,default=100,
+                   help='Coverage-profile window size in bp (default 100).')
     p.add_argument('-t','--threads',type=int,default=8)
     p.add_argument('--rank',help='Bin rank; default genus, then species')
     p.add_argument('--assembly',type=Path)
@@ -615,7 +636,9 @@ def main():
     if a.threads<1:p.error('Threads must be positive')
     if bool(a.r1)!=bool(a.r2):p.error('Supply both -1 and -2')
     if a.references and not a.references.is_dir():p.error('Reference folder does not exist')
-    data=inspect_run(a.input,a.inspect,a.references,a.threads,a.rank,a.assembly,a.r1,a.r2,a.bam)
+    if a.coverage_window < 1:p.error('--coverage-window must be positive')
+    data=inspect_run(a.input,a.inspect,a.references,a.threads,a.rank,a.assembly,a.r1,a.r2,a.bam,
+                     min_completeness=a.min_completeness, coverage_window=a.coverage_window)
     # Regenerate the existing self-contained report without rerunning assembly.
     try:
         import metahopper_report as report

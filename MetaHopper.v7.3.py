@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MetaHopper 7.4 — audited targeted assembly and binning.
+"""MetaHopper 7.3 — audited targeted assembly and binning.
 
 Quick start (paired reads with an existing assembly):
   python MetaHopper.py -i contigs.fasta -1 R1.fq.gz -2 R2.fq.gz \

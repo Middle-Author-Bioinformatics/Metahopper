@@ -1,0 +1,11 @@
+MetaHopper 7.4
+
+Inspection/report changes
+- Coverage profiles now use 100-bp windows by default (standalone helper: --coverage-window, default 100).
+- Coverage dropdown labels now include contig length: CONTIG — N bp — mean Xx; breadth Y%.
+- Contigs with exactly mean depth 0x and breadth 0% are omitted from individual HTML coverage plots.
+- Coverage profiles report the number of omitted zero/zero contigs and their combined bp.
+- Zero/zero contigs remain in inspection/coverage.tsv and inspection.json; no analytical data are discarded.
+- Removed the Screening panel box from the HTML report. The panel logic remains internal so known low-completeness endosymbiont candidates can still be inspected.
+- Retains v7.3 default inspection behavior: curated panel candidates plus all classified bins >=10% CheckM completeness, excluding Unclassified.
+- Bundle now includes metahopper_report.py beside the main script and inspection helper.

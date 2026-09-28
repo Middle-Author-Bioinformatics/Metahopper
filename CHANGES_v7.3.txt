@@ -1,0 +1,15 @@
+MetaHopper v7.3
+
+Inspection update over v7.2:
+- Default --inspect endosymbionts now includes:
+  1) all curated endosymbiont-panel bins/candidates, plus
+  2) every other classified bin with CheckM completeness >=10%.
+- Unclassified is always excluded from inspection.
+- If CheckM completeness is unavailable/NA, non-panel bins are not added by the threshold rule.
+- Standalone metahopper_inspect.py exposes --min-completeness (default 10.0).
+- Existing panel screening, coverage, junction, and optional reference-tree behavior is retained.
+
+Runtime note:
+- The completeness filter reads the already-produced bins/<rank>/summary.tsv; it does not rerun CheckM.
+- Whole-assembly coverage mapping is reused when available; selected-contig depth work grows only with added contigs.
+- Junction mapping already competes against the full assembly, so adding qualifying bins mainly adds small synthetic junction records rather than another full-library mapping.
