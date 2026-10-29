@@ -12,11 +12,13 @@ import gzip
 import hashlib
 import json
 import re
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
 SCHEMA = 'metahopper-graphs-1'
 COMPLEMENT = str.maketrans('ACGTRYSWKMBDHVN', 'TGCAYRSWMKVHDBN')
+MEGAHIT_GRAPH_SCHEMA = 1
 
 
 def opn(path):
@@ -44,6 +46,113 @@ def table(path):
         return list(csv.DictReader(f, delimiter='\t'))
 
 
+def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=2000000):
+    """Save a GFA of same-k exact contig-end overlaps, keeping MEGAHIT IDs.
+
+    This follows MEGAHIT's contig2fastg endpoint-matching algorithm, rather
+    than claiming to recover its internal succinct de Bruijn graph. Fresh
+    runs include final-round intermediate unitigs and earlier finalized
+    contigs. Old runs can use their retained final contigs; absent unitigs
+    and connections through them cannot be restored. Different k values
+    are separate graphs within the GFA, with no invented cross-k links.
+    """
+    root = Path(root).resolve()
+    source = root / 'megahit/final.contigs.fa'
+    if not source.is_file():
+        raise ValueError(f'No retained MEGAHIT contigs: {source}')
+    if max_links < 1:
+        raise ValueError('MEGAHIT graph link limit must be positive')
+    dest = source.parent / 'assembly.gfa'
+    manifest = source.parent / 'assembly_graph.json'
+
+    def stamp(path):
+        stat = Path(path).stat()
+        return dict(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+    source_stamp = stamp(source)
+    try:
+        previous = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    if dest.exists() and previous.get('export_schema') != MEGAHIT_GRAPH_SCHEMA and not force:
+        raise ValueError(f'{dest} already exists without an exporter record; preserve it or explicitly force export')
+    if (not force and previous.get('export_schema') == MEGAHIT_GRAPH_SCHEMA
+            and previous.get('status') == 'completed' and previous.get('input') == source_stamp
+            and dest.is_file() and previous.get('output') == stamp(dest)):
+        return dict(previous, cached=True)
+
+    directory = Path(intermediate_dir) if intermediate_dir else root / 'work/megahit/intermediate_contigs'
+    candidates = []
+    for path in directory.glob('k*.contigs.fa'):
+        match = re.fullmatch(r'k(\d+)\.contigs\.fa', path.name)
+        if match and path.stat().st_size:
+            candidates.append((int(match[1]), path))
+    parts = [max(candidates, key=lambda x: x[0])[1]] if candidates else []
+    parts += sorted(p for p in directory.glob('k*.final.contigs.fa') if p.stat().st_size)
+    parts = list(dict.fromkeys(parts))
+    scope = 'intermediates' if parts else 'retained_contigs'
+    nodes = {}
+    for path in parts + [source]:
+        seen = set()
+        for name, seq in fasta(path):
+            match = re.fullmatch(r'k(\d+)_\d+', name)
+            if not match or int(match[1]) < 1 or int(match[1]) % 2 != 1:
+                raise ValueError(f'Cannot infer a valid MEGAHIT k value from contig ID {name!r} in {path}')
+            if name in seen:
+                raise ValueError(f'Duplicate contig ID {name!r} in {path}')
+            seen.add(name)
+            if not seq or not re.fullmatch(r'[ACGTRYSWKMBDHVN]+', seq):
+                raise ValueError(f'Invalid DNA sequence for {name!r} in {path}')
+            record = (seq, int(match[1]))
+            if name in nodes and nodes[name] != record:
+                raise ValueError(f'Conflicting MEGAHIT sequences for {name!r}')
+            nodes[name] = record
+    if not nodes:
+        raise ValueError('No MEGAHIT contigs available for graph export')
+
+    def reverse(seq):
+        return seq.translate(COMPLEMENT)[::-1]
+
+    starts = defaultdict(list)
+    for name, (seq, k) in nodes.items():
+        if len(seq) <= k:
+            continue
+        for end, orient in ((seq[:k], '+'), (reverse(seq[-k:]), '-')):
+            if re.fullmatch(r'[ACGT]+', end):
+                starts[(k, end)].append((name, orient))
+    flip = {'+': '-', '-': '+'}
+    links = 0
+    # Never expose a partial graph or overwrite a valid graph on export failure.
+    with tempfile.TemporaryDirectory(prefix='.megahit_graph_', dir=dest.parent) as temporary:
+        partial = Path(temporary) / dest.name
+        with partial.open('w') as handle:
+            handle.write(f'H\tVN:Z:1.0\tTS:Z:megahit_kmer_overlaps\tSC:Z:{scope}\n')
+            for name, (seq, k) in nodes.items():
+                handle.write(f'S\t{name}\t{seq}\tLN:i:{len(seq)}\tKK:i:{k}\n')
+            for name, (seq, k) in nodes.items():
+                if len(seq) <= k:
+                    continue
+                for end, orient in ((seq[-k:], '+'), (reverse(seq[:k]), '-')):
+                    for target, target_orient in starts.get((k, end), ()):
+                        edge = (name, orient, target, target_orient)
+                        opposite = (target, flip[target_orient], name, flip[orient])
+                        if edge > opposite:
+                            continue
+                        links += 1
+                        if links > max_links:
+                            raise ValueError(f'MEGAHIT overlap graph exceeds {max_links:,} links; no partial graph saved')
+                        handle.write(f'L\t{name}\t{orient}\t{target}\t{target_orient}\t{k}M\n')
+        result = dict(export_schema=MEGAHIT_GRAPH_SCHEMA, status='completed', input=source_stamp,
+                      output=stamp(partial), construction='megahit_kmer_overlaps', source_scope=scope,
+                      source_files=[str(p.relative_to(root)) if p.is_relative_to(root) else str(p) for p in parts + [source]],
+                      segments=len(nodes), links=links, kmer_sizes=sorted({k for _, k in nodes.values()}))
+        record = Path(temporary) / manifest.name
+        record.write_text(json.dumps(result, indent=2) + '\n')
+        partial.replace(dest)
+        record.replace(manifest)
+    return dict(result, cached=False)
+
+
 def sequence_key(seq):
     return (len(seq), hashlib.sha256(seq.encode('ascii')).hexdigest())
 
@@ -58,6 +167,7 @@ def path_steps(text):
 
 def load_gfa(path, graph_id, max_nodes=200000):
     nodes, links, paths, seq_index = {}, [], {}, defaultdict(list)
+    metadata = {}
     unsupported = Counter()
     with opn(path) as f:
         for number, line in enumerate(f, 1):
@@ -69,6 +179,9 @@ def load_gfa(path, graph_id, max_nodes=200000):
                 if kind == 'H':
                     if any(x.startswith('VN:Z:2') for x in p[1:]):
                         raise ValueError('GFA2 is unsupported; provide GFA1')
+                    tags = {x[:2]: x[5:] for x in p[1:] if len(x) >= 5 and x[2:5] == ':Z:'}
+                    if tags.get('TS') == 'megahit_kmer_overlaps':
+                        metadata.update(construction=tags['TS'], source_scope=tags.get('SC', 'unknown'))
                 elif kind == 'S':
                     if len(p) < 3 or p[1] in nodes:
                         raise ValueError('Missing or duplicate segment identifier')
@@ -147,7 +260,7 @@ def load_gfa(path, graph_id, max_nodes=200000):
             seen.add(key)
             unique.append(edge)
     graph = dict(id=graph_id, source=graph_id, nodes=list(nodes.values()), links=unique,
-                 ignored_record_types=dict(unsupported))
+                 ignored_record_types=dict(unsupported), **metadata)
     return graph, nodes, paths, seq_index
 
 
@@ -203,6 +316,11 @@ def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_node
             return None
         loaded[path] = data
         result['graphs'].append(data[0])
+        if data[0].get('construction') == 'megahit_kmer_overlaps':
+            message = graph_id + ': MEGAHIT links represent exact contig-end overlaps within each k value.'
+            if data[0].get('source_scope') == 'retained_contigs':
+                message += ' Rebuilt from retained contigs only; missing intermediate segments and their links are not recoverable.'
+            result['warnings'].append(message)
         if data[0]['ignored_record_types']:
             result['warnings'].append(graph_id + ': unsupported records omitted: ' +
                                       ', '.join(f'{k}={v}' for k, v in data[0]['ignored_record_types'].items()))
@@ -297,9 +415,25 @@ def main():
     p.add_argument('--bin-set', choices=['auto', 'preliminary', 'final'], default='auto')
     p.add_argument('--graph', type=Path, action='append', default=[], help='Additional GFA1 for preliminary contigs')
     p.add_argument('--max-nodes', type=int, default=200000)
+    p.add_argument('--export-megahit-graph', action='store_true',
+                   help='Export megahit/assembly.gfa before building the catalogue; old runs use retained contigs')
+    p.add_argument('--force-megahit-graph', action='store_true', help='Rebuild the MEGAHIT GFA even when cached')
+    p.add_argument('--megahit-max-links', type=int, default=2000000, help='Maximum exported MEGAHIT overlap links')
     a = p.parse_args()
     if a.max_nodes < 1:
         p.error('--max-nodes must be positive')
+    if a.megahit_max_links < 1:
+        p.error('--megahit-max-links must be positive')
+    if a.force_megahit_graph and not a.export_megahit_graph:
+        p.error('--force-megahit-graph requires --export-megahit-graph')
+    if a.export_megahit_graph:
+        try:
+            exported = export_megahit_graph(a.input, force=a.force_megahit_graph, max_links=a.megahit_max_links)
+        except (OSError, ValueError) as exc:
+            p.exit(1, f'ERROR: {exc}\n')
+        print(f'MEGAHIT GFA: {a.input / "megahit/assembly.gfa"}; '
+              f'{exported["segments"]:,} segments, {exported["links"]:,} links; '
+              f'source scope: {exported["source_scope"]}; cached: {exported["cached"]}')
     stage = 'final' if a.bin_set == 'auto' and (a.input / 'final/bins').is_dir() else a.bin_set
     if stage == 'auto':
         stage = 'preliminary'
@@ -520,3 +654,4 @@ VIEWER_JS = r'''
 
 if __name__ == '__main__':
     main()
+

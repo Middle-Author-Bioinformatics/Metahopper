@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MetaHopper Lean 2.2.1: taxonomy partitions, assembly-graph review and optional Bakta annotation.
+"""MetaHopper Lean 2.2.2: taxonomy partitions, assembly-graph review and optional Bakta annotation.
 
 Workflow
   1  phyloFlash SSU survey                     (context only)
@@ -30,7 +30,7 @@ from core import Taxonomy, fasta, tsv, phyloflash_abundance, Pools, stream_mappi
 import taxbin as tb  # noqa: E402
 from metahopper_state import Checkpoints, fingerprint, sequence_digest, atomic_json, write_if_changed, output_lock  # noqa: E402
 
-VERSION = '2.2.1'
+VERSION = '2.2.2'
 PROKARYOTIC_TIARA = {'bacteria', 'archaea', 'prokarya'}
 DEFAULT_DIAMOND_ARGS = ['--evalue', '1e-5', '--max-target-seqs', '25']
 
@@ -439,6 +439,29 @@ def stage_qc(runner, args, out, ck):
     return reads
 
 
+def stage_megahit_graph(out, ck, force=False):
+    """Save the optional graph independently of the expensive assembly cache."""
+    from metahopper_graph import export_megahit_graph
+    directory = out / 'megahit'
+    outputs = [directory / 'assembly.gfa', directory / 'assembly_graph.json']
+    cached = ck.get('megahit_graph', inputs=[directory / 'final.contigs.fa'],
+                    options={'export_schema': 1}, required=outputs)
+    if cached and not force:
+        return True
+    if cached:
+        ck.start('megahit_graph', 'Explicit graph rebuild')
+    try:
+        exported = export_megahit_graph(out, force=force)
+        ck.done('megahit_graph', outputs)
+        note(f'     MEGAHIT graph: {exported["segments"]:,} segments; {exported["links"]:,} links '
+             f'({exported["source_scope"]})')
+        return True
+    except (OSError, ValueError) as exc:
+        ck.fail('megahit_graph', str(exc))
+        note(f'WARNING: MEGAHIT graph export failed: {exc}. Assembly retained; work/megahit preserved for retry.')
+        return False
+
+
 def stage_assembly(runner, args, out, reads, ck):
     if args.assembly: path = out / 'assembly' / 'preliminary_contigs.fasta'
     else: path = out / 'megahit' / 'final.contigs.fa'
@@ -447,7 +470,11 @@ def stage_assembly(runner, args, out, reads, ck):
     if getattr(args, 'assembly_graph', None):
         suffix = '.gfa.gz' if str(args.assembly_graph).endswith('.gz') else '.gfa'
         outputs.append(out / 'assembly' / ('preliminary_graph' + suffix))
-    if ck.get('assembly', inputs=inputs, required=outputs): return path
+    if ck.get('assembly', inputs=inputs, required=outputs):
+        # Backfill graphs for completed runs without assembling reads again.
+        if not args.assembly and stage_megahit_graph(out, ck, getattr(args, 'force_overwrite', False)):
+            shutil.rmtree(out / 'work/megahit', ignore_errors=True)
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     if args.assembly:
         note('3    Preliminary assembly: supplied FASTA'); source = Path(args.assembly)
@@ -468,11 +495,12 @@ def stage_assembly(runner, args, out, reads, ck):
         gdir = out / 'assembly'; gdir.mkdir(exist_ok=True)
         suffix = '.gfa.gz' if str(graph).endswith('.gz') else '.gfa'
         shutil.copy2(graph, gdir / ('preliminary_graph' + suffix))
-    if not args.assembly: shutil.rmtree(out / 'work' / 'megahit')
     (path.parent / 'length_filter.json').write_text(json.dumps(stats, indent=2) + '\n')
     note(f'     length filter (>= {args.min_contig_len:,} bp): kept {stats.get("kept", 0):,} contigs '
          f'({stats.get("kept_bp", 0) / 1e6:,.1f} Mbp), removed {stats.get("removed", 0):,} ({stats.get("removed_bp", 0) / 1e6:,.1f} Mbp)')
     ck.done('assembly', outputs)
+    if not args.assembly and stage_megahit_graph(out, ck, getattr(args, 'force_overwrite', False)):
+        shutil.rmtree(out / 'work/megahit', ignore_errors=True)
     return path
 
 
@@ -1186,3 +1214,4 @@ def cli(argv=None):
 
 if __name__ == '__main__':
     cli()
+
