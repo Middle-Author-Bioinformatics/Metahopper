@@ -64,6 +64,9 @@ import json
 import math
 import re
 import sys
+import hashlib
+from urllib.parse import quote
+from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from datetime import datetime
 from pathlib import Path
 
@@ -160,8 +163,7 @@ class RunLayout:
         if prefer == "final" and not self.has_final:
             raise SystemExit(
                 f"--bin-set final was requested but {self.root/'final'/'bins'} does not "
-                "exist. This run had no seed-and-extension stage (no reads, or "
-                "--skip-reassembly)."
+                "exist. Use --bin-set preliminary for preliminary outputs."
             )
         self.stage = "final" if (prefer == "auto" and self.has_final) or prefer == "final" \
             else "preliminary"
@@ -189,7 +191,9 @@ class RunLayout:
         )
 
     def default_contigs(self):
-        return self.consolidated or self.megahit
+        if self.stage == 'final':
+            return self.consolidated or self.megahit
+        return self._first(self.root / 'assembly' / 'preliminary_contigs.fasta') or self.megahit
 
     def bin_fasta_partition(self):
         """One rank's bin FASTAs, which together contain every binned contig once.
@@ -234,15 +238,26 @@ def fasta_stats(path: Path):
 def collect_bins(layout: RunLayout, compute_missing: bool):
     """Per-bin rows, from summary.tsv where available and the FASTA otherwise."""
     rows = []
+    raw_checkm = {r.get('Bin Id') or r.get('bin') or r.get('Bin'): r for r in read_tsv(layout.base / 'checkm.tsv')}
+    name_counts = {}
+    for rank in layout.ranks():
+        for path in (layout.bins_dir / rank).glob('*.fasta'):
+            name_counts[path.stem] = name_counts.get(path.stem, 0) + 1
+    provenance = {r.get('final_contig'): r for r in read_tsv(layout.provenance)} if layout.stage == 'final' else {}
     for rank in layout.ranks():
         rank_dir = layout.bins_dir / rank
         summary = {r.get("bin"): r for r in read_tsv(rank_dir / "summary.tsv")}
+        preliminary = {r.get('bin'): r for r in read_tsv(layout.root / 'bins' / rank / 'summary.tsv')}
         reassembly = {r.get("bin"): r for r in read_tsv(layout.root / "bins" / rank / "reassembly_summary.tsv")}
+        membership = {}
+        for row in read_tsv(rank_dir / 'bin_membership.tsv'):
+            membership.setdefault(row.get('bin'), []).append(row.get('contig'))
         for fasta in sorted(rank_dir.glob("*.fasta")):
             name = fasta.stem
             record = {
                 "rank": rank, "bin": name,
                 "unclassified": name.lower() == "unclassified",
+                "stage": layout.stage,
             }
             src = summary.get(name)
             if src:
@@ -255,12 +270,29 @@ def collect_bins(layout: RunLayout, compute_missing: bool):
                 record.update(fasta_stats(fasta))
             record.setdefault("completeness_percent", None)
             record.setdefault("contamination_percent", None)
+            quality = raw_checkm.get(rank + '__' + name) or (raw_checkm.get(name) if name_counts.get(name) == 1 else None)
+            if quality:
+                for field, key in [('completeness_percent', 'Completeness'), ('contamination_percent', 'Contamination'),
+                                   ('strain_heterogeneity_percent', 'Strain heterogeneity')]:
+                    if record.get(field) is None:
+                        record[field] = to_float(quality.get(key, quality.get(field)))
+                if record.get('marker_lineage') in (None, '', 'NA'):
+                    record['marker_lineage'] = quality.get('Marker lineage') or quality.get('marker_lineage') or 'NA'
             reas = reassembly.get(name)
             if reas:
                 record["reassembly_outcome"] = reas.get("outcome") or "NA"
                 record["recovered_fraction"] = to_float(reas.get("recovered_fraction"))
                 record["contigs_before"] = to_float(reas.get("contigs_before"))
                 record["total_length_before_bp"] = to_float(reas.get("total_length_before_bp"))
+                record["N50_before"] = to_float(reas.get("N50_before"))
+            before = preliminary.get(name, {})
+            for target, field in [('contigs_before','num_contigs'), ('total_length_before_bp','total_length_bp'), ('N50_before','N50')]:
+                if record.get(target) is None:
+                    record[target] = to_float(before.get(field))
+            members = membership.get(name, [])
+            if provenance and members and all(cid in provenance for cid in members):
+                record['reassembled_contigs'] = sum(provenance[cid].get('source_type') == 'reassembled' for cid in members)
+                record['original_contigs'] = len(members) - record['reassembled_contigs']
             total = record.get("total_length_bp") or 0
             contigs = record.get("num_contigs") or 0
             record["contigs_per_Mbp"] = round(contigs / (total / 1e6), 2) if total else 0.0
@@ -542,6 +574,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 canvas{border:1px solid var(--line);border-radius:8px;background:#fff;cursor:crosshair;
 display:block;width:100%}
 .legend{display:flex;flex-wrap:wrap;gap:5px 12px;margin-top:9px;font-size:.78rem;color:var(--mut)}
+.legend{max-height:220px;overflow:auto}.legend button{font-size:.78rem;padding:2px 6px}
 .legend i{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:4px}
 .note{color:var(--mut);font-size:.84rem}
 .warn{color:var(--warn);font-weight:560}
@@ -553,18 +586,22 @@ display:block;width:100%}
 code{background:var(--accs);padding:1px 5px;border-radius:4px;font-size:.85em}
 .tip{position:fixed;pointer-events:none;background:#16222b;color:#fff;padding:7px 10px;
 border-radius:7px;font-size:.78rem;display:none;z-index:9;max-width:320px;line-height:1.4}
+dialog.graph-dialog{width:min(1200px,96vw);max-height:94vh;border:1px solid var(--line);border-radius:12px;padding:18px;color:var(--ink)}
+dialog.graph-dialog::backdrop{background:rgba(15,23,42,.45)}
+.graph-stage{height:540px;border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden;margin:12px 0;touch-action:none}
+.graph-stage svg{width:100%;height:100%;display:block;cursor:grab}
+.graph-stage svg:active{cursor:grabbing}.graph-detail{white-space:pre-wrap;overflow-wrap:anywhere}
+.graph-stage .graph-node{cursor:move}.annotation-path{white-space:normal;overflow-wrap:anywhere}
 </style></head><body><div class="wrap">
 <header><h1>__TITLE__</h1>
 <p class="sub">__SUBTITLE__</p></header>
 <div class="tabs" id="tabs"></div>
-<div id="pane-overview" class="pane on">__OVERVIEW__</div>
-<div id="pane-bins" class="pane">__BINS__</div>
-<div id="pane-expansion" class="pane">__EXPANSION__</div>
-<div id="pane-inspection" class="pane">__INSPECTION__</div>
+<div id="pane-bins" class="pane on">__BINS__</div>
 <div id="pane-binarena" class="pane">__BINARENA__</div>
-<div id="pane-files" class="pane">__FILES__</div>
+<div id="pane-annotation" class="pane">__ANNOTATION__</div>
 </div>
 <div class="tip" id="tip"></div>
+__GRAPH_UI__
 <script>
 var DATA = __DATA__;
 /* ---------------- tabs ---------------- */
@@ -603,16 +640,42 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     };
   });
 });
-/* ---------------- bins tab rank filter ---------------- */
+/* ---------------- bins tab rank filter and taxonomic-name search ---------------- */
 (function(){
   var sel = document.getElementById('rank-filter');
   if (!sel) return;
-  sel.onchange = function(){
-    var v = sel.value;
+  var search = document.getElementById('bin-search');
+  var clear = document.getElementById('bin-search-clear');
+  var status = document.getElementById('bin-search-status');
+  var empty = document.getElementById('bin-search-empty');
+  function normalise(value){
+    return String(value || '').toLowerCase().replace(/[_\s]+/g, ' ').trim();
+  }
+  function apply(){
+    var query = normalise(search.value), count = 0, ranks = new Set();
+    sel.disabled = !!query;
+    clear.disabled = search.value.length === 0;
     Array.prototype.forEach.call(document.querySelectorAll('#bin-table tbody tr'), function(tr){
-      tr.style.display = (v === '*' || tr.dataset.rank === v) ? '' : 'none';
+      var show = query ? normalise(tr.dataset.binName).indexOf(query) !== -1 : tr.dataset.rank === sel.value;
+      tr.style.display = show ? '' : 'none';
+      if (show){ count++; ranks.add(tr.dataset.rank); }
     });
+    status.textContent = query
+      ? count + ' matching bin' + (count === 1 ? '' : 's') + ' across ' + ranks.size + ' rank' + (ranks.size === 1 ? '' : 's') + '. Clear the search to return to the selected rank.'
+      : count + ' bin' + (count === 1 ? '' : 's') + ' at the ' + sel.value + ' rank.';
+    empty.hidden = count !== 0;
+    empty.textContent = query ? 'No bins match this taxonomic name. Try a shorter name.' : 'No bins are available at this rank.';
+  }
+  sel.onchange = apply;
+  search.addEventListener('input', apply);
+  search.addEventListener('search', apply);
+  search.addEventListener('keydown', function(event){
+    if (event.key === 'Escape'){ search.value = ''; apply(); }
+  });
+  clear.onclick = function(){
+    search.value = ''; apply(); search.focus();
   };
+  apply();
 })();
 /* ---------------- BinaRena scatter ---------------- */
 (function(){
@@ -620,11 +683,36 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   var S = DATA.scatter, N = S.ids.length;
   var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
   var tip = document.getElementById('tip');
-  var PAL = ['#2E75B6','#4E9B5B','#8B5CB8','#E28833','#16888C','#C0504D','#B08A2E',
-             '#6C7A89','#D06A9C','#3F8F8A','#9A6A3A','#5B7FBF'];
-  var SPAL = ['#E8873A','#8B5CB8','#2F7A44','#B4453A','#1F6FEB','#B08A2E','#0F8C8C','#C2478F'];
-  var sub = {}, order = [], selected = new Set(), lasso = null, view = [];
-  var IDX = {};
+
+  // One label -> one opaque colour, shared by dots, swatches and graph nodes.
+  // Normalising underscores also keeps bin filenames and taxonomy labels aligned.
+  var colourMap = Object.create(null), usedHues = Object.create(null), legendExpanded = false;
+  function colourKey(label){ return String(label).replace(/_/g, ' ').trim().toLowerCase(); }
+  function hashLabel(label){
+    var h=2166136261; for(var i=0;i<label.length;i++){h^=label.charCodeAt(i);h=Math.imul(h,16777619);}
+    return h>>>0;
+  }
+  function hueHex(h){
+    var s=.64,l=.43,c=(1-Math.abs(2*l-1))*s,x=c*(1-Math.abs((h/60)%2-1)),m=l-c/2;
+    var v=h<60?[c,x,0]:h<120?[x,c,0]:h<180?[0,c,x]:h<240?[0,x,c]:h<300?[x,0,c]:[c,0,x];
+    return '#'+v.map(function(n){return Math.round((n+m)*255).toString(16).padStart(2,'0');}).join('');
+  }
+  function colourFor(label){
+    var key=colourKey(label);
+    if(['unclassified','na','not evaluated','unassigned',''].indexOf(key)>=0)return '#94a3b8';
+    if(colourMap[key])return colourMap[key];
+    var hue=hashLabel(key)%36000,hex=hueHex(hue/100),tries=0;
+    while(usedHues[hex] && usedHues[hex]!==key && tries++<36000){hue=(hue+13751)%36000;hex=hueHex(hue/100);}
+    usedHues[hex]=key;colourMap[key]=hex;return hex;
+  }
+  var allLabels=[];
+  S.categoricalNames.forEach(function(field){allLabels=allLabels.concat(S.categorical[field].levels);});
+  Array.from(new Set(allLabels.map(colourKey))).sort().forEach(colourFor);
+  function escapeText(value){return String(value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+  function pointColour(index){var cat=catOf(el('c').value);return cat?colourFor(cat.levels[cat.codes[index]]):'#2e75b6';}
+
+  var sub = Object.create(null), order = [], selected = new Set(), lasso = null, view = [], manualCategoryCache = null;
+  var IDX = Object.create(null);
   for (var _i = 0; _i < N; _i++) IDX[S.ids[_i]] = _i;   // O(1) id -> row lookup
   var el = function(id){ return document.getElementById(id); };
 
@@ -673,13 +761,18 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
 
   opts(el('x'), S.numericNames, S.defaultX);
   opts(el('y'), S.numericNames, S.defaultY);
-  opts(el('c'), S.categoricalNames, S.defaultColor);
+  opts(el('c'), S.categoricalNames.concat(['Manual sub-bin']), S.defaultColor);
   var binLevels = S.categorical.bin ? S.categorical.bin.levels : [];
   opts(el('bf'), ['*'].concat(binLevels), '*');
   el('bf').options[0].textContent = 'all bins';
 
   function num(name){ return S.numeric[name] || []; }
-  function catOf(name){ return S.categorical[name]; }
+  function catOf(name){
+    if(name !== 'Manual sub-bin')return S.categorical[name];
+    if(manualCategoryCache)return manualCategoryCache;
+    var levels=['Unassigned'].concat(order),codes=S.ids.map(function(id){return sub[id]===undefined?0:levels.indexOf(sub[id]);});
+    manualCategoryCache={levels:levels,codes:codes};return manualCategoryCache;
+  }
 
   // Lazily built lowercase search key per contig: its id plus every categorical value.
   var HAY = null;
@@ -688,7 +781,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     HAY = new Array(N);
     var cats = S.categoricalNames.map(catOf).filter(Boolean);
     for (var i = 0; i < N; i++){
-      var parts = [S.ids[i]];
+      var parts = [S.ids[i],sub[S.ids[i]]||''];
       for (var c = 0; c < cats.length; c++) parts.push(cats[c].levels[cats[c].codes[i]]);
       HAY[i] = parts.join(' ').toLowerCase();
     }
@@ -790,10 +883,9 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       var i = view[k], id = S.ids[i];
       var L = lens.length && lens[i] !== null ? lens[i] : 1;
       var r = 2.2 + 5.5 * Math.sqrt(L / maxL);
-      var col = sub[id] !== undefined ? SPAL[order.indexOf(sub[id]) % SPAL.length]
-              : (cat ? PAL[cat.codes[i] % PAL.length] : '#2E75B6');
+      var col = cat ? colourFor(cat.levels[cat.codes[i]]) : '#2e75b6';
       ctx.beginPath(); ctx.arc(sx(TX[i]), sy(TY[i]), r, 0, 6.2832);
-      ctx.fillStyle = col; ctx.globalAlpha = selected.has(id) ? 1 : 0.72; ctx.fill();
+      ctx.fillStyle = col; ctx.globalAlpha = 1; ctx.fill();
       if (selected.has(id)){
         ctx.globalAlpha = 1; ctx.strokeStyle = '#16222b'; ctx.lineWidth = 1.8; ctx.stroke();
       }
@@ -818,19 +910,18 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   }
 
   function legend(cat){
-    var host = el('lg'); host.innerHTML = '';
-    if (!cat) return;
-    var counts = {};
-    for (var k = 0; k < view.length; k++){
-      var c = cat.codes[view[k]]; counts[c] = (counts[c] || 0) + 1;
-    }
-    Object.keys(counts).sort(function(a, b){ return counts[b] - counts[a]; })
-      .slice(0, 14).forEach(function(c){
-        var s = document.createElement('span');
-        s.innerHTML = '<i style="background:' + PAL[c % PAL.length] + '"></i>' +
-          cat.levels[c] + ' (' + counts[c] + ')';
-        host.appendChild(s);
-      });
+    var host=el('lg');host.innerHTML='';if(!cat)return;
+    var counts=Object.create(null);
+    for(var k=0;k<view.length;k++){var code=cat.codes[view[k]];counts[code]=(counts[code]||0)+1;}
+    var keys=Object.keys(counts).sort(function(a,b){return counts[b]-counts[a];});
+    (legendExpanded?keys:keys.slice(0,14)).forEach(function(code){
+      var label=cat.levels[code],span=document.createElement('span'),swatch=document.createElement('i');
+      swatch.style.background=colourFor(label);span.dataset.label=label;span.dataset.colour=colourFor(label);
+      span.appendChild(swatch);span.appendChild(document.createTextNode(label+' ('+counts[code]+')'));host.appendChild(span);
+    });
+    if(keys.length>14){var button=document.createElement('button');button.type='button';
+      button.textContent=legendExpanded?'Show fewer colours':'Show all '+keys.length+' colours';
+      button.onclick=function(){legendExpanded=!legendExpanded;legend(cat);};host.appendChild(button);}
   }
 
   function status(){
@@ -849,9 +940,10 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
         (gn ? ' &middot; GC ' + (gsum / gn).toFixed(1) + '%' : '') +
         (cn ? ' &middot; cov ' + (csum / cn).toFixed(1) + '&times;' : '');
     el('assign').disabled = n === 0;
+    el('graph-open').disabled = n === 0;
     var host = el('sblist'); host.innerHTML = '';
     if (!order.length){ host.innerHTML = '<p class="note">No sub-bins yet.</p>'; }
-    var agg = {};
+    var agg = Object.create(null);
     Object.keys(sub).forEach(function(id){
       var label = sub[id];
       if (!agg[label]) agg[label] = [0, 0];
@@ -862,14 +954,14 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     order.forEach(function(label, li){
       var cnt = (agg[label] || [0, 0])[0], tot = (agg[label] || [0, 0])[1];
       var d = document.createElement('div'); d.className = 'sb';
-      d.innerHTML = '<i style="background:' + SPAL[li % SPAL.length] + '"></i>' +
-        '<span>' + label + '</span><span style="flex:0 0 auto;color:#63757f">' + cnt +
+      d.innerHTML = '<i style="background:' + colourFor(label) + '"></i>' +
+        '<span>' + escapeText(label) + '</span><span style="flex:0 0 auto;color:#63757f">' + cnt +
         ' &middot; ' + (tot / 1e6).toFixed(2) + ' Mb</span>';
       var x = document.createElement('button'); x.className = 'd'; x.textContent = '\u00d7';
       x.style.padding = '1px 7px';
       x.onclick = function(){
         Object.keys(sub).forEach(function(id){ if (sub[id] === label) delete sub[id]; });
-        order.splice(order.indexOf(label), 1); draw();
+        order.splice(order.indexOf(label), 1); HAY=null; manualCategoryCache=null; draw();
       };
       d.appendChild(x); host.appendChild(d);
     });
@@ -902,13 +994,14 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       if (d < bd){ bd = d; best = i; }
     }
     if (best < 0){ tip.style.display = 'none'; return; }
-    var lines = ['<b>' + S.ids[best] + '</b>'];
+    var lines = ['<b>' + escapeText(S.ids[best]) + '</b>'];
     ['length','GC','coverage','coding_density'].forEach(function(f){
       var a = num(f); if (a.length && a[best] !== null) lines.push(f + ': ' + a[best]);
     });
     S.categoricalNames.forEach(function(f){
-      var c = catOf(f); if (c) lines.push(f + ': ' + c.levels[c.codes[best]]);
+      var c = catOf(f); if (c) lines.push(escapeText(f) + ': ' + escapeText(c.levels[c.codes[best]]));
     });
+    if(sub[S.ids[best]]!==undefined)lines.push('Manual sub-bin: '+escapeText(sub[S.ids[best]]));
     tip.innerHTML = lines.join('<br>');
     tip.style.display = 'block';
     tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 12) + 'px';
@@ -932,7 +1025,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     if (!label){ alert('Give the sub-bin a name first.'); return; }
     if (order.indexOf(label) < 0) order.push(label);
     selected.forEach(function(id){ sub[id] = label; });
-    selected.clear(); el('lbl').value = ''; draw();
+    selected.clear(); el('lbl').value = ''; HAY=null; manualCategoryCache=null; draw();
   };
   el('clr').onclick = function(){ selected.clear(); draw(); };
   el('exp').onclick = function(){
@@ -1120,6 +1213,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     clearTimeout(qt); qt = setTimeout(rebuild, 160);   // debounce so typing stays smooth
   });
   window.addEventListener('resize', function(){ if (view.length) draw(); });
+  __GRAPH_JS__
   rebuild();
 })();
 </script></body></html>
@@ -1149,7 +1243,8 @@ def render_overview(layout: RunLayout, bin_rows, ranks, scatter, provenance_coun
     checkm = [r for r in bin_rows if r.get("completeness_percent") is not None]
     good = [r for r in checkm
             if (r["completeness_percent"] or 0) >= 70
-            and (r.get("contamination_percent") or 0) <= 10]
+            and r.get("contamination_percent") is not None
+            and r['contamination_percent'] <= 10]
     stats = [
         ("Bin set shown", layout.stage),
         ("Ranks", str(len(ranks))),
@@ -1205,26 +1300,91 @@ def render_overview(layout: RunLayout, bin_rows, ranks, scatter, provenance_coun
     return "\n".join(out)
 
 
-def render_bins(bin_rows, ranks):
-    has_checkm = any(r.get("completeness_percent") is not None for r in bin_rows)
-    has_reas = any(r.get("reassembly_outcome") for r in bin_rows)
+def refinement_cell(row):
+    outcome = row.get('reassembly_outcome')
+    reassembled = row.get('reassembled_contigs')
+    if row.get('stage') == 'preliminary' and outcome == 'accepted':
+        label = 'Accepted for final bins'
+    elif reassembled is not None:
+        if reassembled:
+            label = 'Reassembled' if not row.get('original_contigs') else 'Includes reassembled sequence'
+        else:
+            label = 'Original sequence retained'
+    elif outcome == 'accepted':
+        label = 'Reassembly accepted'
+    elif outcome and (outcome.startswith('rejected') or outcome == 'failed_fallback_original'):
+        label = 'Originals retained'
+    elif outcome == 'skipped':
+        label = 'Reassembly skipped'
+    else:
+        return '<td class="l" data-v="">&ndash;</td>'
+    lines = [esc(label)]
+    old, new = row.get('contigs_before'), row.get('num_contigs')
+    if old is not None and new is not None:
+        diff = int(new - old)
+        change = f'{abs(diff):,} fewer' if diff < 0 else f'{diff:,} more' if diff > 0 else 'unchanged'
+        lines.append(f'{old:,.0f} &rarr; {new:,.0f} contigs ({change})')
+    old, new = row.get('total_length_before_bp'), row.get('total_length_bp')
+    if old is not None and new is not None:
+        diff = new - old
+        if not diff:
+            lines.append('Size unchanged')
+        else:
+            sign = '+' if diff > 0 else '-'
+            pct = f'; {100 * diff / old:+.1f}%' if old else ''
+            lines.append(f'{human_bp(old)} &rarr; {human_bp(new)} ({sign}{human_bp(abs(diff))}{pct})')
+    title = 'Preliminary versus displayed bin totals; final regrouping may change membership.'
+    if outcome:
+        title += ' Recorded source-bin outcome: ' + outcome + '.'
+    klass = 'ok' if reassembled or outcome == 'accepted' else ''
+    return '<td class="l refinement-cell" data-v="'+esc(label)+'" title="'+esc(title)+'"><span class="pill '+klass+'">'+lines[0]+'</span>'+''.join('<div class="note">'+line+'</div>' for line in lines[1:])+'</td>'
+
+
+def render_bin_stats(ranks, scatter):
+    stats = [('Classified bins', str(sum(r['num_classified_bins'] for r in ranks))),
+             ('Assembly size', human_bp(max((r['total_bp'] for r in ranks), default=0))),
+             ('Contigs plotted', f"{scatter['nShown']:,}" if scatter else '0')]
+    return '<div class="stats">' + ''.join(
+        '<div class="stat"' + (' title="Named bins across the available ranks; these taxonomic groups are nested."' if label == 'Classified bins' else '') +
+        f'><div class="k">{esc(label)}</div><div class="v">{esc(value)}</div></div>'
+        for label, value in stats) + '</div>'
+
+
+def render_bins(bin_rows, ranks, scatter=None):
+    has_checkm = any(r.get("completeness_percent") is not None or r.get('contamination_percent') is not None for r in bin_rows)
+    has_reas = any(r.get("reassembly_outcome") or r.get('reassembled_contigs') is not None for r in bin_rows)
     head = ['<th class="l">rank</th>', '<th class="l">bin</th>', "<th>contigs</th>",
             "<th>total bp</th>", "<th>N50</th>", "<th>largest</th>", "<th>GC %</th>",
             "<th>contigs/Mb</th>"]
     if has_checkm:
-        head += ["<th>compl %</th>", "<th>contam %</th>", "<th>strain het %</th>"]
+        head += ["<th>completeness %</th>", "<th>contamination %</th>", "<th>strain het %</th>"]
     if has_reas:
-        head += ['<th class="l">reassembly</th>', "<th>recovered</th>"]
-    out = ['<div class="card"><div class="row" style="margin-bottom:12px">'
+        head += ['<th class="l">refinement</th>']
+    order = RANK_ORDER
+    ranks = sorted(ranks, key=lambda row: order.get(row['rank'], len(order)))
+    default_rank = next((r['rank'] for r in ranks if r['rank'] == 'phylum'),
+                        ranks[0]['rank'] if ranks else '')
+    out = [render_bin_stats(ranks, scatter),
+           '<div class="card"><div class="row" style="margin-bottom:12px">'
            '<div style="max-width:220px"><label for="rank-filter">Rank</label>'
-           '<select id="rank-filter"><option value="*">all ranks</option>']
+           '<select id="rank-filter" title="Choose a rank when the taxonomic-name search is empty">']
     for row in ranks:
-        out.append(f'<option value="{esc(row["rank"])}">{esc(row["rank"])}</option>')
-    out.append("</select></div></div>")
+        selected = ' selected' if row['rank'] == default_rank else ''
+        out.append(f'<option value="{esc(row["rank"])}"{selected}>{esc(row["rank"].capitalize())}</option>')
+    out.append('</select></div>'
+               '<div style="flex:1;min-width:220px;max-width:640px">'
+               '<label for="bin-search">Search taxonomic name</label>'
+               '<input id="bin-search" type="search" placeholder="e.g. Sodalis or Wolbachia" '
+               'autocomplete="off" spellcheck="false" aria-describedby="bin-search-help bin-search-status"></div>'
+               '<button type="button" id="bin-search-clear" disabled>Clear</button></div>'
+               '<p id="bin-search-help" class="note">Searches bin names across all ranks. '
+               'Matching bins retain their rank and all available size, quality and refinement metrics.</p>'
+               '<p id="bin-search-status" class="note" role="status" aria-live="polite"></p>')
     out.append('<div class="scroll"><table class="sortable" id="bin-table"><thead><tr>'
                + "".join(head) + "</tr></thead><tbody>")
     for row in bin_rows:
-        cells = ["<tr" + f' data-rank="{esc(row["rank"])}">',
+        hidden = ' style="display:none"' if row['rank'] != default_rank else ''
+        cells = ["<tr" + f' data-rank="{esc(row["rank"])}" data-bin-name="{esc(row["bin"])}"{hidden}>',
                  cell(row["rank"], klass="l"), cell(row["bin"], klass="l"),
                  cell(row.get("num_contigs"), num_fmt),
                  cell(row.get("total_length_bp"), lambda v: human_bp(v)),
@@ -1237,25 +1397,13 @@ def render_bins(bin_rows, ranks):
                       cell(row.get("contamination_percent"), lambda v: f"{v:.2f}"),
                       cell(row.get("strain_heterogeneity_percent"), lambda v: f"{v:.2f}")]
         if has_reas:
-            outcome = row.get("reassembly_outcome")
-            if outcome == "accepted":
-                pill = '<span class="pill ok">accepted</span>'
-            elif outcome == "linked":
-                pill = '<span class="pill ok">linked</span>'
-            elif outcome:
-                pill = f'<span class="pill no">{esc(outcome)}</span>'
-            else:
-                pill = "&ndash;"
-            cells.append(f'<td class="l" data-v="{esc(outcome or "")}">{pill}</td>')
-            cells.append(cell(row.get("recovered_fraction"), lambda v: f"{100*v:.0f}%"))
+            cells.append(refinement_cell(row))
         cells.append("</tr>")
         out.append("".join(cells))
     out.append("</tbody></table></div>")
+    out.append('<p id="bin-search-empty" class="note" hidden></p>')
     if has_reas:
-        out.append('<p class="note" style="margin-top:10px">A <b>rejected</b> reassembly '
-                   'retained less than <code>--reassemble-min-recovered-fraction</code> '
-                   'of the bin\'s original length, so the original contigs were kept in '
-                   'the consolidated assembly.</p>')
+        out.append('<p class="note" style="margin-top:10px">Refinement compares preliminary and displayed bin totals. Final taxonomic regrouping can change membership. Detailed candidate outcomes remain in the run files.</p>')
     out.append("</div>")
     return "\n".join(out)
 
@@ -1264,7 +1412,7 @@ def render_binarena(scatter):
     if not scatter:
         return ('<div class="card"><h2>No BinaRena table found</h2>'
                 '<p class="note">This run has no <code>binarena/binarena_input.tsv</code>. '
-                'Re-run without <code>--skip-binarena</code> to generate it.</p></div>')
+                'Build the BinaRena feature table before generating the report.</p></div>')
     warn = ""
     if scatter["trimmed"]:
         warn = (f'<p class="note warn">Showing the {scatter["nShown"]:,} longest of '
@@ -1304,7 +1452,9 @@ def render_binarena(scatter):
       <div class="row" style="margin:10px 0 14px">
         <button class="p" id="assign" disabled>Assign selection</button>
         <button id="clr">Clear</button>
+        <button class="p" id="graph-open" disabled>View assembly graph</button>
       </div>
+      <p class="note">Dot colours follow Colour by. Choose Manual sub-bin to colour by your assignments.</p>
       <h2>Sub-bins</h2>
       <div id="sblist"></div>
       <div class="row" style="margin-top:12px">
@@ -1504,26 +1654,79 @@ def render_inspection(layout):
     return '\n'.join(out)
 
 
+def current_annotation_row(layout, row):
+    """Do not show a previous bin's annotation as current after recomputing bins."""
+    if row.get('status') != 'completed':
+        return row
+    try:
+        rank, name = row['rank'], row['bin']
+        if Path(rank).name != rank or Path(name).name != name or rank in ('.', '..') or name in ('.', '..'):
+            raise ValueError('Invalid annotation key')
+        record = json.loads((layout.base / 'annotation' / rank / name / 'result.json').read_text())
+        signature = record.get('signature', {})
+        checksum = hashlib.sha256()
+        with (layout.base / 'bins' / rank / (name + '.fasta')).open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                checksum.update(chunk)
+        if record.get('status') == 'completed' and signature.get('input_sha256') == checksum.hexdigest():
+            return row
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return dict(rank=row.get('rank'), bin=row.get('bin'), status='stale',
+                reason='Annotation does not match the current bin; rerun Bakta')
+
+
+def render_annotation(layout):
+    tables = sorted((layout.base / 'annotation').glob('*/summary.tsv'))
+    out = ['<div class="card"><h2>Per-bin Bakta annotation</h2>']
+    out.append('<p>One selected rank is annotated. Original contig IDs are preserved. These are taxonomic bins and may contain multiple genomes. Specialized pathway, BGC and virulence-screening modules have not been run.</p>')
+    if not tables:
+        out.append('<p class="note">No Bakta annotation summary found. Run metahopper_annotate.py on this run directory, then regenerate the report.</p></div>')
+        return ''.join(out)
+    columns = [('rank','rank'),('bin','bin'),('status','status'),('translation_table','genetic code'),
+               ('cds','CDS'),('sorf','sORF'),('hypothetical_proteins','hypothetical proteins'),
+               ('named_proteins','non-hypothetical proteins'),('trna','tRNA'),('rrna','rRNA'),('reason','reason')]
+    out.append('<div class="scroll"><table class="sortable"><thead><tr>'+''.join('<th class="l">'+label+'</th>' for _,label in columns)+'<th class="l">outputs</th></tr></thead><tbody>')
+    for path in tables:
+        for row in read_tsv(path):
+            row = current_annotation_row(layout, row)
+            out.append('<tr>'+''.join(cell(row.get(k),klass='l') for k,_ in columns))
+            links=[]
+            if row.get('status') == 'completed':
+                directory = Path(row.get('output_directory',''))
+                if not directory.is_absolute() and '..' not in directory.parts:
+                    for suffix,label in [('.gbff','GenBank'),('.gff3','GFF3'),('.faa','proteins'),('.json','Bakta JSON')]:
+                        rel=directory / ('annotation'+suffix)
+                        if (layout.root / rel).is_file():
+                            links.append('<a href="'+esc(quote(rel.as_posix(),safe='/'))+'" download>'+label+'</a>')
+            out.append('<td class="l annotation-path">'+(' | '.join(links) or '&ndash;')+'</td></tr>')
+    out.append('</tbody></table></div><p class="note">Downloads require the full run folder to be available beside this HTML. Per-bin features.tsv and modules.json retain coordinates and database cross-references for downstream modules. Bakta may contain its own expert-system annotations; a dedicated virulence screen and pathway reconstruction remain separate analyses.</p></div>')
+    return ''.join(out)
+
+
 def build_report(layout: RunLayout, args) -> str:
     bin_rows = collect_bins(layout, compute_missing=not args.no_fasta_stats)
     ranks = rank_totals(bin_rows)
     scatter = build_scatter(layout, args.min_length, args.max_points,
                             not args.include_uncoordinated)
-    provenance_counts = {}
-    if layout.provenance:
-        for row in read_tsv(layout.provenance):
-            key = (row.get("source_bin", "NA"), row.get("source_type", "NA"))
-            provenance_counts[key] = provenance_counts.get(key, 0) + 1
-
-    tabs = [{"id": "overview", "label": "Overview"}, {"id": "bins", "label": "Bins"},
-            {"id": "expansion", "label": "Expansion"}, {"id": "inspection", "label": "Inspection"},
-            {"id": "binarena", "label": "BinaRena"}, {"id": "files", "label": "Files"}]
+    tabs = [{"id": "bins", "label": "Bins"}, {"id": "binarena", "label": "BinaRena"},
+            {"id": "annotation", "label": "Annotation"}]
     title = args.title or f"MetaHopper report \u2014 {layout.root.name}"
     subtitle = (f"{layout.stage} bin set &middot; "
                 f"{len(ranks)} rank(s) &middot; built "
                 f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    payload = json.dumps({"scatter": scatter}, separators=(",", ":"),
+    graph_data = {"schema":"metahopper-graphs-1","stage":layout.stage,"graphs":[],"contigs":{},"unmapped":{},"warnings":[]}
+    if not getattr(args, 'skip_graphs', False):
+        try:
+            graph_data = build_catalog(layout.root, layout.stage, scatter['ids'] if scatter else [],
+                                       getattr(args, 'graph', []), getattr(args, 'graph_max_nodes', 200000))
+            if len(json.dumps(graph_data)) > 32 * 1024 * 1024:
+                graph_data = dict(schema='metahopper-graphs-1',stage=layout.stage,graphs=[],contigs={},unmapped={},
+                                  warnings=['Graph data exceed the 32 MB report limit. Export a catalogue with metahopper_graph.py and load it in the graph viewer.'])
+        except (ValueError, OSError) as exc:
+            graph_data['warnings'].append(str(exc))
+    payload = json.dumps({"scatter": scatter, "assemblyGraphs": graph_data, "runName": layout.root.name}, separators=(",", ":"),
                          allow_nan=False, default=str)
     payload = payload.replace("</", "<\\/")
 
@@ -1531,13 +1734,11 @@ def build_report(layout: RunLayout, args) -> str:
             .replace("__TITLE__", esc(title))
             .replace("__SUBTITLE__", subtitle)
             .replace("__TABS__", json.dumps(tabs))
-            .replace("__OVERVIEW__", render_overview(layout, bin_rows, ranks, scatter,
-                                                     provenance_counts))
-            .replace("__BINS__", render_bins(bin_rows, ranks))
-            .replace("__EXPANSION__", render_expansion(layout))
-            .replace("__INSPECTION__", render_inspection(layout))
+            .replace("__BINS__", render_bins(bin_rows, ranks, scatter))
+            .replace("__ANNOTATION__", render_annotation(layout))
             .replace("__BINARENA__", render_binarena(scatter))
-            .replace("__FILES__", render_files(layout))
+            .replace("__GRAPH_UI__", VIEWER_HTML)
+            .replace("__GRAPH_JS__", VIEWER_JS)
             .replace("__DATA__", payload))
 
 
@@ -1561,6 +1762,9 @@ def parse_args():
     p.add_argument("--include-uncoordinated", action="store_true",
                    help="Also plot contigs with no k-mer ordination coordinates "
                         "(they can still be placed on GC/coverage axes).")
+    p.add_argument('--graph', type=Path, action='append', default=[], help='Additional GFA1 for preliminary contigs')
+    p.add_argument('--graph-max-nodes', type=int, default=200000, help='Maximum segments per embedded source graph')
+    p.add_argument('--skip-graphs', action='store_true', help='Omit automatic graph discovery; the viewer can load a catalogue JSON')
     p.add_argument("--no-fasta-stats", action="store_true",
                    help="Do not fall back to reading bin FASTAs when a rank has no "
                         "summary.tsv (faster on very large runs).")

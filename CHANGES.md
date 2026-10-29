@@ -1,3 +1,26 @@
+# MetaHopper Lean 2.2.1
+
+- Added a taxonomic-name search above the Bins table. Nonempty searches find matching bin names across ranks and retain each row's rank, size, CheckM scores when available, and refinement information. Matching ignores case and normalizes spaces/underscores. Clear or Escape restores the previously selected rank.
+
+# MetaHopper Lean 2.2.0
+
+- Report navigation now contains only Bins, BinaRena and Annotation. The three requested summary cards appear above Bins, which opens at Phylum with no combined all-ranks option.
+- Existing output directories automatically reuse verified successful stages. Added parent-directory pipeline.log and pipeline_status.json, input/settings/output checks, compatibility with older completion proofs, and --force-overwrite to bypass enabled-stage caches.
+- Cached final-bin work, taxonomy voting, ordination, CheckM and inspection. Failed reassemblies retain their read pools and retry; already completed candidates do not remap just because their pools were deliberately cleaned up.
+- --resume now merges explicit CLI options with stored arguments and current defaults. Force overwrite is never inherited by the next invocation.
+
+# MetaHopper Lean 2.1.0
+
+- Expansion outcomes now appear as compact Bins-table summaries with actual before/final contig and size changes. The separate Expansion tab is removed. CheckM scores remain visible when present, including fallback to rank-qualified raw CheckM records. Missing contamination no longer passes the Overview quality badge.
+
+- One shared, opaque colour mapping for scatter points, graph nodes and the legend. The legend can show every category. Manual assignments use an explicit Manual sub-bin colour mode.
+- Lasso-selected contigs can open a GFA1 graph neighbourhood, with source isolation, orientation-aware links, pan/zoom, node details and SVG export.
+- Report generation discovers source graphs and resolves final contigs through provenance, preserved assembler aliases or unique exact sequence matches. Unavailable or ambiguous mappings remain explicit.
+- New runs preserve Unicycler contig-to-graph identifiers. --assembly-graph retains an optional preliminary GFA.
+- Optional per-bin Bakta annotation at one rank, with a standalone existing-run command, genetic-code metadata, content/configuration caching, per-bin failure handling and raw output preservation.
+- Annotation summary tab and normalized features.tsv / modules.json outputs for later specialist modules. Dedicated pathway, BGC and virulence-screening modules remain not_run.
+- Preliminary reports now select the preliminary FASTA for manual extraction, even when final/ is present.
+
 # MetaHopper Lean 2.0.0
 
 ## What 2.0.0 restores from 7.4

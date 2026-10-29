@@ -2,9 +2,32 @@
   "diamond_db": "/home/ark/databases/nr2.dmnd",
   "taxdump": "/home/ark/databases/taxdump",
   "phyloflash_db": "/home/ark/databases/phyloflash/138.1",
-  "diamond_args": ["--evalue", "1e-5", "--max-target-seqs", "25"],
+  "diamond_args": [
+    "--evalue",
+    "1e-5",
+    "--max-target-seqs",
+    "25"
+  ],
   "tools": {
-    "phyloFlash.pl": ["conda", "run", "--no-capture-output", "-n", "mh-phyloflash", "phyloFlash.pl"],
-    "tiara": ["conda", "run", "--no-capture-output", "-n", "mh-tiara", "tiara"]
-  }
+    "phyloFlash.pl": [
+      "conda",
+      "run",
+      "--no-capture-output",
+      "-n",
+      "mh-phyloflash",
+      "phyloFlash.pl"
+    ],
+    "tiara": [
+      "conda",
+      "run",
+      "--no-capture-output",
+      "-n",
+      "mh-tiara",
+      "tiara"
+    ]
+  },
+  "bakta_db": "/path/to/bakta/db",
+  "bakta_args": [
+    "--skip-plot"
+  ]
 }

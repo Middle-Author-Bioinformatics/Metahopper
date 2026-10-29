@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MetaHopper Lean 2.0.0: taxonomy-first rank partitions, BinaRena tables and the 7.4 report.
+"""MetaHopper Lean 2.2.1: taxonomy partitions, assembly-graph review and optional Bakta annotation.
 
 Workflow
   1  phyloFlash SSU survey                     (context only)
@@ -12,13 +12,13 @@ Workflow
   8  rank partitions (phylum..species) -> bins/<rank>/*.fasta, summaries, BinaRena table
   9  guarded per-bin Unicycler reassembly at one rank, with the 7.4 retention gate
  10  consolidated final assembly, inherited taxonomy, final bins/BinaRena, optional CheckM
- 11  metahopper_report.py (7.4 report, unchanged)
+ 11  optional inspection and a three-tab interactive HTML report
 
 No coverage/GC/k-mer splitting or recruitment is done: composition is exported to BinaRena
 for manual curation.
 """
 from __future__ import annotations
-import argparse, contextlib, csv, json, os, shutil, signal, subprocess, sys, time, zlib
+import argparse, contextlib, csv, gzip, json, os, shutil, signal, subprocess, sys, time, zlib
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -28,8 +28,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from core import Taxonomy, fasta, tsv, phyloflash_abundance, Pools, stream_mapping, downsample_pool, opn  # noqa: E402
 import taxbin as tb  # noqa: E402
+from metahopper_state import Checkpoints, fingerprint, sequence_digest, atomic_json, write_if_changed, output_lock  # noqa: E402
 
-VERSION = '2.0.0'
+VERSION = '2.2.1'
 PROKARYOTIC_TIARA = {'bacteria', 'archaea', 'prokarya'}
 DEFAULT_DIAMOND_ARGS = ['--evalue', '1e-5', '--max-target-seqs', '25']
 
@@ -77,25 +78,49 @@ class Runner:
                     raise RuntimeError(f'{tool} exceeded {timeout / 3600:.1f} h; killed. See {log}') from None
                 raise
         if code: raise RuntimeError(f'{tool} exited {code}; see {log}')
+        with open(self.commands, 'a') as f:
+            f.write(json.dumps(dict(time=time.strftime('%FT%T%z'), label=label,
+                                   status='completed', return_code=code, command=cmd)) + '\n')
 
 
-class Checkpoints:
-    """work/checkpoints/<stage>.json markers; a stage is reused only on --resume."""
-
-    def __init__(self, out, enabled):
-        self.dir = out / 'work' / 'checkpoints'; self.dir.mkdir(parents=True, exist_ok=True)
-        self.enabled = enabled
-
-    def get(self, stage):
-        p = self.dir / f'{stage}.json'
-        if self.enabled and p.is_file():
-            data = json.loads(p.read_text())
-            if all(Path(x).exists() for x in data.get('files', [])): return data
-        return None
-
-    def done(self, stage, files=(), **info):
-        (self.dir / f'{stage}.json').write_text(json.dumps(dict(info, files=[str(f) for f in files],
-                                                                 time=time.strftime('%FT%T%z')), indent=2))
+def checkpoint_context(args, config):
+    """Settings that change each result; resources such as threads do not invalidate successes."""
+    def options(*names):
+        return {name: getattr(args, name, None) for name in names}
+    def tool(name):
+        command = config.get('tools', {}).get(name, [name])
+        return [command, fingerprint(shutil.which(command[0])) if command else None]
+    vote = options('bitscore_range', 'max_hits_per_orf', 'min_support', 'support_denominator')
+    vote['taxdump'] = fingerprint(config.get('taxdump'))
+    partitions = dict(vote, **options('exclude_kingdoms', 'ranks', 'min_bin_length', 'min_bin_contigs',
+                                     'reassemble_rank', 'reassemble_categories', 'max_bin_mbp', 'skip_reassembly'))
+    ordination = options('binarena_kmers', 'binarena_methods', 'binarena_min_length',
+                         'binarena_max_contigs', 'binarena_force', 'binarena_seed', 'binarena_include_excluded')
+    filtering = options('prefilter', 'rescue_coding_density', 'rescue_eukarya', 'prefilter_audit')
+    return {
+        'dbinfo': {'database': fingerprint(config.get('diamond_db')), 'tool': tool('diamond')},
+        'phyloflash': {'database': fingerprint(config.get('phyloflash_db')), 'tool': tool('phyloFlash.pl')},
+        'qc': {'tool': tool('fastp')},
+        'assembly': dict(options('min_contig_len'), tool=tool('megahit') if not args.assembly else None),
+        'preliminary_prodigal': {'tool': tool('prodigal')},
+        'tiara': dict(options('min_contig_len'), tool=tool('tiara')),
+        'preliminary_diamond': dict(filtering, **options('max_orfs_per_contig', 'orf_selection'),
+                                    database=fingerprint(config.get('diamond_db')),
+                                    arguments=config.get('diamond_args', DEFAULT_DIAMOND_ARGS), tool=tool('diamond')),
+        'preliminary_votes': vote,
+        'mapping': dict(partitions, tool=tool('bwa')),
+        'preliminary_bins': dict(partitions, **ordination),
+        'reassembly': dict(partitions, **options('min_contig_len', 'target_coverage', 'mode',
+                                               'min_retained', 'max_length_inflation'),
+                            unicycler=tool('unicycler'), minimap2=tool('minimap2'),
+                            raw_reads=[fingerprint(args.read1), fingerprint(args.read2)]),
+        'final': dict(partitions, **ordination, bwa=tool('bwa'), prodigal=tool('prodigal')),
+        'checkm': {'tool': tool('checkm'), 'ranks': args.ranks, 'enabled': args.checkm},
+        'inspection': dict(options('inspect', 'reassemble_rank'),
+                           references=fingerprint(getattr(args, 'references', None), recursive=True),
+                           tools={name: tool(name) for name in ('bowtie2', 'bowtie2-build', 'samtools',
+                                                                'prodigal', 'diamond', 'mafft', 'iqtree2', 'iqtree')}),
+    }
 
 
 # ---------------------------------------------------------------------------------------
@@ -329,7 +354,7 @@ def candidate_decision(before, after, retained, min_retained=0.95, max_inflation
 # Validation
 # ---------------------------------------------------------------------------------------
 def validate(args, config):
-    for p in [args.read1, args.read2, args.assembly]:
+    for p in [args.read1, args.read2, args.assembly, getattr(args, 'assembly_graph', None)]:
         if p and not Path(p).is_file(): raise ValueError(f'Input file does not exist: {p}')
     for key in ('diamond_db', 'taxdump'):
         if not config.get(key): raise ValueError(f'Missing config key: {key}')
@@ -359,6 +384,13 @@ def validate(args, config):
     if not (HERE / 'metahopper_report.py').is_file() and not args.skip_report:
         raise ValueError('metahopper_report.py must sit next to metahopper.py (or use --skip-report)')
     if args.threads < 1 or args.memory < 4: raise ValueError('Use at least 1 thread and 4 GB memory.')
+    if getattr(args, 'annotate', None) == 'bakta':
+        from metahopper_annotate import validate_config
+        validate_config(config)
+        if args.annotation_rank not in args.ranks:
+            raise ValueError('--annotation-rank must be one of --ranks')
+        if args.annotation_timeout_h < 0:
+            raise ValueError('--annotation-timeout-h must be nonnegative')
     import pysam, sklearn, numpy  # noqa: F401  (fail early if missing)
 
 
@@ -366,8 +398,10 @@ def validate(args, config):
 # Stages
 # ---------------------------------------------------------------------------------------
 def stage_phyloflash(runner, args, config, out, ck):
-    if ck.get('phyloflash'): return
-    if args.skip_phyloflash: note('1    phyloFlash skipped'); return
+    if args.skip_phyloflash:
+        ck.skip('phyloflash', 'Disabled by --skip-phyloflash'); note('1    phyloFlash skipped'); return
+    completed = out / 'phyloflash' / 'phyloflash_all.tsv'
+    if ck.get('phyloflash', inputs=[args.read1, args.read2], required=[completed]): return
     note('1    phyloFlash SSU survey')
     directory = out / 'work' / 'phyloflash'
     if directory.exists(): shutil.rmtree(directory)
@@ -392,7 +426,8 @@ def stage_phyloflash(runner, args, config, out, ck):
 def stage_qc(runner, args, out, ck):
     qdir = out / 'qc'; qc1, qc2 = qdir / 'qc.R1.fq.gz', qdir / 'qc.R2.fq.gz'
     reads = [qc1] + ([qc2] if args.read2 else [])
-    if ck.get('qc'): return reads
+    outputs = reads + [qdir / 'fastp.json', qdir / 'fastp.html']
+    if ck.get('qc', inputs=[args.read1, args.read2], required=outputs): return reads
     note('2    Read QC (fastp)')
     qdir.mkdir(exist_ok=True)
     cmd = ['-i', args.read1, '-o', qc1, '--thread', min(args.threads, 16), '--qualified_quality_phred', '20',
@@ -400,14 +435,19 @@ def stage_qc(runner, args, out, ck):
            '--json', qdir / 'fastp.json', '--html', qdir / 'fastp.html']
     if args.read2: cmd += ['-I', args.read2, '-O', qc2, '--detect_adapter_for_pe']
     runner.run('fastp', cmd, 'fastp')
-    ck.done('qc', reads)
+    ck.done('qc', outputs)
     return reads
 
 
 def stage_assembly(runner, args, out, reads, ck):
     if args.assembly: path = out / 'assembly' / 'preliminary_contigs.fasta'
     else: path = out / 'megahit' / 'final.contigs.fa'
-    if ck.get('assembly'): return path
+    inputs = ([args.assembly] if args.assembly else list(reads)) + [getattr(args, 'assembly_graph', None)]
+    outputs = [path]
+    if getattr(args, 'assembly_graph', None):
+        suffix = '.gfa.gz' if str(args.assembly_graph).endswith('.gz') else '.gfa'
+        outputs.append(out / 'assembly' / ('preliminary_graph' + suffix))
+    if ck.get('assembly', inputs=inputs, required=outputs): return path
     path.parent.mkdir(parents=True, exist_ok=True)
     if args.assembly:
         note('3    Preliminary assembly: supplied FASTA'); source = Path(args.assembly)
@@ -423,11 +463,16 @@ def stage_assembly(runner, args, out, reads, ck):
     stats = length_filter(source, tmp, args.min_contig_len)
     if not stats.get('kept'): raise RuntimeError(f'No preliminary contigs >= {args.min_contig_len} bp.')
     tmp.replace(path)
+    graph = getattr(args, 'assembly_graph', None)
+    if graph:
+        gdir = out / 'assembly'; gdir.mkdir(exist_ok=True)
+        suffix = '.gfa.gz' if str(graph).endswith('.gz') else '.gfa'
+        shutil.copy2(graph, gdir / ('preliminary_graph' + suffix))
     if not args.assembly: shutil.rmtree(out / 'work' / 'megahit')
     (path.parent / 'length_filter.json').write_text(json.dumps(stats, indent=2) + '\n')
     note(f'     length filter (>= {args.min_contig_len:,} bp): kept {stats.get("kept", 0):,} contigs '
          f'({stats.get("kept_bp", 0) / 1e6:,.1f} Mbp), removed {stats.get("removed", 0):,} ({stats.get("removed_bp", 0) / 1e6:,.1f} Mbp)')
-    ck.done('assembly', [path])
+    ck.done('assembly', outputs)
     return path
 
 
@@ -447,16 +492,16 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
     cdir = out / ('classification' if label == 'preliminary' else 'final/classification')
     cdir.mkdir(parents=True, exist_ok=True)
     faa = cdir / 'orfs.faa'
-    if not ck.get(f'{label}_prodigal'):
+    if not ck.get(f'{label}_prodigal', inputs=[assembly], required=[faa, cdir / 'orfs.gff']):
         note(f'4    {label}: Prodigal ORFs')
         runner.run('prodigal', ['-i', assembly, '-a', faa, '-o', cdir / 'orfs.gff', '-f', 'gff', '-p', 'meta', '-q'],
                    f'{label}_prodigal')
-        ck.done(f'{label}_prodigal', [faa])
+        ck.done(f'{label}_prodigal', [faa, cdir / 'orfs.gff'])
     coding, orfs = orf_table(faa)
     pre, selected = {}, None
     if args.prefilter == 'tiara' and label == 'preliminary':
         tpath = cdir / 'tiara.tsv'
-        if not ck.get('tiara'):
+        if not ck.get('tiara', inputs=[assembly], required=[tpath]):
             note('4    Tiara domain prefilter')
             runner.run('tiara', ['-i', assembly, '-o', tpath, '-m', args.min_contig_len, '-t', args.threads, '--probabilities'],
                        'tiara')
@@ -470,7 +515,8 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
         note(f'       audit sample: {sum(r["audited"] for r in pre.values()):,} removed contigs searched anyway')
     hits = (out / 'diamond' / 'hits.tsv') if label == 'preliminary' else (out / 'final' / 'diamond' / 'hits.tsv')
     hits.parent.mkdir(parents=True, exist_ok=True)
-    if not ck.get(f'{label}_diamond'):
+    diamond_inputs = [faa] + ([cdir / 'tiara.tsv'] if args.prefilter == 'tiara' and label == 'preliminary' else [])
+    if not ck.get(f'{label}_diamond', inputs=diamond_inputs, required=[hits]):
         query = cdir / 'diamond_query.faa'
         cap = None if args.max_orfs_per_contig == 'all' else int(args.max_orfs_per_contig)
         total, sent = write_query(faa, query, selected, orfs, cap, args.orf_selection)
@@ -480,9 +526,22 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
         else: hits.write_text('')
         query.unlink(missing_ok=True)
         ck.done(f'{label}_diamond', [hits], proteins_total=total, proteins_sent=sent)
-    note(f'6    {label}: per-rank bitscore vote')
-    calls, stats = tb.classify_hits(hits, tax, tb.ORDER, args.bitscore_range, args.max_hits_per_orf,
-                                    args.min_support, args.support_denominator)
+    vote_cache = cdir / 'votes.json.gz'
+    if ck.get(f'{label}_votes', inputs=[hits], required=[vote_cache]):
+        with gzip.open(vote_cache, 'rt') as handle:
+            result = json.load(handle)
+        calls, stats = result['calls'], result['stats']
+    else:
+        note(f'6    {label}: per-rank bitscore vote')
+        calls, stats = tb.classify_hits(hits, tax, tb.ORDER, args.bitscore_range, args.max_hits_per_orf,
+                                      args.min_support, args.support_denominator)
+        if stats.get('hits') and not calls:
+            raise RuntimeError('DIAMOND hits carried no usable taxids: the database needs taxonomy (makedb --taxonmap/--taxonnodes).')
+        temporary = vote_cache.with_suffix('.tmp.gz')
+        with gzip.open(temporary, 'wt') as handle:
+            json.dump(dict(calls=calls, stats=stats), handle, separators=(',', ':'))
+        temporary.replace(vote_cache)
+        ck.done(f'{label}_votes', [vote_cache])
     if stats.get('noncontiguous_orfs'):
         warnings.append(f'{label} DIAMOND output had {stats["noncontiguous_orfs"]} non-contiguous ORF groups.')
     if stats.get('hits') and not calls:
@@ -493,22 +552,40 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
 
 def main(args):
     config_path = Path(args.config).resolve(); config = json.loads(config_path.read_text())
-    for key in ('diamond_db', 'taxdump', 'phyloflash_db', 'bakta_db'):
+    for key in ('diamond_db', 'taxdump', 'phyloflash_db', 'bakta_db', 'annotation_metadata'):
         if config.get(key):
             p = Path(os.path.expandvars(config[key])).expanduser()
             config[key] = str((config_path.parent / p).resolve())
-    for key in ('read1', 'read2', 'assembly'):
-        if getattr(args, key): setattr(args, key, str(Path(getattr(args, key)).resolve()))
+    for key in ('read1', 'read2', 'assembly', 'assembly_graph', 'references'):
+        if getattr(args, key, None): setattr(args, key, str(Path(getattr(args, key)).resolve()))
     validate(args, config)
     out = Path(args.out).resolve()
-    if not args.resume and out.exists() and any(out.iterdir()):
-        raise ValueError('Output directory must be new or empty (use --resume RUN_DIR to continue a run).')
     out.mkdir(parents=True, exist_ok=True)
+    with output_lock(out):
+        return run_pipeline(args, config, out)
+
+
+def run_pipeline(args, config, out):
+    previous = None
+    try:
+        previous = json.loads((out / 'run.json').read_text())
+        if not isinstance(previous, dict): previous = None
+    except (OSError, ValueError):
+        pass
+    previous_contexts = None
+    if previous and previous.get('arguments') and previous.get('config'):
+        previous_contexts = checkpoint_context(argparse.Namespace(**previous['arguments']), previous['config'])
     runner = Runner(config, out, args.memory)
-    ck = Checkpoints(out, bool(args.resume))
+    # Preserve the previous manifest's timestamp: old completed runs can supply a
+    # success proof for stages that had no individual checkpoint in older releases.
+    legacy_run = out / 'logs' / 'previous_run.json'
+    if previous:
+        shutil.copy2(out / 'run.json', legacy_run)
+    ck = Checkpoints(out, force=getattr(args, 'force_overwrite', False),
+                     contexts=checkpoint_context(args, config), previous_contexts=previous_contexts, log=note)
     manifest = dict(version=VERSION, arguments={k: v for k, v in vars(args).items()}, config=config,
                     start=time.strftime('%FT%T%z'), status='running')
-    (out / 'run.json').write_text(json.dumps(manifest, indent=2, default=str))
+    atomic_json(out / 'run.json', manifest)
     warnings = []
     t0 = time.time()
     try:
@@ -592,7 +669,21 @@ def main(args):
         # 7: one stringent mapping pass for coverage, breadth and competitive pools.
         covfile = out / 'work' / 'coverage.tsv'; poolfile = out / 'work' / 'pool_counts.json'
         pool = Pools(out / 'work' / 'read_pools') if contig_bins else None
-        cpt = ck.get('mapping')
+        mapping_inputs = [assembly, *reads, out / 'diamond/hits.tsv']
+        if args.prefilter == 'tiara': mapping_inputs.append(out / 'classification/tiara.tsv')
+        cpt = ck.get('mapping', inputs=mapping_inputs, required=[covfile, poolfile])
+        if cpt and pool:
+            # Completed candidates have deliberately discarded their read pools.
+            # Only regenerate mapping when an unfinished candidate needs a missing pool.
+            pc = json.loads(poolfile.read_text())
+            suffixes = ['R1', 'R2'] if args.read2 else ['SE']
+            missing = [name for name, e in eligible.items() if not e['skip']
+                       and not cached_reassembly(ck, out, R, name, e, seqs, assembly)
+                       and pc.get('counts', {}).get(name, 0) > 0
+                       and any(not (pool.directory / f'{name}.{suffix}.fq.gz').is_file() for suffix in suffixes)]
+            if missing:
+                ck.start('mapping', 'Regenerating missing read pools for unfinished bins')
+                cpt = None
         if cpt:
             cov, breadth = {}, {}
             with open(covfile) as f:
@@ -604,52 +695,125 @@ def main(args):
             routing = pc.get('routing', {})
         else:
             note(f'7    Stringent BWA mapping of all QC reads: coverage + read pools for {len(set(contig_bins.values()))} bins')
+            if pool:
+                for path in pool.directory.glob('*.fq.gz'): path.unlink()
+                for path in (out / 'reassembly' / R).glob('*/downsampled.json'): path.unlink()
             cov, routing, breadth = stream_mapping(runner, assembly, reads, args.threads, 'mapping', strict=True,
                                                    contig_bins=contig_bins, pools=pool, breadth=True)
-            with open(covfile, 'w') as f:
-                f.write('contig\tmean_depth\tcovered_fraction\n')
-                for c in ids: f.write(f'{c}\t{cov.get(c, 0.0)}\t{breadth.get(c, 0.0)}\n')
-            poolfile.write_text(json.dumps(dict(counts=dict(pool.counts) if pool else {},
-                                                bases=dict(pool.bases) if pool else {}, routing=routing)))
-            ck.done('mapping', [covfile])
+            write_if_changed(covfile, 'contig\tmean_depth\tcovered_fraction\n' + ''.join(
+                f'{c}\t{cov.get(c, 0.0)}\t{breadth.get(c, 0.0)}\n' for c in ids))
+            write_if_changed(poolfile, json.dumps(dict(counts=dict(pool.counts) if pool else {},
+                                                       bases=dict(pool.bases) if pool else {}, routing=routing), sort_keys=True))
+            ck.done('mapping', [covfile, poolfile])
         write_classification(out / 'classification' / 'contig_classification.tsv', ids, seqs, calls, cov, breadth,
                              coding, orfs, hits_n, pre, excluded_kingdom, prefilter_excluded)
 
-        note('8    Taxonomic rank partitions (fallback names; small bins cascade upward)')
-        write_rank_bins(out / 'bins', args.ranks, partitions, {c: seqs[c] for c in binnable},
-                        out / 'classification' / 'unclassified_contigs.fasta')
         bdir = out / 'binarena'; bdir.mkdir(exist_ok=True)
-        orient = {c: seqs[c] for c in ids if (args.binarena_include_excluded or c not in excluded)}
-        columns = tb.ordinate(orient, args.binarena_kmers, args.binarena_methods, args.binarena_min_length,
-                              args.binarena_max_contigs, args.binarena_force, args.binarena_seed, outdir=bdir, log=note)
-        write_binarena(bdir / 'binarena_input.tsv', ids, seqs, calls, labels, R if R in args.ranks else args.ranks[-1],
-                       part, cov, breadth, coding, orfs, pre, excluded, columns, args.ranks)
+        preliminary_outputs = bin_outputs(out, args.ranks) + [bdir / 'binarena_input.tsv']
+        if not ck.get('preliminary_bins', inputs=mapping_inputs + [covfile],
+                      required=preliminary_outputs, legacy_path=legacy_run):
+            note('8    Taxonomic rank partitions (fallback names; small bins cascade upward)')
+            write_rank_bins(out / 'bins', args.ranks, partitions, {c: seqs[c] for c in binnable},
+                            out / 'classification' / 'unclassified_contigs.fasta')
+            orient = {c: seqs[c] for c in ids if (args.binarena_include_excluded or c not in excluded)}
+            columns = tb.ordinate(orient, args.binarena_kmers, args.binarena_methods, args.binarena_min_length,
+                                  args.binarena_max_contigs, args.binarena_force, args.binarena_seed, outdir=bdir, log=note)
+            write_binarena(bdir / 'binarena_input.tsv', ids, seqs, calls, labels, R if R in args.ranks else args.ranks[-1],
+                           part, cov, breadth, coding, orfs, pre, excluded, columns, args.ranks)
+            ck.done('preliminary_bins', bin_outputs(out, args.ranks) + [bdir / 'binarena_input.tsv'])
 
         # 9: guarded Unicycler reassembly at one rank.
         accepted = {}
         if not args.skip_reassembly:
-            accepted = stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, warnings)
+            accepted = stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, warnings, ck, assembly)
         else:
-            note('9    Reassembly skipped')
+            note('9    Reassembly skipped'); ck.skip('reassembly', 'Disabled by --skip-reassembly')
 
         # 10: consolidated final assembly.
-        stage_final(runner, args, config, out, R, groups, seqs, binnable, calls, accepted, cov, breadth,
-                    coding, orfs, pre, excluded, reads, warnings, ck)
-        if args.inspect != 'off': stage_inspect(args, out, R, reads)
+        summaries = stage_final(runner, args, config, out, R, groups, seqs, binnable, calls, accepted, cov, breadth,
+                                coding, orfs, pre, excluded, reads, warnings, ck, legacy_run)
+        if args.checkm:
+            run_checkm(runner, args, out, out / 'final/bins', args.ranks, summaries, warnings, ck, legacy_run)
+        else:
+            ck.skip('checkm', 'Disabled; use --checkm to assess final bins')
+        if getattr(args, 'annotate', None) == 'bakta':
+            from metahopper_annotate import annotate_run
+            ck.start('annotation', 'Per-bin Bakta caches are checked individually')
+            note(f'     Bakta annotation at {args.annotation_rank} rank')
+            annotation = annotate_run(out, config, args.annotation_rank, 'final', args.threads,
+                                      args.annotation_mode, args.annotation_timeout_h,
+                                      force=getattr(args, 'force_overwrite', False),
+                                      translation_table=args.annotation_translation_table, runner=runner, log=note)
+            warnings.extend(annotation['warnings'])
+            if any(row['status'] == 'failed' for row in annotation['bins']):
+                ck.fail('annotation', 'One or more bins failed; successful bins remain cached')
+            else:
+                ck.done('annotation', [annotation['summary']])
+        else:
+            ck.skip('annotation', 'Disabled; use --annotate bakta')
+        if args.inspect != 'off': stage_inspect(args, out, R, reads, ck)
+        else: ck.skip('inspection', 'Disabled by --inspect off')
+        if not args.skip_report:
+            ck.start('report')
+            if write_report(out, args): ck.done('report', [out / 'metahopper_report.html'])
+            else: ck.fail('report', 'Report generation failed; see terminal output')
+        else: ck.skip('report', 'Disabled by --skip-report')
         manifest.update(status='completed')
     except BaseException as e:
         manifest.update(status='failed', error=str(e) or type(e).__name__)
+        ck.fail(error=str(e) or type(e).__name__)
         raise
     finally:
         manifest.update(end=time.strftime('%FT%T%z'), hours=round((time.time() - t0) / 3600, 3), warnings=warnings)
-        (out / 'run.json').write_text(json.dumps(manifest, indent=2, default=str))
+        atomic_json(out / 'run.json', manifest)
+        failed = any(step.get('status') == 'failed' for step in ck.status['steps'].values())
+        ck.finish('failed' if manifest['status'] == 'failed' else 'completed_with_warnings' if warnings or failed else 'completed')
         if warnings: (out / 'logs' / 'warnings.txt').write_text('\n'.join(warnings) + '\n')
-    if not args.skip_report: write_report(out, args)
     for w in warnings: note('WARNING: ' + w)
     note(f'Done in {(time.time() - t0) / 3600:.2f} h: {out}')
 
 
-def stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, warnings):
+def read_summaries(base, ranks):
+    result = {}
+    for rank in ranks:
+        with open(base / 'bins' / rank / 'summary.tsv') as handle:
+            reader = csv.DictReader(handle, delimiter='\t')
+            if not {'bin', 'num_contigs', 'total_length_bp'}.issubset(reader.fieldnames or []):
+                raise ValueError('Incomplete bin summary at ' + rank)
+            result[rank] = {row['bin']: row for row in reader}
+    return result
+
+
+def bin_outputs(base, ranks):
+    outputs = []
+    for rank in ranks:
+        directory = base / 'bins' / rank
+        outputs += [directory / 'summary.tsv', directory / 'bin_membership.tsv']
+        if (directory / 'summary.tsv').is_file():
+            with open(directory / 'summary.tsv') as handle:
+                outputs += [directory / (row['bin'] + '.fasta') for row in csv.DictReader(handle, delimiter='\t') if row.get('bin')]
+    return outputs
+
+
+def reassembly_cache_args(out, rank, name, entry, seqs, assembly):
+    directory = out / 'reassembly' / rank / name
+    result = directory / 'result.json'
+    required = [result]
+    try:
+        row = json.loads(result.read_text())
+        if row.get('outcome') == 'accepted': required.append(directory / 'assembly.fasta')
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return dict(inputs=[assembly, out / 'work/coverage.tsv', out / 'work/pool_counts.json'],
+                options=dict(sequence_sha256=sequence_digest((c, seqs[c]) for c in entry['members']), skip=entry['skip']),
+                required=required, legacy_path=result)
+
+
+def cached_reassembly(ck, out, rank, name, entry, seqs, assembly):
+    return ck.peek(f'reassembly__{rank}__{name}', **reassembly_cache_args(out, rank, name, entry, seqs, assembly))
+
+
+def stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, warnings, ck, assembly):
     note(f'9    Unicycler reassembly at {R} rank (one bin at a time)')
     rroot = out / 'reassembly' / R; rroot.mkdir(parents=True, exist_ok=True)
     started = time.time(); rows = {}; accepted = {}
@@ -658,11 +822,16 @@ def stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, wa
     gcn = {c: s.count('G') + s.count('C') for c, s in seqs.items()}
     for i, name in enumerate(order, 1):
         e = eligible[name]; wdir = rroot / name; done = wdir / 'result.json'
-        if done.is_file():
+        stage = f'reassembly__{R}__{name}'
+        if ck.get(stage, **reassembly_cache_args(out, R, name, e, seqs, assembly)):
             row = json.loads(done.read_text()); rows[name] = row
             if row['outcome'] == 'accepted': accepted[name] = wdir / 'assembly.fasta'
             continue
         wdir.mkdir(exist_ok=True)
+        for filename in ('assembly.fasta', 'assembly.gfa', 'contig_graph_aliases.tsv', 'original_to_candidate.paf'):
+            (wdir / filename).unlink(missing_ok=True)
+        # A stale downsampling marker cannot describe freshly recreated read pools.
+        if getattr(args, 'force_overwrite', False): (wdir / 'downsampled.json').unlink(missing_ok=True)
         before = tb.bin_stats(e['members'], lengths, gcn)
         row = dict(bin=name, outcome='', elapsed_seconds=0.0, contigs_before=before['num_contigs'],
                    total_length_before_bp=before['total_length_bp'], N50_before=before['N50'],
@@ -692,10 +861,13 @@ def stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, wa
                                               '--spades_options', f'-m {args.memory}'], f'{name}_unicycler',
                        timeout=args.reassembly_timeout_h * 3600 or None)
             row['assembly_seconds'] = round(time.time() - t, 1)
-            cand = [(f'{name}_reassembled_{k:05d}', s.upper()) for k, (n_, s) in
-                    enumerate((x for x in fasta(udir / 'assembly.fasta') if len(x[1]) >= args.min_contig_len), 1)]
+            original_candidates = [x for x in fasta(udir / 'assembly.fasta') if len(x[1]) >= args.min_contig_len]
+            cand = [(f'{name}_reassembled_{k:05d}', s.upper()) for k, (n_, s) in enumerate(original_candidates, 1)]
             if not cand: raise ValueError(f'no reassembled contigs >= {args.min_contig_len} bp')
             write_fasta(wdir / 'assembly.fasta', cand)
+            tsv(wdir / 'contig_graph_aliases.tsv',
+                [dict(contig=c[0], gfa_record=original[0]) for c, original in zip(cand, original_candidates)],
+                ['contig', 'gfa_record'])
             if (udir / 'assembly.gfa').exists(): shutil.copy(udir / 'assembly.gfa', wdir / 'assembly.gfa')
             write_fasta(wdir / 'original.fasta', ((c, seqs[c]) for c in e['members']))
             runner.run('minimap2', ['-x', 'asm5', '-c', '--secondary=no', '-t', args.threads,
@@ -724,8 +896,16 @@ def stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, wa
         row['elapsed_seconds'] = round(time.time() - t, 1)
         for side in ('before', 'after'):   # 7.4 historical aliases
             row[f'total_length_{side}'] = row[f'total_length_{side}_bp']
-        done.write_text(json.dumps(row, indent=2)); rows[name] = row
-        if pool:   # pools are removed only once the bin has a recorded outcome (Ctrl-C keeps them for --resume)
+        atomic_json(done, row); rows[name] = row
+        if row['outcome'].startswith('failed'):
+            ck.fail(stage, row['reason'])
+        else:
+            outputs = [done]
+            if row['outcome'] == 'accepted':
+                outputs += [wdir / 'assembly.fasta']
+                outputs += [wdir / name_ for name_ in ('assembly.gfa', 'contig_graph_aliases.tsv') if (wdir / name_).is_file()]
+            ck.done(stage, outputs)
+        if pool and not row['outcome'].startswith('failed'):
             for p in pool.directory.glob(f'{name}.*.fq.gz'): p.unlink()
     fields = list(dict.fromkeys(k for r in rows.values() for k in r))
     with open(out / 'bins' / R / 'reassembly_summary.tsv', 'w', newline='') as fh:
@@ -737,8 +917,24 @@ def stage_reassembly(runner, args, out, R, eligible, groups, seqs, pool, cov, wa
 
 
 def stage_final(runner, args, config, out, R, groups, seqs, binnable, calls, accepted, cov, breadth,
-                coding, orfs, pre, excluded, reads, warnings, ck):
+                coding, orfs, pre, excluded, reads, warnings, ck, legacy_run=None):
+    fdir = out / 'final'
+    outputs = [fdir / name for name in ('assembly/consolidated_contigs.fasta', 'assembly/contig_provenance.tsv',
+                                       'classification/contig_classification.tsv', 'binarena/binarena_input.tsv')]
+    mutable = [fdir / 'bins' / rank / 'summary.tsv' for rank in args.ranks]
+    inputs = [out / 'diamond/hits.tsv', out / 'work/coverage.tsv', *reads,
+              out / ('assembly/preliminary_contigs.fasta' if args.assembly else 'megahit/final.contigs.fa')]
+    inputs += [accepted[name] for name in sorted(accepted)]
+    if ck.get('final', inputs=inputs, options={'accepted': sorted(accepted)},
+              required=outputs + bin_outputs(fdir, args.ranks), legacy_path=legacy_run, mutable_files=mutable):
+        try:
+            return read_summaries(fdir, args.ranks)
+        except (OSError, ValueError, KeyError):
+            ck.start('final', 'Regenerating incomplete bin summaries')
     note('10   Consolidated final assembly and final bins')
+    # Assessment of an old final bin set must not be shown for regenerated bins.
+    (fdir / 'checkm.tsv').unlink(missing_ok=True)
+    (ck.dir / 'checkm.json').unlink(missing_ok=True)
     fdir = out / 'final'; adir = fdir / 'assembly'; adir.mkdir(parents=True, exist_ok=True)
     records, prov, final_calls = [], [], {}
     consensus = {n: tb.bin_consensus(m, binnable) for n, m in groups.items() if n in accepted}
@@ -790,11 +986,18 @@ def stage_final(runner, args, config, out, R, groups, seqs, binnable, calls, acc
                           args.binarena_max_contigs, args.binarena_force, args.binarena_seed, outdir=fb, log=note)
     write_binarena(fb / 'binarena_input.tsv', fids, fseqs, fcalls, flabels, R if R in args.ranks else args.ranks[-1],
                    fparts.get(R) or fparts[args.ranks[-1]], fcov, fbreadth, fcoding, forfs, fpre, set(), columns, args.ranks)
-    if args.checkm: run_checkm(runner, args, out, fdir / 'bins', args.ranks, summaries, warnings)
+    produced = outputs + bin_outputs(fdir, args.ranks)
+    ck.done('final', [path for path in produced if path not in mutable], mutable_files=mutable)
+    return summaries
 
 
-def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings):
+def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings, ck, legacy_run=None):
     """One CheckM run over every distinct named final bin (Unclassified excluded)."""
+    table = out / 'final/checkm.tsv'
+    scored = [bins_dir / rank / 'summary.tsv' for rank in ranks]
+    inputs = [out / 'final/assembly/consolidated_contigs.fasta'] + [
+        path for path in bin_outputs(out / 'final', ranks) if path.suffix == '.fasta']
+    if ck.get('checkm', inputs=inputs, required=[table] + scored, legacy_path=legacy_run): return
     note('     CheckM (lineage_wf, reduced tree) on named final bins')
     inp = out / 'work' / 'checkm_input'; dest = out / 'work' / 'checkm_work'
     for d in (inp, dest):
@@ -806,13 +1009,23 @@ def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings):
             if name == tb.UNCLASSIFIED: continue
             key = f'{r}__{name}'; keymap[key] = (r, name)
             (inp / f'{key}.fasta').symlink_to(bins_dir / r / f'{name}.fasta')
-    if not keymap: return
-    table = out / 'final' / 'checkm.tsv'
+    if not keymap:
+        ck.skip('checkm', 'No named final bins to assess'); shutil.rmtree(inp); return
+    partial = table.with_suffix('.partial.tsv'); partial.unlink(missing_ok=True)
     try:
         runner.run('checkm', ['lineage_wf', '-x', 'fasta', '-t', args.threads, '--pplacer_threads', min(args.threads, 4),
-                              '--reduced_tree', '--tab_table', '-f', table, inp, dest], 'checkm')
+                              '--reduced_tree', '--tab_table', '-f', partial, inp, dest], 'checkm')
+        if not partial.is_file(): raise RuntimeError('CheckM exited without a results table')
+        with partial.open() as handle:
+            reader = csv.DictReader(handle, delimiter='\t')
+            if not {'Bin Id', 'Completeness', 'Contamination'}.issubset(reader.fieldnames or []):
+                raise RuntimeError('CheckM results lack the required quality columns')
+            results = list(reader)
+        if {row.get('Bin Id') for row in results} != set(keymap):
+            raise RuntimeError('CheckM did not report every submitted bin')
+        partial.replace(table)
     except RuntimeError as e:
-        warnings.append(f'CheckM failed: {e}'); return
+        warnings.append(f'CheckM failed: {e}'); ck.fail('checkm', str(e)); return
     finally:
         shutil.rmtree(inp, ignore_errors=True)
     with open(table) as f:
@@ -823,31 +1036,46 @@ def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings):
                                       contamination_percent=row.get('Contamination', 'NA'),
                                       strain_heterogeneity_percent=row.get('Strain heterogeneity', 'NA'),
                                       marker_lineage=row.get('Marker lineage', 'NA'))
-    for r in ranks: tsv(bins_dir / r / 'summary.tsv', list(summaries[r].values()), tb.SUMMARY_FIELDS)
+    for r in ranks:
+        summary = bins_dir / r / 'summary.tsv'
+        temporary = summary.with_suffix('.tmp.tsv')
+        tsv(temporary, list(summaries[r].values()), tb.SUMMARY_FIELDS)
+        temporary.replace(summary)
     shutil.rmtree(dest, ignore_errors=True)
+    ck.done('checkm', [table] + scored)
 
 
-def stage_inspect(args, out, R, reads):
+def stage_inspect(args, out, R, reads, ck):
     """7.4 inspection (metahopper_inspect.py, unchanged): coverage profiles, terminal-junction
     support and optional reference trees for the endosymbiont panel + bins >=10% complete."""
     import importlib.util
+    fasm = out / 'final/assembly/consolidated_contigs.fasta'
+    required = [out / 'inspection/inspection.json']
+    if ck.get('inspection', inputs=[fasm, out / 'final/classification/contig_classification.tsv',
+                                     out / 'final/checkm.tsv', *reads], required=required,
+              legacy_path=out / 'inspection/inspection.json'): return
     note(f'11   Inspection ({args.inspect}) with metahopper_inspect.py')
     try:
         spec = importlib.util.spec_from_file_location('metahopper_inspect', HERE / 'metahopper_inspect.py')
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-        fasm = out / 'final' / 'assembly' / 'consolidated_contigs.fasta'
         result = module.inspect_run(out, mode=args.inspect, references=args.references, threads=args.threads,
                                     rank=R, assembly=fasm, r1=reads[0], r2=reads[1] if len(reads) > 1 else None,
-                                    assembly_sequences={n: s for n, s in fasta(fasm)})
+                                    assembly_sequences={n: s for n, s in fasta(fasm)},
+                                    force=getattr(args, 'force_overwrite', False))
         for issue in result.get('errors', []): note(f'WARNING: inspection: {issue}')
+        if result.get('errors') or any(row.get('status') == 'failed' for row in result.get('trees', [])):
+            ck.fail('inspection', 'Inspection has incomplete analyses; see inspection/inspection.json')
+        else:
+            ck.done('inspection', [path for path in (out / 'inspection').rglob('*') if path.is_file()])
     except (RuntimeError, ValueError, OSError) as e:
         note(f'WARNING: inspection could not complete: {e}')
         (out / 'inspection').mkdir(exist_ok=True)
         (out / 'inspection' / 'inspection.json').write_text(json.dumps({'errors': [str(e)]}))
+        ck.fail('inspection', str(e))
 
 
 def write_report(out, args):
-    """Render metahopper_report.html with the unchanged 7.4 metahopper_report.py."""
+    """Always refresh report presentation, including on a fully cached run."""
     import importlib.util
     script = HERE / 'metahopper_report.py'
     try:
@@ -860,8 +1088,10 @@ def write_report(out, args):
                                   split_outdir=None, contigs=None)
         (out / 'metahopper_report.html').write_text(module.build_report(layout, opts), encoding='utf-8')
         note(f'12   HTML report: {out / "metahopper_report.html"}')
+        return True
     except Exception as e:  # a report failure must not fail a finished run
         note(f'WARNING: report not written ({type(e).__name__}: {e}); run metahopper_report.py -i {out}')
+        return False
 
 
 def cli(argv=None):
@@ -869,7 +1099,10 @@ def cli(argv=None):
     p.add_argument('-1', '--read1'); p.add_argument('-2', '--read2')
     p.add_argument('-o', '--out'); p.add_argument('-c', '--config')
     p.add_argument('--assembly', help='Skip MEGAHIT and use this FASTA')
+    p.add_argument('--assembly-graph', help='Optional GFA1 matching the preliminary assembly; retained for report graphs')
     p.add_argument('--resume', metavar='RUN_DIR', help='Continue a run; finished stages are reused')
+    p.add_argument('--force-overwrite', action='store_true',
+                   help='Rerun enabled stages, ignoring successful checkpoints and per-bin caches')
     p.add_argument('-t', '--threads', type=int, default=16); p.add_argument('--memory', type=int, default=64, help='GB')
     g = p.add_argument_group('contigs and prefilter')
     g.add_argument('--min-contig-len', type=int, default=1000, help='Contig length filter (bp), preliminary and reassembled')
@@ -919,10 +1152,29 @@ def cli(argv=None):
     g.add_argument('--skip-report', action='store_true')
     g.add_argument('--skip-phyloflash', action='store_true')
     g.add_argument('--checkm', action='store_true')
-    args = p.parse_args(argv)
+    g = p.add_argument_group('per-bin annotation')
+    g.add_argument('--annotate', choices=['bakta'], help='Annotate final bacterial bins; requires config.bakta_db')
+    g.add_argument('--annotation-rank', default='genus', help='Annotate one rank to avoid duplicating nested bins')
+    g.add_argument('--annotation-mode', choices=['meta', 'single'], default='meta', help='Bakta CDS prediction mode')
+    g.add_argument('--annotation-translation-table', choices=[4, 11, 25], type=int, default=11,
+                   help='Default code; recognized code-4 taxa and annotation_metadata can override it')
+    g.add_argument('--annotation-timeout-h', type=float, default=6, help='Per-bin Bakta timeout; 0 disables it')
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    args = p.parse_args(tokens)
     try:
         if args.resume:
-            prev = json.loads((Path(args.resume) / 'run.json').read_text())['arguments']
+            saved = json.loads((Path(args.resume) / 'run.json').read_text())['arguments']
+            prev = dict(vars(p.parse_args([])), **saved)
+            # Force applies only to this invocation, and explicit CLI choices can
+            # add optional stages or adjust resources on a resumed run.
+            prev['force_overwrite'] = False
+            explicit = set()
+            for token in tokens:
+                action = p._option_string_actions.get(token.split('=', 1)[0])
+                if action is None and token.startswith('-') and not token.startswith('--') and len(token) > 2:
+                    action = p._option_string_actions.get(token[:2])
+                if action: explicit.add(action.dest)
+            prev.update({key: getattr(args, key) for key in explicit})
             prev.update(resume=str(Path(args.resume).resolve()), out=str(Path(args.resume).resolve()))
             args = argparse.Namespace(**prev)
         elif not (args.read1 and args.out and args.config):

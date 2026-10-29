@@ -445,7 +445,7 @@ def build_tree(group, genomes, work, threads):
 
 def inspect_run(root, mode='endosymbionts', references=None, threads=8, rank=None,
                 assembly=None, r1=None, r2=None, bam=None, assembly_sequences=None,
-                min_completeness=10.0, coverage_window=100):
+                min_completeness=10.0, coverage_window=100, force=False):
     started=time.monotonic();root=Path(root).resolve();out=root/'inspection';out.mkdir(parents=True,exist_ok=True)
     base=root/'final' if (root/'final/bins').is_dir() else root
     ranks=[p.name for p in (base/'bins').iterdir() if p.is_dir()] if (base/'bins').is_dir() else []
@@ -601,7 +601,7 @@ def inspect_run(root, mode='endosymbionts', references=None, threads=8, rank=Non
                     for g in genomes],'tools':[[x,shutil.which(x),Path(shutil.which(x)).stat().st_mtime_ns]
                         for x in dependencies+(['iqtree2'] if shutil.which('iqtree2') else ['iqtree'])]}
                 cache=work/'result.json';sigpath=work/'inputs.json'
-                if cache.is_file() and sigpath.is_file() and json.loads(sigpath.read_text())==signature:
+                if not force and cache.is_file() and sigpath.is_file() and json.loads(sigpath.read_text())==signature:
                     tree=json.loads(cache.read_text());tree['cached']=True
                 else:
                     if work.exists():shutil.rmtree(work)

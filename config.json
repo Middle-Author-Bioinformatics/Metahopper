@@ -1,0 +1,27 @@
+{
+  "diamond_db": "/home/ark/databases/nr2.dmnd",
+  "taxdump": "/home/ark/databases/taxdump",
+  "phyloflash_db": "/home/ark/databases/phyloflash/138.1",
+  "bakta_db": "/home/ark/databases/bakta-1.10.3/db",
+  "tools": {
+    "phyloFlash.pl": [
+      "conda",
+      "run",
+      "--no-capture-output",
+      "-n",
+      "mh-phyloflash",
+      "phyloFlash.pl"
+    ],
+    "tiara": [
+      "conda",
+      "run",
+      "--no-capture-output",
+      "-n",
+      "mh-tiara",
+      "tiara"
+    ],
+    "bakta": [
+      "bakta"
+    ]
+  }
+}
