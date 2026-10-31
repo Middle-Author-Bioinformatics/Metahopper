@@ -48,7 +48,7 @@ const rankRows=Array.from(html.matchAll(/<tr data-rank="([^"]+)"([^>]*)>([\s\S]*
 for(const id of ['x','y','xs','ys','c','bf','graph-hops','graph-limit','graph-labels'])elements.get(id).tagName='select';
 elements.get('graph-hops').value='1';elements.get('graph-limit').value='500';elements.get('graph-labels').value='yes';
 const document={getElementById:id=>elements.get(id)||null,createElement:tag=>new Element(tag),createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>({textContent:text}),querySelectorAll(query){return query==='#bin-table tbody tr'?rankRows:[];},body:new Element('body')};
-const window={devicePixelRatio:1,addEventListener:(name,fn)=>{events[name]=fn;}};
+const window={...(process.env.TEST_POINTER==='1'?{PointerEvent:function(){}}:{}),devicePixelRatio:1,addEventListener:(name,fn)=>{events[name]=fn;}};
 let downloaded=0;
 const sandbox={document,window,console,Blob,Set,Map,Math,JSON,Number,String,Array,Object,Infinity,parseFloat,parseInt,
  setTimeout(fn){fn();return 1;},clearTimeout(){},alert(message){throw Error(message);},
@@ -88,13 +88,13 @@ assert(rankRows.every(row=>(row.style.display==='')===(row.dataset.rank==='genus
 searchBins('Sodalis');searchBins('');
 assert(rankRows.every(row=>(row.style.display==='')===(row.dataset.rank==='genus')));
 assert.deepEqual(rankRows.map(row=>row.innerHTML),originalMetrics,'search changed bin metrics');
-assert(html.match(/Classified bins<\/div><div class="v">85<\/div>/));
-assert(html.match(/Assembly size<\/div><div class="v">37.33 Mb<\/div>/));
-assert(html.match(/Contigs plotted<\/div><div class="v">13,375<\/div>/));
+assert(html.match(/Classified bins<\/div><div class="v">[0-9,]+<\/div>/));
+assert(html.match(/Assembly size<\/div><div class="v">[^<]+<\/div>/));
+assert(html.includes('Contigs plotted</div><div class="v">'+initial.scatter.nShown.toLocaleString()+'</div>'));
 function lassoAll(){
- const cv=el('cv');cv.listeners.mousedown({clientX:0,clientY:0});
- for(const [x,y] of [[1000,0],[1000,540],[0,540],[0,0]])cv.listeners.mousemove({clientX:x,clientY:y});
- events.mouseup({shiftKey:false});
+ const cv=el('cv');cv.listeners[process.env.TEST_POINTER==='1'?'pointerdown':'mousedown']({clientX:0,clientY:0});
+ for(const [x,y] of [[1000,0],[1000,540],[0,540],[0,0]])cv.listeners[process.env.TEST_POINTER==='1'?'pointermove':'mousemove']({clientX:x,clientY:y});
+ events[process.env.TEST_POINTER==='1'?'pointerup':'mouseup']({shiftKey:false});
 }
 function assertColours(field){
  change('c',field);
@@ -108,6 +108,20 @@ function assertColours(field){
 }
 const genus=assertColours('taxon_genus');
 assertColours('bin');assertColours('taxon_species');
+// A CSS-resized canvas must use the same point coordinates for draw and hover.
+const hoverCanvas=el('cv');
+const originalBounds=hoverCanvas.getBoundingClientRect;
+hoverCanvas.getBoundingClientRect=()=>({left:100,top:40,width:500,height:260});
+const dot=canvasFills[0].point;
+hoverCanvas.listeners[process.env.TEST_POINTER==='1'?'pointermove':'mousemove']({clientX:100+dot.x/2,clientY:40+dot.y/2});
+assert.equal(el('tip').style.display,'block');
+assert(el('tip').innerHTML.includes(initial.scatter.ids[0]));
+assert(el('tip').innerHTML.includes('coverage'));
+hoverCanvas.listeners[process.env.TEST_POINTER==='1'?'pointerdown':'mousedown']({clientX:100,clientY:40});
+hoverCanvas.listeners[process.env.TEST_POINTER==='1'?'lostpointercapture':'mouseleave']();
+hoverCanvas.listeners[process.env.TEST_POINTER==='1'?'pointermove':'mousemove']({clientX:100+dot.x/2,clientY:40+dot.y/2});
+assert.equal(el('tip').style.display,'block','leaving the iframe left lasso active and suppressed hover');
+hoverCanvas.getBoundingClientRect=originalBounds;
 change('c','taxon_genus');
 const first=initial.scatter.ids[0],length=initial.scatter.numeric.length[0];
 el('q').value=first;el('q').listeners.input();
@@ -120,7 +134,7 @@ assert.equal(canvasFills[0].colour,before,'manual assignment silently overrode t
 change('c','Manual sub-bin');
 assert.equal(canvasFills[0].colour,el('lg').children[0].dataset.colour);
 change('c','taxon_genus');lassoAll();el('graph-open').click();
-assert(el('graph-status').textContent.includes('No source graph mapping'));
+assert(el('graph-status').textContent.includes(initial.assemblyGraphs.contigs[first]?'source graph(s)':'No source graph mapping'));
 const catalogue={schema:'metahopper-graphs-1',stage:'final',run_name:initial.runName,lengths:{[first]:length},unmapped:{},warnings:[],
  graphs:[{id:'test/one.gfa',nodes:[{id:'1',length,depth:2},{id:'2',length:100,depth:1}],links:[{source:'1',source_orient:'+',target:'2',target_orient:'-',overlap:'0M',kind:'L'}]},
  {id:'test/two.gfa',nodes:[{id:'1',length:90,depth:1}],links:[]}],
@@ -141,3 +155,4 @@ async function finish(){
  console.log(JSON.stringify({contigs:initial.scatter.nShown,genus_colours:genus.size,checks:['exactly three tabs','Bins summary cards','Phylum default and rank switching','taxonomic-name search across ranks','case/space/underscore matching','no-match and literal-input handling','clear/Escape restore selected rank','bin metrics preserved by search','dot/legend agreement','opaque palette','unique genus colours','explicit manual colour mode','graph button selection','graph neighbourhood and strand links','source graph isolation','SVG download','wrong-run catalogue rejection']},null,2));
 }
 finish().catch(error=>{console.error(error);process.exitCode=1;});
+

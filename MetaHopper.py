@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MetaHopper Lean 2.2.2: taxonomy partitions, assembly-graph review and optional Bakta annotation.
+"""MetaHopper Lean 2.2.3: taxonomy partitions, assembly-graph review and optional Bakta annotation.
 
 Workflow
   1  phyloFlash SSU survey                     (context only)
@@ -30,7 +30,7 @@ from core import Taxonomy, fasta, tsv, phyloflash_abundance, Pools, stream_mappi
 import taxbin as tb  # noqa: E402
 from metahopper_state import Checkpoints, fingerprint, sequence_digest, atomic_json, write_if_changed, output_lock  # noqa: E402
 
-VERSION = '2.2.2'
+VERSION = '2.2.3'
 PROKARYOTIC_TIARA = {'bacteria', 'archaea', 'prokarya'}
 DEFAULT_DIAMOND_ARGS = ['--evalue', '1e-5', '--max-target-seqs', '25']
 
@@ -445,7 +445,7 @@ def stage_megahit_graph(out, ck, force=False):
     directory = out / 'megahit'
     outputs = [directory / 'assembly.gfa', directory / 'assembly_graph.json']
     cached = ck.get('megahit_graph', inputs=[directory / 'final.contigs.fa'],
-                    options={'export_schema': 1}, required=outputs)
+                    options={'export_schema': 2}, required=outputs)
     if cached and not force:
         return True
     if cached:
@@ -1214,4 +1214,5 @@ def cli(argv=None):
 
 if __name__ == '__main__':
     cli()
+
 

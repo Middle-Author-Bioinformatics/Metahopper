@@ -258,6 +258,7 @@ def collect_bins(layout: RunLayout, compute_missing: bool):
                 "rank": rank, "bin": name,
                 "unclassified": name.lower() == "unclassified",
                 "stage": layout.stage,
+                "fasta_asset": fasta.relative_to(layout.root).as_posix(),
             }
             src = summary.get(name)
             if src:
@@ -572,7 +573,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .plotwrap{display:grid;grid-template-columns:1fr 310px;gap:15px}
 @media(max-width:1100px){.plotwrap{grid-template-columns:1fr}}
 canvas{border:1px solid var(--line);border-radius:8px;background:#fff;cursor:crosshair;
-display:block;width:100%}
+display:block;width:100%;height:520px;touch-action:none}
 .legend{display:flex;flex-wrap:wrap;gap:5px 12px;margin-top:9px;font-size:.78rem;color:var(--mut)}
 .legend{max-height:220px;overflow:auto}.legend button{font-size:.78rem;padding:2px 6px}
 .legend i{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:4px}
@@ -585,7 +586,7 @@ display:block;width:100%}
 .sb span{flex:1;overflow:hidden;text-overflow:ellipsis}
 code{background:var(--accs);padding:1px 5px;border-radius:4px;font-size:.85em}
 .tip{position:fixed;pointer-events:none;background:#16222b;color:#fff;padding:7px 10px;
-border-radius:7px;font-size:.78rem;display:none;z-index:9;max-width:320px;line-height:1.4}
+border-radius:7px;font-size:.78rem;display:none;z-index:9999;max-width:380px;max-height:70vh;overflow:auto;line-height:1.4}
 dialog.graph-dialog{width:min(1200px,96vw);max-height:94vh;border:1px solid var(--line);border-radius:12px;padding:18px;color:var(--ink)}
 dialog.graph-dialog::backdrop{background:rgba(15,23,42,.45)}
 .graph-stage{height:540px;border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden;margin:12px 0;touch-action:none}
@@ -683,6 +684,18 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   var S = DATA.scatter, N = S.ids.length;
   var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
   var tip = document.getElementById('tip');
+  var plotWidth = 1, plotHeight = 520;
+  function cloudManifest(){
+    var element=document.getElementById('metahopper-assets');
+    try{return element?JSON.parse(element.textContent):null;}catch(error){return null;}
+  }
+  var assets=cloudManifest();
+  function hasCloudAsset(path){return !!(assets&&assets.files&&assets.files[path]&&typeof window.metahopperLoadAsset==='function');}
+  function cloudAsset(path){
+    if(!hasCloudAsset(path))return Promise.reject(Error('This asset has not been published for this sample.'));
+    return window.metahopperLoadAsset(path);
+  }
+  var cloudFasta=assets&&assets.fasta?assets.fasta:(DATA.assemblyGraphs&&DATA.assemblyGraphs.stage==='preliminary'?'megahit/final.contigs.fa':'final/assembly/consolidated_contigs.fasta');
 
   // One label -> one opaque colour, shared by dots, swatches and graph nodes.
   // Normalising underscores also keeps bin filenames and taxonomy labels aligned.
@@ -845,6 +858,8 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
 
   function draw(){
     var w = cv.clientWidth, h = 520, dpr = window.devicePixelRatio || 1;
+    if(!w)return;
+    plotWidth=w;plotHeight=h;
     cv.width = w * dpr; cv.height = h * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -967,7 +982,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     });
     el('exp').disabled = !order.length;
     var faSel = el('fa') && el('fa').files && el('fa').files.length;
-    if (el('expfa')) el('expfa').disabled = !(order.length && faSel);
+    if (el('expfa')) el('expfa').disabled = !(order.length && (faSel || hasCloudAsset(cloudFasta)));
   }
 
   function inPoly(px, py, poly){
@@ -982,11 +997,15 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   var drag = false;
   function pos(e){
     var r = cv.getBoundingClientRect();
-    return [e.clientX - r.left, e.clientY - r.top];
+    return [(e.clientX-r.left)*plotWidth/Math.max(1,r.width),
+            (e.clientY-r.top)*plotHeight/Math.max(1,r.height)];
   }
-  cv.addEventListener('mousedown', function(e){
-    drag = true; lasso = [pos(e)]; });
-  cv.addEventListener('mousemove', function(e){
+  function beginLasso(e){
+    if(e.button!==undefined&&e.button!==0)return;
+    drag = true; lasso = [pos(e)];tip.style.display='none';
+    if(e.pointerId!==undefined&&cv.setPointerCapture)cv.setPointerCapture(e.pointerId);
+  }
+  function movePointer(e){
     if (drag){ lasso.push(pos(e)); draw(); return; }
     var p = pos(e), best = -1, bd = 81;
     for (var k = 0; k < view.length; k++){
@@ -1004,10 +1023,11 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     if(sub[S.ids[best]]!==undefined)lines.push('Manual sub-bin: '+escapeText(sub[S.ids[best]]));
     tip.innerHTML = lines.join('<br>');
     tip.style.display = 'block';
-    tip.style.left = (e.clientX + 14) + 'px'; tip.style.top = (e.clientY + 12) + 'px';
-  });
-  cv.addEventListener('mouseleave', function(){ tip.style.display = 'none'; });
-  window.addEventListener('mouseup', function(e){
+    var width=tip.offsetWidth||320,height=tip.offsetHeight||180;
+    tip.style.left = Math.max(4,Math.min(e.clientX+14,(window.innerWidth||1200)-width-8))+'px';
+    tip.style.top = Math.max(4,Math.min(e.clientY+12,(window.innerHeight||800)-height-8))+'px';
+  }
+  function finishLasso(e){
     if (!drag) return;
     drag = false;
     if (lasso && lasso.length > 2){
@@ -1018,7 +1038,17 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       }
     }
     lasso = null; draw();
-  });
+    if(e.pointerId!==undefined&&cv.hasPointerCapture&&cv.hasPointerCapture(e.pointerId))cv.releasePointerCapture(e.pointerId);
+  }
+  function cancelLasso(){drag=false;lasso=null;tip.style.display='none';}
+  var usePointers='PointerEvent' in window;
+  cv.addEventListener(usePointers?'pointerdown':'mousedown',beginLasso);
+  cv.addEventListener(usePointers?'pointermove':'mousemove',movePointer);
+  cv.addEventListener('mouseleave',function(){tip.style.display='none';if(!usePointers)cancelLasso();});
+  cv.addEventListener('pointercancel',cancelLasso);
+  cv.addEventListener('lostpointercapture',cancelLasso);
+  window.addEventListener(usePointers?'pointerup':'mouseup',finishLasso);
+  window.addEventListener('blur',cancelLasso);
 
   el('assign').onclick = function(){
     var label = (el('lbl').value || '').trim();
@@ -1145,13 +1175,18 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   }
 
   el('fa').onchange = function(){
-    el('expfa').disabled = !(this.files && this.files.length && order.length);
+    el('expfa').disabled = !(order.length && ((this.files && this.files.length) || hasCloudAsset(cloudFasta)));
     el('fastat').textContent = this.files && this.files.length
       ? this.files.length + ' file(s) selected.' : '';
   };
 
-  el('expfa').onclick = function(){
-    var files = Array.prototype.slice.call(el('fa').files || []);
+  el('expfa').onclick = async function(){
+    var files = Array.prototype.slice.call(el('fa').files || []), cloudSource=false;
+    if(!files.length&&hasCloudAsset(cloudFasta)){
+      el('expfa').disabled=true;el('fastat').textContent='Loading this sample’s FASTA from S3…';
+      try{var buffer=await cloudAsset(cloudFasta);files=[new File([buffer],'sample_contigs.fasta',{type:'text/plain'})];cloudSource=true;}
+      catch(error){el('fastat').textContent='FASTA unavailable: '+error.message;el('expfa').disabled=false;return;}
+    }
     if (!files.length){ alert('Choose the contig FASTA first.'); return; }
     if (files.some(function(f){ return /\.gz$/i.test(f.name); })){
       el('fastat').textContent = 'Gzipped FASTA cannot be read in the browser. ' +
@@ -1172,6 +1207,11 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       });
     }
     function finish(){
+      var mismatch=Object.keys(seqs).find(function(id){var expected=num('length')[IDX[id]];return expected!==null&&expected!==undefined&&seqs[id].length!==expected;});
+      if(mismatch||(cloudSource&&found!==wanted.size)){
+        el('fastat').textContent=mismatch?'FASTA length does not match this report: '+mismatch:'The published FASTA does not contain every assigned contig. Republish this sample.';
+        el('expfa').disabled=false;return;
+      }
       if (!found){
         el('fastat').innerHTML = '<b>No matching records.</b> None of the ' + wanted.size +
           ' assigned contig names were found in the selected file(s). This usually means ' +
@@ -1360,6 +1400,7 @@ def render_bins(bin_rows, ranks, scatter=None):
         head += ["<th>completeness %</th>", "<th>contamination %</th>", "<th>strain het %</th>"]
     if has_reas:
         head += ['<th class="l">refinement</th>']
+    head += ['<th class="l">FASTA</th>']
     order = RANK_ORDER
     ranks = sorted(ranks, key=lambda row: order.get(row['rank'], len(order)))
     default_rank = next((r['rank'] for r in ranks if r['rank'] == 'phylum'),
@@ -1398,6 +1439,8 @@ def render_bins(bin_rows, ranks, scatter=None):
                       cell(row.get("strain_heterogeneity_percent"), lambda v: f"{v:.2f}")]
         if has_reas:
             cells.append(refinement_cell(row))
+        asset = row.get('fasta_asset')
+        cells.append('<td class="l"><a href="'+esc(quote(asset,safe='/'))+'" data-sample-asset="'+esc(asset)+'" download>Download</a></td>' if asset else '<td>&ndash;</td>')
         cells.append("</tr>")
         out.append("".join(cells))
     out.append("</tbody></table></div>")
@@ -1461,8 +1504,8 @@ def render_binarena(scatter):
         <button class="p" id="exp" disabled>Download manual_bins.tsv</button>
       </div>
       <h2 style="margin-top:18px">Download FASTA</h2>
-      <p class="note">Pick the contig FASTA so the sequences can be written here in the
-         browser. Nothing is uploaded.</p>
+      <p class="note">Published reports load this sample’s FASTA from S3 when you export.
+         For an offline report, choose the contig FASTA below. Manual assignments stay in this browser.</p>
       <p class="note" style="margin-top:6px">Expected:<br><code>{esc(scatter['fastaHint']) or 'no assembly FASTA found in this run'}</code></p>
       <input id="fa" type="file" multiple accept=".fasta,.fa,.fna,.fasta.gz,.fa.gz,.txt"
              style="margin-top:8px">
@@ -1806,3 +1849,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

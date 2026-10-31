@@ -116,7 +116,7 @@ for suffix in ['.gff3','.gbff','.faa','.ffn','.tsv']:(output/('annotation'+suffi
 class AnnotationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
-        self.db=self.root/'db';self.db.mkdir();write(self.db/'version.json','{"major":1}')
+        self.db=self.root/'db';self.db.mkdir();write(self.db/'version.json','{"major":5,"minor":0,"date":"2026-01-01","type":"full"}')
         tool=write(self.root/'fake_bakta.py',FAKE_BAKTA)
         self.config=dict(bakta_db=str(self.db),tools={'bakta':[sys.executable,str(tool)]})
         self.bin=self.root/'final/bins/genus/Sodalis.fasta';assembly(self.bin,{'contig_a':'A'*1200})
@@ -155,7 +155,7 @@ class AnnotationTests(unittest.TestCase):
         self.assertFalse(self.run_annotation()['bins'][0]['cached'])
 
     def test_database_version_change_invalidates_cache(self):
-        self.run_annotation();write(self.db/'version.json','{"major":2}')
+        self.run_annotation();write(self.db/'version.json','{"major":5,"minor":1,"date":"2026-01-01","type":"full"}')
         self.assertFalse(self.run_annotation()['bins'][0]['cached'])
 
     def test_non_bacterial_and_domain_catchall_skipped(self):
@@ -280,3 +280,4 @@ class ReportTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import metahopper as pipeline
+import MetaHopper as pipeline
 from metahopper_state import Checkpoints, output_lock
 
 
@@ -287,3 +287,4 @@ class PipelineTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+

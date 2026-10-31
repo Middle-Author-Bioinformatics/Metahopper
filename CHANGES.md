@@ -1,3 +1,11 @@
+# MetaHopper Lean 2.2.3
+
+- Report regeneration retries missing MEGAHIT graph exports and reports export errors. Retained contig IDs take precedence; conflicting intermediate identifiers are namespaced instead of failing the complete export.
+- Restored reliable point hover with CSS-coordinate scaling, fixed canvas height, viewport-aware tooltips, pointer capture and drag cancellation after pointer loss or blur.
+- Added per-bin FASTA downloads, sample-cloud graph catalogue loading, automatic cloud FASTA use for manual sub-bin exports, and source-GFA downloads when published assets are available.
+- Bakta metadata and known schema compatibility are checked before heavy pipeline stages. A separate repair helper can add only a verified missing database type, with backup and native validation.
+- The companion AWS viewer/publisher update stores immutable sample assets, embeds exact S3 object keys/checksums, and uses a scoped authenticated parent/iframe bridge while preserving report network isolation.
+
 # MetaHopper Lean 2.2.1
 
 - Added a taxonomic-name search above the Bins table. Nonempty searches find matching bin names across ranks and retain each row's rank, size, CheckM scores when available, and refinement information. Matching ignores case and normalizes spaces/underscores. Clear or Escape restores the previously selected rank.
@@ -57,3 +65,4 @@ fastp, MEGAHIT, Prodigal, DIAMOND (database with taxonomy), bwa, Tiara and phylo
 - Reassembly: Unicycler and minimap2.
 - Inspection: bowtie2 and samtools.
 - `--checkm`: CheckM.
+

@@ -18,7 +18,7 @@ from pathlib import Path
 
 SCHEMA = 'metahopper-graphs-1'
 COMPLEMENT = str.maketrans('ACGTRYSWKMBDHVN', 'TGCAYRSWMKVHDBN')
-MEGAHIT_GRAPH_SCHEMA = 1
+MEGAHIT_GRAPH_SCHEMA = 2
 
 
 def opn(path):
@@ -74,7 +74,7 @@ def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=200
         previous = json.loads(manifest.read_text())
     except (OSError, ValueError):
         previous = {}
-    if dest.exists() and previous.get('export_schema') != MEGAHIT_GRAPH_SCHEMA and not force:
+    if dest.exists() and previous.get('export_schema') not in (1, MEGAHIT_GRAPH_SCHEMA) and not force:
         raise ValueError(f'{dest} already exists without an exporter record; preserve it or explicitly force export')
     if (not force and previous.get('export_schema') == MEGAHIT_GRAPH_SCHEMA
             and previous.get('status') == 'completed' and previous.get('input') == source_stamp
@@ -92,7 +92,11 @@ def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=200
     parts = list(dict.fromkeys(parts))
     scope = 'intermediates' if parts else 'retained_contigs'
     nodes = {}
-    for path in parts + [source]:
+    renamed_intermediates = 0
+    # Retained contig names are authoritative. Intermediate outputs from separate
+    # writers can reuse a numeric identifier for another sequence; namespace these
+    # neighbours instead of losing the entire graph or changing a retained ID.
+    for path in [source] + parts:
         seen = set()
         for name, seq in fasta(path):
             match = re.fullmatch(r'k(\d+)_\d+', name)
@@ -105,7 +109,8 @@ def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=200
                 raise ValueError(f'Invalid DNA sequence for {name!r} in {path}')
             record = (seq, int(match[1]))
             if name in nodes and nodes[name] != record:
-                raise ValueError(f'Conflicting MEGAHIT sequences for {name!r}')
+                renamed_intermediates += 1
+                name = 'intermediate_' + hashlib.sha256(path.name.encode()).hexdigest()[:12] + '_' + name
             nodes[name] = record
     if not nodes:
         raise ValueError('No MEGAHIT contigs available for graph export')
@@ -145,7 +150,8 @@ def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=200
         result = dict(export_schema=MEGAHIT_GRAPH_SCHEMA, status='completed', input=source_stamp,
                       output=stamp(partial), construction='megahit_kmer_overlaps', source_scope=scope,
                       source_files=[str(p.relative_to(root)) if p.is_relative_to(root) else str(p) for p in parts + [source]],
-                      segments=len(nodes), links=links, kmer_sizes=sorted({k for _, k in nodes.values()}))
+                      segments=len(nodes), links=links, renamed_intermediates=renamed_intermediates,
+                      kmer_sizes=sorted({k for _, k in nodes.values()}))
         record = Path(temporary) / manifest.name
         record.write_text(json.dumps(result, indent=2) + '\n')
         partial.replace(dest)
@@ -278,6 +284,13 @@ def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_node
         raise ValueError('Graph input must be an existing run directory with a final or preliminary bin set')
     base = root / 'final' if stage == 'final' else root
     result = dict(schema=SCHEMA, stage=stage, run_name=root.name, graphs=[], contigs={}, unmapped={}, warnings=[])
+    # Completed older runs may have retained MEGAHIT intermediates after export
+    # failed. Report regeneration retries only graph export, never read assembly.
+    if (root / 'megahit/final.contigs.fa').is_file() and not (root / 'megahit/assembly.gfa').is_file():
+        try:
+            export_megahit_graph(root)
+        except (OSError, ValueError) as exc:
+            result['warnings'].append('MEGAHIT graph export failed: ' + str(exc))
     wanted = set(contig_ids) if contig_ids is not None else None
     prov = table(root / 'final/assembly/contig_provenance.tsv') if stage == 'final' else []
     by_source = defaultdict(list)
@@ -461,6 +474,7 @@ VIEWER_HTML = r'''
     <button id="graph-download" type="button" disabled>Download SVG</button>
   </div>
   <p id="graph-status" class="note" role="status"></p>
+  <p id="graph-sources" class="note"></p>
   <div id="graph-stage" class="graph-stage"></div>
   <p class="note">Drag the background to pan, scroll to zoom, or drag a node. Selected segments use the current scatter colours; grey nodes are neighbours. Hatched nodes belong to selected contigs with different colours. Dashed edges are GFA jump records. Node spacing is a layout choice, not genomic distance.</p>
   <p id="graph-detail" class="note graph-detail"></p>
@@ -564,6 +578,7 @@ VIEWER_JS = r'''
   }
   function renderGraph(){
     el('graph-stage').innerHTML='';el('graph-detail').textContent='';el('graph-download').disabled=true;graphSvg=null;graphNodes=[];graphEdges=[];
+    if(el('graph-sources'))el('graph-sources').innerHTML='';
     try{graphIndexData(graphData);}catch(error){graphMessage(error.message);return;}
     var seeds=new Set(),owners=new Map(),missing=[];
     graphSelection.forEach(function(cid){
@@ -571,6 +586,14 @@ VIEWER_JS = r'''
       if(!mappings){missing.push(cid+': '+((graphData.unmapped||{})[cid]||'no graph mapping'));return;}
       mappings.forEach(function(mapping){mapping.steps.forEach(function(step){var key=graphKey(mapping.graph,step[0]);seeds.add(key);if(!owners.has(key))owners.set(key,[]);if(owners.get(key).indexOf(cid)<0)owners.get(key).push(cid);});});
     });
+    if(el('graph-sources')){
+      var sourceNames=new Set();graphSelection.forEach(function(cid){(graphData.contigs[cid]||[]).forEach(function(m){sourceNames.add(m.graph);});});
+      sourceNames.forEach(function(path){
+        if(!hasCloudAsset(path))return;
+        var link=document.createElement('a');link.textContent='Download '+path;link.setAttribute('href',path);link.setAttribute('data-sample-asset',path);link.setAttribute('download','');
+        el('graph-sources').appendChild(link);el('graph-sources').appendChild(document.createTextNode(' '));
+      });
+    }
     el('graph-missing').textContent=missing.join('\n')||'All selected contigs have graph mappings.';
     el('graph-unmapped').open=missing.length>0;
     var warn=(graphData.warnings||[]).length?' '+graphData.warnings.join(' '):'';
@@ -637,7 +660,19 @@ VIEWER_JS = r'''
     graphMessage(mapped+' / '+graphSelection.length+' selected contigs mapped; '+sources.size+' source graph(s); '+graphNodes.length+' segments; '+graphEdges.length+' links.'+
       (omitted.size?' Neighbourhood truncated at '+limit+' nodes.':'')+(!graphEdges.length?' No links connect the displayed segments in the source GFA.':'')+warn);
   }
-  el('graph-open').onclick=function(){graphSelection=Array.from(selected);el('graph-dialog').showModal();renderGraph();};
+  var cloudGraphLoaded=false,cloudGraphPending=null;
+  el('graph-open').onclick=async function(){
+    graphSelection=Array.from(selected);el('graph-dialog').showModal();
+    if(!cloudGraphLoaded&&hasCloudAsset('assembly_graphs.'+(graphData.stage||'final')+'.json')){
+      graphMessage('Loading this sample’s assembly graphs from S3…');
+      try{
+        if(!cloudGraphPending)cloudGraphPending=cloudAsset('assembly_graphs.'+(graphData.stage||'final')+'.json');
+        var buffer=await cloudGraphPending;
+        var incoming=JSON.parse(new TextDecoder().decode(buffer));graphIndexData(incoming);graphData=incoming;cloudGraphLoaded=true;
+      }catch(error){cloudGraphPending=null;graphMessage('Cloud graph unavailable: '+error.message);return;}
+    }
+    renderGraph();
+  };
   el('graph-close').onclick=function(){el('graph-dialog').close();};
   ['graph-hops','graph-limit','graph-labels'].forEach(function(id){el(id).onchange=renderGraph;});
   el('graph-fit').onclick=graphFit;
@@ -654,4 +689,5 @@ VIEWER_JS = r'''
 
 if __name__ == '__main__':
     main()
+
 

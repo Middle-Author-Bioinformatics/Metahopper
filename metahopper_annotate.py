@@ -65,6 +65,16 @@ def validate_config(config):
     db = Path(config.get('bakta_db', ''))
     if not config.get('bakta_db') or not db.is_dir():
         raise ValueError('Bakta annotation requires config.bakta_db pointing to a prepared Bakta database directory')
+    try:
+        info = json.loads((db / 'version.json').read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f'Bakta database version.json is missing or invalid in {db}; run repair_bakta_db.py --db {db} to diagnose it') from exc
+    missing = [key for key in ('date', 'major', 'minor', 'type') if key not in info] if isinstance(info, dict) else ['database metadata object']
+    if missing:
+        raise ValueError(f'Bakta database metadata is missing {", ".join(missing)} in {db}/version.json; '
+                         'run repair_bakta_db.py with the Bakta environment. Do not guess the database schema or type.')
+    if info['type'] not in ('full', 'light') or type(info['major']) is not int or type(info['minor']) is not int:
+        raise ValueError('Bakta database version.json must declare integer major/minor versions and type full or light')
     command = config.get('tools', {}).get('bakta', ['bakta'])
     if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
         raise ValueError('tools.bakta must be a nonempty executable-prefix array')
@@ -77,6 +87,15 @@ def validate_config(config):
         raise ValueError('bakta_args cannot override managed input, identity, completeness, database, output or translation settings')
     if config.get('annotation_metadata') and not Path(config['annotation_metadata']).is_file():
         raise ValueError('annotation_metadata file does not exist')
+    try:
+        probe = subprocess.run(command + ['--version'], text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=60, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = getattr(exc, 'stdout', '') or str(exc)
+        raise ValueError('Bakta cannot start through tools.bakta: ' + detail[-1500:]) from exc
+    if re.search(r'\b1\.10\.\d+\b', probe) and info['major'] != 5:
+        raise ValueError(f'Bakta 1.10 requires database schema 5.x; {db}/version.json declares {info["major"]}. '
+                         'Download a compatible database with bakta_db download into a new directory.')
     return db, command, extra
 
 
@@ -152,6 +171,8 @@ def annotate_run(root, config, rank='genus', stage='final', threads=16, mode='me
                                  stderr=subprocess.STDOUT, timeout=60, check=True).stdout.strip()
     except (subprocess.SubprocessError, OSError) as e:
         raise ValueError(f'Could not determine Bakta version: {e}') from e
+    if re.search(r'\b1\.10\.\d+\b', version) and json.loads((db / 'version.json').read_text())['major'] != 5:
+        raise ValueError('Bakta 1.10 requires database schema 5.x. Download a compatible database with bakta_db download; the software directory name is not a database version.')
     db_versions = {p.name: p.read_text() for p in (db / 'version.json', db / 'version.txt') if p.is_file()}
     db_identity = dict(path=str(db), version_files=db_versions, directory_mtime_ns=db.stat().st_mtime_ns)
     metadata = {}
@@ -340,3 +361,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
