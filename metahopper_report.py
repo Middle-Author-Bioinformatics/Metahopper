@@ -67,6 +67,7 @@ import sys
 import hashlib
 from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
+from metahopper_annotation_view import bin_button, collect_features, render_browser
 from datetime import datetime
 from pathlib import Path
 
@@ -1390,7 +1391,7 @@ def render_bin_stats(ranks, scatter):
         for label, value in stats) + '</div>'
 
 
-def render_bins(bin_rows, ranks, scatter=None):
+def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
     has_checkm = any(r.get("completeness_percent") is not None or r.get('contamination_percent') is not None for r in bin_rows)
     has_reas = any(r.get("reassembly_outcome") or r.get('reassembled_contigs') is not None for r in bin_rows)
     head = ['<th class="l">rank</th>', '<th class="l">bin</th>', "<th>contigs</th>",
@@ -1425,8 +1426,10 @@ def render_bins(bin_rows, ranks, scatter=None):
                + "".join(head) + "</tr></thead><tbody>")
     for row in bin_rows:
         hidden = ' style="display:none"' if row['rank'] != default_rank else ''
+        name_cell = ('<td class="l" data-v="'+esc(row['bin'])+'">'+bin_button(row['rank'],row['bin'])+'</td>'
+                     if (row['rank'], row['bin']) in annotation_keys else cell(row['bin'], klass='l'))
         cells = ["<tr" + f' data-rank="{esc(row["rank"])}" data-bin-name="{esc(row["bin"])}"{hidden}>',
-                 cell(row["rank"], klass="l"), cell(row["bin"], klass="l"),
+                 cell(row["rank"], klass="l"), name_cell,
                  cell(row.get("num_contigs"), num_fmt),
                  cell(row.get("total_length_bp"), lambda v: human_bp(v)),
                  cell(row.get("N50"), num_fmt),
@@ -1719,35 +1722,45 @@ def current_annotation_row(layout, row):
                 reason='Annotation does not match the current bin; rerun Bakta')
 
 
-def render_annotation(layout):
-    tables = sorted((layout.base / 'annotation').glob('*/summary.tsv'))
+def collect_annotation_rows(layout):
+    return [current_annotation_row(layout, row)
+            for path in sorted((layout.base / 'annotation').glob('*/summary.tsv'))
+            for row in read_tsv(path)]
+
+
+def render_annotation(layout, rows=None):
+    rows = collect_annotation_rows(layout) if rows is None else rows
     out = ['<div class="card"><h2>Per-bin Bakta annotation</h2>']
     out.append('<p>One selected rank is annotated. Original contig IDs are preserved. These are taxonomic bins and may contain multiple genomes. Specialized pathway, BGC and virulence-screening modules have not been run.</p>')
-    if not tables:
+    if not rows:
         out.append('<p class="note">No Bakta annotation summary found. Run metahopper_annotate.py on this run directory, then regenerate the report.</p></div>')
         return ''.join(out)
     columns = [('rank','rank'),('bin','bin'),('status','status'),('translation_table','genetic code'),
                ('cds','CDS'),('sorf','sORF'),('hypothetical_proteins','hypothetical proteins'),
                ('named_proteins','non-hypothetical proteins'),('trna','tRNA'),('rrna','rRNA'),('reason','reason')]
     out.append('<div class="scroll"><table class="sortable"><thead><tr>'+''.join('<th class="l">'+label+'</th>' for _,label in columns)+'<th class="l">outputs</th></tr></thead><tbody>')
-    for path in tables:
-        for row in read_tsv(path):
-            row = current_annotation_row(layout, row)
-            out.append('<tr>'+''.join(cell(row.get(k),klass='l') for k,_ in columns))
-            links=[]
-            if row.get('status') == 'completed':
-                directory = Path(row.get('output_directory',''))
-                if not directory.is_absolute() and '..' not in directory.parts:
-                    for suffix,label in [('.gbff','GenBank'),('.gff3','GFF3'),('.faa','proteins'),('.json','Bakta JSON')]:
-                        rel=directory / ('annotation'+suffix)
-                        if (layout.root / rel).is_file():
-                            links.append('<a href="'+esc(quote(rel.as_posix(),safe='/'))+'" download>'+label+'</a>')
-            out.append('<td class="l annotation-path">'+(' | '.join(links) or '&ndash;')+'</td></tr>')
-    out.append('</tbody></table></div><p class="note">Downloads require the full run folder to be available beside this HTML. Per-bin features.tsv and modules.json retain coordinates and database cross-references for downstream modules. Bakta may contain its own expert-system annotations; a dedicated virulence screen and pathway reconstruction remain separate analyses.</p></div>')
+    for row in rows:
+        out.append('<tr>')
+        for key,_ in columns:
+            out.append('<td class="l" data-v="'+esc(row['bin'])+'">'+bin_button(row['rank'],row['bin'])+'</td>'
+                       if key == 'bin' and row.get('status') == 'completed' else cell(row.get(key),klass='l'))
+        links=[]
+        if row.get('status') == 'completed':
+            directory = Path(row.get('output_directory',''))
+            if not directory.is_absolute() and '..' not in directory.parts:
+                for suffix,label in [('.gbff','GenBank'),('.gff3','GFF3'),('.faa','proteins'),('.json','Bakta JSON')]:
+                    rel=directory / ('annotation'+suffix)
+                    if (layout.root / rel).is_file():
+                        links.append('<a href="'+esc(quote(rel.as_posix(),safe='/'))+'" data-sample-asset="'+esc(rel.as_posix())+'" download>'+label+'</a>')
+        out.append('<td class="l annotation-path">'+(' | '.join(links) or '&ndash;')+'</td></tr>')
+    out.append('</tbody></table></div><p class="note">Click a completed bin to inspect its gene and product list below. The list is embedded in this HTML. Sequence and annotation file downloads use this sample’s published assets in the AWS viewer, or the adjacent run files offline.</p></div>')
+    out.append(render_browser(collect_features(layout, rows)))
     return ''.join(out)
 
 
 def build_report(layout: RunLayout, args) -> str:
+    annotation_rows = collect_annotation_rows(layout)
+    annotation_keys = {(row.get('rank'), row.get('bin')) for row in annotation_rows if row.get('status') == 'completed'}
     bin_rows = collect_bins(layout, compute_missing=not args.no_fasta_stats)
     ranks = rank_totals(bin_rows)
     scatter = build_scatter(layout, args.min_length, args.max_points,
@@ -1777,8 +1790,8 @@ def build_report(layout: RunLayout, args) -> str:
             .replace("__TITLE__", esc(title))
             .replace("__SUBTITLE__", subtitle)
             .replace("__TABS__", json.dumps(tabs))
-            .replace("__BINS__", render_bins(bin_rows, ranks, scatter))
-            .replace("__ANNOTATION__", render_annotation(layout))
+            .replace("__BINS__", render_bins(bin_rows, ranks, scatter, annotation_keys))
+            .replace("__ANNOTATION__", render_annotation(layout, annotation_rows))
             .replace("__BINARENA__", render_binarena(scatter))
             .replace("__GRAPH_UI__", VIEWER_HTML)
             .replace("__GRAPH_JS__", VIEWER_JS)
@@ -1849,4 +1862,5 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

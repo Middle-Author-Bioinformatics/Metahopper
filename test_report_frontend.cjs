@@ -7,7 +7,7 @@ assert(!html.includes('pane-expansion'),'Expansion must be integrated into Bins,
 for(const pane of ['overview','inspection','files'])assert(!html.includes('id="pane-'+pane+'"'),'unexpected pane '+pane);
 assert(html.includes('id="pane-bins" class="pane on"'),'Bins must be the initial pane');
 assert(!html.includes('>all ranks</option>'),'all ranks must not be selectable');
-const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const script=Array.from(html.matchAll(/<script>([\s\S]*?)<\/script>/g),match=>match[1]).find(code=>/var DATA = /.test(code));
 const initial=JSON.parse(script.match(/var DATA = (.*?);\s*\/\*/s)[1]);
 const elements=new Map(),events={};
 class Element{
@@ -155,4 +155,5 @@ async function finish(){
  console.log(JSON.stringify({contigs:initial.scatter.nShown,genus_colours:genus.size,checks:['exactly three tabs','Bins summary cards','Phylum default and rank switching','taxonomic-name search across ranks','case/space/underscore matching','no-match and literal-input handling','clear/Escape restore selected rank','bin metrics preserved by search','dot/legend agreement','opaque palette','unique genus colours','explicit manual colour mode','graph button selection','graph neighbourhood and strand links','source graph isolation','SVG download','wrong-run catalogue rejection']},null,2));
 }
 finish().catch(error=>{console.error(error);process.exitCode=1;});
+
 
