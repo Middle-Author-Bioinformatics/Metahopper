@@ -46,7 +46,7 @@ def table(path):
         return list(csv.DictReader(f, delimiter='\t'))
 
 
-def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=2000000):
+def export_megahit_graph(root, intermediate_dir=None, force=False, max_links=10000000):
     """Save a GFA of same-k exact contig-end overlaps, keeping MEGAHIT IDs.
 
     This follows MEGAHIT's contig2fastg endpoint-matching algorithm, rather
@@ -171,7 +171,7 @@ def path_steps(text):
     return [[x[:-1], x[-1]] for x in parts]
 
 
-def load_gfa(path, graph_id, max_nodes=200000):
+def load_gfa(path, graph_id, max_nodes=200000, sequence_queries=None):
     nodes, links, paths, seq_index = {}, [], {}, defaultdict(list)
     metadata = {}
     unsupported = Counter()
@@ -221,8 +221,12 @@ def load_gfa(path, graph_id, max_nodes=200000):
                         except ValueError:
                             pass
                     if seq != '*':
-                        seq_index[sequence_key(seq)].append([p[1], '+'])
-                        seq_index[sequence_key(seq.translate(COMPLEMENT)[::-1])].append([p[1], '-'])
+                        forward = sequence_key(seq)
+                        reverse = sequence_key(seq.translate(COMPLEMENT)[::-1])
+                        if sequence_queries is None or forward in sequence_queries:
+                            seq_index[forward].append([p[1], '+'])
+                        if sequence_queries is None or reverse in sequence_queries:
+                            seq_index[reverse].append([p[1], '-'])
                 elif kind in ('L', 'J'):
                     if len(p) < 6 or p[2] not in ('+', '-') or p[4] not in ('+', '-'):
                         raise ValueError('Malformed link/jump record')
@@ -278,7 +282,58 @@ def match_sequence(seq, seq_index):
     return [hits[0]], 'unique_exact_sequence'
 
 
-def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_nodes=200000):
+def compact_catalog(result, min_nodes=200000, hops=2):
+    """Keep complete UI-supported neighbourhoods while preserving each source GFA.
+
+    The catalogue only maps known report contigs. Nodes farther than the UI's
+    maximum two-link neighbourhood from *every* mapped contig cannot be shown
+    by that UI. Excluding them from the display catalogue changes no requested
+    neighbourhood and does not alter or delete the source GFA.
+    """
+    if hops < 2:
+        raise ValueError('The report supports two-link neighbourhoods; retain at least two hops')
+    seeds = defaultdict(set)
+    for mappings in result.get('contigs', {}).values():
+        for mapping in mappings:
+            seeds[mapping['graph']].update(step[0] for step in mapping['steps'])
+    retained = []
+    for graph in result['graphs']:
+        if len(graph['nodes']) <= min_nodes:
+            retained.append(graph)
+            continue
+        source_nodes, source_links = len(graph['nodes']), len(graph['links'])
+        chosen = set(seeds[graph['id']])
+        if not chosen:
+            result['warnings'].append(graph['id'] + ': no report contigs map to this source; its full GFA remains available')
+            continue
+        frontier = set(chosen)
+        for _ in range(hops):
+            following = set()
+            # A small number of scans avoids allocating a second full adjacency
+            # index for multi-million-segment source graphs.
+            for edge in graph['links']:
+                if edge['source'] in frontier:
+                    following.add(edge['target'])
+                if edge['target'] in frontier:
+                    following.add(edge['source'])
+            following.difference_update(chosen)
+            chosen.update(following)
+            frontier = following
+            if not frontier:
+                break
+        graph['nodes'] = [node for node in graph['nodes'] if node['id'] in chosen]
+        graph['links'] = [edge for edge in graph['links'] if edge['source'] in chosen and edge['target'] in chosen]
+        graph['catalogue_scope'] = dict(kind='mapped_contig_neighbourhoods', hops=hops,
+                                       source_nodes=source_nodes, source_links=source_links,
+                                       retained_nodes=len(graph['nodes']), retained_links=len(graph['links']))
+        retained.append(graph)
+        result['warnings'].append(graph['id'] + f': display catalogue retains complete {hops}-link neighbourhoods of all mapped contigs '
+                                  f'({len(graph["nodes"]):,} of {source_nodes:,} source segments). Full source GFA is preserved.')
+    result['graphs'] = retained
+    return result
+
+
+def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_nodes=4000000):
     root = Path(root).resolve()
     if not root.is_dir() or stage not in ('final', 'preliminary'):
         raise ValueError('Graph input must be an existing run directory with a final or preliminary bin set')
@@ -309,6 +364,14 @@ def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_node
                     by_source[('original', '', '')].append(dict(final_contig=cid, source_record=cid))
     if wanted is None:
         wanted = {row['final_contig'] for rows in by_source.values() for row in rows}
+    # Only report-sequence matches are queried. Retain every matching source
+    # segment for those hashes (including duplicates and both orientations),
+    # without building millions of unneeded sequence-index entries.
+    reference = next((p for p in (base / 'assembly/consolidated_contigs.fasta',
+                     base / 'assembly/preliminary_contigs.fasta', root / 'megahit/final.contigs.fa') if p.is_file()), None)
+    sequence_queries = {sequence_key(seq) for cid, seq in fasta(reference) if cid in wanted} if reference else None
+    if not sequence_queries:
+        sequence_queries = None
     result['lengths'] = {r['contig']: int(r['length_bp']) for r in table(base / 'classification/contig_classification.tsv')
                          if r.get('contig') in wanted and str(r.get('length_bp', '')).isdigit()}
     loaded = {}
@@ -322,7 +385,7 @@ def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_node
         except ValueError:
             graph_id = 'external/' + hashlib.sha256(str(path).encode()).hexdigest()[:12] + '/' + path.name
         try:
-            data = load_gfa(path, graph_id, max_nodes)
+            data = load_gfa(path, graph_id, max_nodes, sequence_queries=sequence_queries)
         except (ValueError, OSError) as e:
             result['warnings'].append(f'{graph_id}: {e}')
             loaded[path] = None
@@ -365,7 +428,7 @@ def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_node
             return paths[key], 'recorded_path' if alias else 'source_path_name'
         if key in nodes:
             # Known-source names may be trusted, but reject a detectable content mismatch.
-            if seq is not None and seq_index:
+            if seq is not None:
                 hits = seq_index.get(sequence_key(seq), [])
                 if any(h[0] == key for h in hits):
                     return [next(h for h in hits if h[0] == key)], 'recorded_segment' if alias else 'source_segment_name'
@@ -416,6 +479,7 @@ def build_catalog(root, stage='final', contig_ids=None, graph_paths=(), max_node
     for cid in wanted:
         if cid not in result['contigs'] and cid not in result['unmapped']:
             result['unmapped'][cid] = 'provenance_unavailable'
+    compact_catalog(result)
     result['counts'] = dict(graphs=len(result['graphs']), matched_contigs=len(result['contigs']),
                             unmatched_contigs=len(result['unmapped']))
     return result
@@ -427,11 +491,12 @@ def main():
     p.add_argument('-o', '--output', type=Path)
     p.add_argument('--bin-set', choices=['auto', 'preliminary', 'final'], default='auto')
     p.add_argument('--graph', type=Path, action='append', default=[], help='Additional GFA1 for preliminary contigs')
-    p.add_argument('--max-nodes', type=int, default=200000)
+    p.add_argument('--max-nodes', type=int, default=4000000,
+                   help='Maximum segments per input GFA; large display catalogues retain complete two-link neighbourhoods')
     p.add_argument('--export-megahit-graph', action='store_true',
                    help='Export megahit/assembly.gfa before building the catalogue; old runs use retained contigs')
     p.add_argument('--force-megahit-graph', action='store_true', help='Rebuild the MEGAHIT GFA even when cached')
-    p.add_argument('--megahit-max-links', type=int, default=2000000, help='Maximum exported MEGAHIT overlap links')
+    p.add_argument('--megahit-max-links', type=int, default=10000000, help='Maximum exported MEGAHIT overlap links')
     a = p.parse_args()
     if a.max_nodes < 1:
         p.error('--max-nodes must be positive')
@@ -455,6 +520,11 @@ def main():
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(data, separators=(',', ':'), allow_nan=False))
     print(f'Graph catalogue: {dest}; {data["counts"]}')
+    for graph in data['graphs']:
+        scope = graph.get('catalogue_scope')
+        if scope:
+            print(f'Display graph: {graph["id"]}; {scope["retained_nodes"]:,} / {scope["source_nodes"]:,} segments; '
+                  f'{scope["retained_links"]:,} / {scope["source_links"]:,} links; {scope["hops"]}-link neighbourhoods')
     for warning in data['warnings']:
         print('WARNING:', warning)
 
@@ -589,8 +659,10 @@ VIEWER_JS = r'''
     if(el('graph-sources')){
       var sourceNames=new Set();graphSelection.forEach(function(cid){(graphData.contigs[cid]||[]).forEach(function(m){sourceNames.add(m.graph);});});
       sourceNames.forEach(function(path){
-        if(!hasCloudAsset(path))return;
-        var link=document.createElement('a');link.textContent='Download '+path;link.setAttribute('href',path);link.setAttribute('data-sample-asset',path);link.setAttribute('download','');
+        var compressed='_compressed/'+path+'.gz';
+        var asset=hasCloudAsset(path)?path:hasCloudAsset(compressed)?compressed:hasCloudAsset(path+'.gz')?path+'.gz':null;
+        if(!asset)return;
+        var link=document.createElement('a');link.textContent='Download '+path+(asset.endsWith('.gz')&&!path.endsWith('.gz')?' (gzip)':'');link.setAttribute('href',asset);link.setAttribute('data-sample-asset',asset);link.setAttribute('download','');
         el('graph-sources').appendChild(link);el('graph-sources').appendChild(document.createTextNode(' '));
       });
     }

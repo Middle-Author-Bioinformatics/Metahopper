@@ -7,7 +7,7 @@ const first=initial.scatter.ids[0],length=initial.scatter.numeric.length[0];
 const catalog={schema:'metahopper-graphs-1',stage:'final',run_name:initial.runName,lengths:{[first]:length},unmapped:{},warnings:[],
  graphs:[{id:'megahit/assembly.gfa',nodes:[{id:'k3_1',length},{id:'k3_2',length:10}],links:[{source:'k3_1',source_orient:'+',target:'k3_2',target_orient:'-',kind:'L',overlap:'3M'}]}],
  contigs:{[first]:[{graph:'megahit/assembly.gfa',steps:[['k3_1','+']],method:'source_segment_name'}]}};
-const manifest=new Element('script');manifest.textContent=JSON.stringify({files:{'assembly_graphs.final.json':{},'final/assembly/consolidated_contigs.fasta':{}}});elements.set('metahopper-assets',manifest);
+const manifest=new Element('script');manifest.textContent=JSON.stringify({files:{'assembly_graphs.final.json':{},'final/assembly/consolidated_contigs.fasta':{},'_compressed/megahit/assembly.gfa.gz':{}}});elements.set('metahopper-assets',manifest);
 const requests=[],downloads=[];
 window.metahopperLoadAsset=async name=>{requests.push(name);return new TextEncoder().encode(name.endsWith('.json')?JSON.stringify(catalog):'>'+first+'\n'+'A'.repeat(length)+'\n').buffer;};
 sandbox.TextDecoder=TextDecoder;sandbox.File=File;
@@ -21,6 +21,7 @@ function select(){canvas.listeners.mousedown({clientX:0,clientY:0});for(const [x
 (async()=>{
  select();await el('graph-open').click();
  assert(el('graph-status').textContent.includes('2 segments; 1 links.'));
+ assert(el('graph-sources').children.some(node=>node.attributes&&node.attributes['data-sample-asset']==='_compressed/megahit/assembly.gfa.gz'),'full compressed source download link missing');
  el('graph-close').click();
  el('lbl').value='Cloud test';el('assign').click();
  assert.equal(el('expfa').disabled,false,'cloud FASTA should be available without a local file');

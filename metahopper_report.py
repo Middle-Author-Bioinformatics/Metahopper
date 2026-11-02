@@ -1776,7 +1776,7 @@ def build_report(layout: RunLayout, args) -> str:
     if not getattr(args, 'skip_graphs', False):
         try:
             graph_data = build_catalog(layout.root, layout.stage, scatter['ids'] if scatter else [],
-                                       getattr(args, 'graph', []), getattr(args, 'graph_max_nodes', 200000))
+                                       getattr(args, 'graph', []), getattr(args, 'graph_max_nodes', 4000000))
             if len(json.dumps(graph_data)) > 32 * 1024 * 1024:
                 graph_data = dict(schema='metahopper-graphs-1',stage=layout.stage,graphs=[],contigs={},unmapped={},
                                   warnings=['Graph data exceed the 32 MB report limit. Export a catalogue with metahopper_graph.py and load it in the graph viewer.'])
@@ -1819,7 +1819,7 @@ def parse_args():
                    help="Also plot contigs with no k-mer ordination coordinates "
                         "(they can still be placed on GC/coverage axes).")
     p.add_argument('--graph', type=Path, action='append', default=[], help='Additional GFA1 for preliminary contigs')
-    p.add_argument('--graph-max-nodes', type=int, default=200000, help='Maximum segments per embedded source graph')
+    p.add_argument('--graph-max-nodes', type=int, default=4000000, help='Maximum segments per input source graph; large graphs use complete two-link display neighbourhoods')
     p.add_argument('--skip-graphs', action='store_true', help='Omit automatic graph discovery; the viewer can load a catalogue JSON')
     p.add_argument("--no-fasta-stats", action="store_true",
                    help="Do not fall back to reading bin FASTAs when a rank has no "
