@@ -94,6 +94,70 @@ class AnnotationViewTests(unittest.TestCase):
             self.assertIn('outside',item['error']);self.assertEqual(item['features'],[])
         finally:outside.unlink()
 
+    def write_json(self, features):
+        path=self.directory/'bakta/annotation.json'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'features':features}))
+
+    def test_bakta_json_preserves_sequences_and_overlapping_categories(self):
+        self.write_json([
+            dict(type='cds',sequence='contig_1',locus='B_1',gene='dnaA',product='Replication initiator',start=1,stop=9,strand='+',aa='MK*',nt='ATGAAATAA',db_xrefs=['COG:0593']),
+            dict(type='cds',sequence='contig_1',locus='B_2',product='hypothetical protein',start=2,stop=8,strand='-',pseudogene={'description':'Frameshift'},aa='M',nt='ATG'),
+            dict(type='cds',sequence='contig_1',locus='B_3',product='ATPase',pseudogene={}),
+            dict(type='trna',sequence='contig_1',locus='B_4',product='tRNA-Leu')])
+        item=view.collect_features(self.layout,[self.row])['bins'][0]
+        self.assertEqual(item['source'],'Bakta JSON')
+        self.assertEqual(item['features'][0],['B_1','dnaA','Replication initiator','cds','contig_1','1','9','+','COG:0593'])
+        self.assertEqual(item['details'][0]['aa'],'MK*')
+        self.assertEqual(item['details'][0]['nt'],'ATGAAATAA')
+        self.assertEqual(item['details'][0]['aa_length'],2)
+        self.assertIs(item['details'][0]['pseudogene'],False)
+        self.assertIs(item['details'][1]['hypothetical'],True)
+        self.assertIs(item['details'][1]['pseudogene'],True)
+        self.assertEqual(item['details'][1]['pseudogene_note'],'Frameshift')
+        self.assertIs(item['details'][2]['pseudogene'],True)
+        self.assertIsNone(item['details'][3]['hypothetical'])
+
+    def test_old_table_flags_are_unknown_and_sequences_match_by_locus(self):
+        bakta=self.directory/'bakta';bakta.mkdir()
+        (bakta/'annotation.faa').write_text('>MH_2 hypothetical\nMQQ*\n>OTHER unrelated\nABC\n')
+        (bakta/'annotation.ffn').write_text('>MH_1 dnaA\nATGAAA\n')
+        item=view.collect_features(self.layout,[self.row])['bins'][0]
+        self.assertIsNone(item['details'][0]['pseudogene'])
+        self.assertEqual(item['details'][0]['aa'],'')
+        self.assertEqual(item['details'][0]['nt'],'ATGAAA')
+        self.assertEqual(item['details'][1]['aa'],'MQQ*')
+        self.assertEqual(item['details'][1]['aa_length'],3)
+        self.assertIs(item['details'][1]['hypothetical'],True)
+
+    def test_json_foreign_contig_is_rejected_without_tsv_substitution(self):
+        self.write_json([dict(type='cds',sequence='other_sample',locus='B_1')])
+        item=view.collect_features(self.layout,[self.row])['bins'][0]
+        self.assertEqual(item['features'],[])
+        self.assertIn('outside this bin',item['error'])
+
+    def test_malformed_json_does_not_silently_become_tsv_data(self):
+        self.write_json([])
+        (self.directory/'bakta/annotation.json').write_text('{broken')
+        item=view.collect_features(self.layout,[self.row])['bins'][0]
+        self.assertEqual(item['features'],[])
+        self.assertTrue(item['error'])
+
+    def test_absent_products_and_unavailable_flags_do_not_become_hypothetical_or_pseudo(self):
+        detail=view.feature_detail(dict(pseudogene='unavailable'),'', 'cds')
+        self.assertIsNone(detail['hypothetical'])
+        self.assertIsNone(detail['pseudogene'])
+        rows,details=view.records_from_json({'features':[dict(type='cds')]})
+        self.assertIsNone(details[0]['hypothetical'])
+
+    def test_table_precedes_figures_and_download_labels_are_unbroken(self):
+        bins=report.render_bins([dict(rank='phylum',bin='Test')],[dict(rank='phylum',num_classified_bins=1,total_bp=9)])
+        self.assertLess(bins.index('id="bin-table"'),bins.index('id="bin-figures"'))
+        annotation=report.render_annotation(self.layout)
+        self.assertLess(annotation.index('id="annotation-summary-table"'),annotation.index('id="annotation-overview-figure"'))
+        self.assertIn('white-space:nowrap!important',annotation)
+        self.assertIn('.asset-link[hidden]{display:none}',annotation)
+
 
 if __name__=='__main__':
     unittest.main()

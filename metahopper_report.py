@@ -68,6 +68,7 @@ import hashlib
 from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
+from metahopper_report_figures import render_bin_figures, render_annotation_figures
 from datetime import datetime
 from pathlib import Path
 
@@ -1406,8 +1407,7 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
     ranks = sorted(ranks, key=lambda row: order.get(row['rank'], len(order)))
     default_rank = next((r['rank'] for r in ranks if r['rank'] == 'phylum'),
                         ranks[0]['rank'] if ranks else '')
-    out = [render_bin_stats(ranks, scatter),
-           '<div class="card"><div class="row" style="margin-bottom:12px">'
+    out = ['<div class="card"><div class="row" style="margin-bottom:12px">'
            '<div style="max-width:220px"><label for="rank-filter">Rank</label>'
            '<select id="rank-filter" title="Choose a rank when the taxonomic-name search is empty">']
     for row in ranks:
@@ -1451,6 +1451,8 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
     if has_reas:
         out.append('<p class="note" style="margin-top:10px">Refinement compares preliminary and displayed bin totals. Final taxonomic regrouping can change membership. Detailed candidate outcomes remain in the run files.</p>')
     out.append("</div>")
+    out.append(render_bin_stats(ranks, scatter))
+    out.append(render_bin_figures(bin_rows))
     return "\n".join(out)
 
 
@@ -1738,12 +1740,12 @@ def render_annotation(layout, rows=None):
     columns = [('rank','rank'),('bin','bin'),('status','status'),('translation_table','genetic code'),
                ('cds','CDS'),('sorf','sORF'),('hypothetical_proteins','hypothetical proteins'),
                ('named_proteins','non-hypothetical proteins'),('trna','tRNA'),('rrna','rRNA'),('reason','reason')]
-    out.append('<div class="scroll"><table class="sortable"><thead><tr>'+''.join('<th class="l">'+label+'</th>' for _,label in columns)+'<th class="l">outputs</th></tr></thead><tbody>')
+    out.append('<div class="scroll annotation-summary-scroll"><table class="sortable annotation-summary-table" id="annotation-summary-table"><thead><tr>'+''.join('<th class="l">'+label+'</th>' for _,label in columns)+'<th class="l">outputs</th></tr></thead><tbody>')
     for row in rows:
         out.append('<tr>')
         for key,_ in columns:
             out.append('<td class="l" data-v="'+esc(row['bin'])+'">'+bin_button(row['rank'],row['bin'])+'</td>'
-                       if key == 'bin' and row.get('status') == 'completed' else cell(row.get(key),klass='l'))
+                       if key == 'bin' and row.get('status') == 'completed' else cell(row.get(key) if row.get(key) not in ('NA', 'nan', '') else None,klass='l annotation-reason' if key == 'reason' else 'l'))
         links=[]
         if row.get('status') == 'completed':
             directory = Path(row.get('output_directory',''))
@@ -1751,9 +1753,10 @@ def render_annotation(layout, rows=None):
                 for suffix,label in [('.gbff','GenBank'),('.gff3','GFF3'),('.faa','proteins'),('.json','Bakta JSON')]:
                     rel=directory / ('annotation'+suffix)
                     if (layout.root / rel).is_file():
-                        links.append('<a href="'+esc(quote(rel.as_posix(),safe='/'))+'" data-sample-asset="'+esc(rel.as_posix())+'" download>'+label+'</a>')
-        out.append('<td class="l annotation-path">'+(' | '.join(links) or '&ndash;')+'</td></tr>')
+                        links.append('<a class="asset-link" href="'+esc(quote(rel.as_posix(),safe='/'))+'" data-sample-asset="'+esc(rel.as_posix())+'" download>'+('Protein FASTA' if label == 'proteins' else label)+'</a>')
+        out.append('<td class="l annotation-path"><div class="asset-links">'+(''.join(links) or '&ndash;')+'</div></td></tr>')
     out.append('</tbody></table></div><p class="note">Click a completed bin to inspect its gene and product list below. The list is embedded in this HTML. Sequence and annotation file downloads use this sample’s published assets in the AWS viewer, or the adjacent run files offline.</p></div>')
+    out.append(render_annotation_figures(rows))
     out.append(render_browser(collect_features(layout, rows)))
     return ''.join(out)
 
