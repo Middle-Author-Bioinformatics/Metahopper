@@ -8,6 +8,24 @@ def json_script(identifier, data):
     return '<script type="application/json" id="' + identifier + '">' + payload + '</script>'
 
 
+DOWNLOAD_LAYOUT_CSS = '''
+/* Keep annotation download controls compact in current and older reports. */
+#pane-annotation .scroll{max-width:100%;overflow-x:auto}
+#pane-annotation table.sortable{width:max-content!important;min-width:100%;table-layout:auto!important}
+#pane-annotation table.sortable th,#pane-annotation table.sortable td{padding:6px 10px;line-height:1.35;vertical-align:middle;white-space:nowrap}
+#pane-annotation td.annotation-path{width:auto!important;min-width:370px!important;max-width:none!important;white-space:nowrap!important;word-break:normal!important;overflow-wrap:normal!important}
+#pane-annotation td.annotation-path .asset-links{display:inline-flex!important;flex-wrap:nowrap!important;gap:6px;align-items:center;min-width:max-content;white-space:nowrap!important}
+#pane-annotation td.annotation-path a{display:inline-block;flex:none;max-width:none!important;white-space:nowrap!important;word-break:normal!important;overflow-wrap:normal!important;border:1px solid var(--line,#dae3e7);border-radius:5px;padding:3px 7px;font-size:.79rem;line-height:1.25;color:var(--acc,#136b78);text-decoration:none;background:var(--card,#fff)}
+#pane-annotation td.annotation-path a:hover{background:var(--accs,#e2f0f2)}
+#pane-annotation td.annotation-path a:focus-visible{outline:2px solid var(--acc,#136b78);outline-offset:2px}
+#pane-annotation table.sortable td.annotation-reason,#pane-annotation table.sortable td:nth-last-child(2){white-space:normal;min-width:90px;max-width:260px}
+@media(min-width:900px){
+ #pane-annotation table.sortable td.annotation-path{position:sticky;right:0;z-index:1;background:var(--card,#fff);box-shadow:-4px 0 7px rgba(22,34,43,.06)}
+ #pane-annotation table.sortable th:last-child{position:sticky;right:0;z-index:3;background:var(--accs,#e2f0f2)}
+}
+'''
+
+
 FIGURE_CSS = '''
 .report-figures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-bottom:16px}
 .report-figures .card{margin:0;min-width:0}.report-figures .wide{grid-column:1/-1}
@@ -21,7 +39,7 @@ FIGURE_CSS = '''
 .annotation-summary-table th,.annotation-summary-table td{padding:9px 12px;white-space:nowrap}
 .annotation-summary-table .annotation-path{min-width:325px;white-space:nowrap;overflow-wrap:normal}
 .annotation-summary-table .annotation-reason{white-space:normal;min-width:90px;max-width:280px}
-.asset-links{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:310px}
+.asset-links{display:inline-flex;flex-wrap:nowrap;gap:6px;align-items:center;min-width:max-content}
 .asset-link{display:inline-flex;align-items:center;justify-content:center;white-space:nowrap!important;word-break:normal!important;overflow-wrap:normal!important;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:.79rem;color:var(--acc);text-decoration:none;background:#fff}
 .asset-link:hover{background:var(--accs)}
 .asset-link[hidden]{display:none}
@@ -30,7 +48,7 @@ FIGURE_CSS = '''
  .annotation-summary-table thead th:last-child,#bin-table thead th:last-child{z-index:3;background:var(--accs)}
 }
 @media(max-width:800px){.report-figures{grid-template-columns:1fr}.report-figures .wide{grid-column:auto}.figure-host{max-height:430px}.figure-host svg{min-width:640px}}
-'''
+''' + DOWNLOAD_LAYOUT_CSS
 
 CHART_JS = r'''
 (function(){

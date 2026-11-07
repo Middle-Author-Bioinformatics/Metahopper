@@ -68,7 +68,7 @@ import hashlib
 from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
-from metahopper_report_figures import render_bin_figures, render_annotation_figures
+from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, render_annotation_figures
 from datetime import datetime
 from pathlib import Path
 
@@ -594,7 +594,8 @@ dialog.graph-dialog::backdrop{background:rgba(15,23,42,.45)}
 .graph-stage{height:540px;border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden;margin:12px 0;touch-action:none}
 .graph-stage svg{width:100%;height:100%;display:block;cursor:grab}
 .graph-stage svg:active{cursor:grabbing}.graph-detail{white-space:pre-wrap;overflow-wrap:anywhere}
-.graph-stage .graph-node{cursor:move}.annotation-path{white-space:normal;overflow-wrap:anywhere}
+.graph-stage .graph-node{cursor:move}
+__DOWNLOAD_LAYOUT_CSS__
 </style></head><body><div class="wrap">
 <header><h1>__TITLE__</h1>
 <p class="sub">__SUBTITLE__</p></header>
@@ -1790,6 +1791,7 @@ def build_report(layout: RunLayout, args) -> str:
     payload = payload.replace("</", "<\\/")
 
     return (HTML
+            .replace("__DOWNLOAD_LAYOUT_CSS__", DOWNLOAD_LAYOUT_CSS)
             .replace("__TITLE__", esc(title))
             .replace("__SUBTITLE__", subtitle)
             .replace("__TABS__", json.dumps(tabs))
