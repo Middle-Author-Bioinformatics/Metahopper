@@ -391,6 +391,11 @@ def validate(args, config):
             raise ValueError('--annotation-rank must be one of --ranks')
         if args.annotation_timeout_h < 0:
             raise ValueError('--annotation-timeout-h must be nonnegative')
+    if getattr(args, 'pathways', None) == 'pathwaygenie':
+        from metahopper_pathways import preflight_runtime
+        preflight_runtime(config, args.threads, args.pathway_jobs)
+        if args.pathway_rank not in args.ranks:
+            raise ValueError('--pathway-rank must be one of --ranks')
     import pysam, sklearn, numpy  # noqa: F401  (fail early if missing)
 
 
@@ -580,7 +585,8 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
 
 def main(args):
     config_path = Path(args.config).resolve(); config = json.loads(config_path.read_text())
-    for key in ('diamond_db', 'taxdump', 'phyloflash_db', 'bakta_db', 'annotation_metadata'):
+    for key in ('diamond_db', 'taxdump', 'phyloflash_db', 'bakta_db', 'annotation_metadata',
+                'pathwaygenie_script', 'pathwaygenie_hmm_dir', 'pathwaygenie_config'):
         if config.get(key):
             p = Path(os.path.expandvars(config[key])).expanduser()
             config[key] = str((config_path.parent / p).resolve())
@@ -779,6 +785,18 @@ def run_pipeline(args, config, out):
                 ck.done('annotation', [annotation['summary']])
         else:
             ck.skip('annotation', 'Disabled; use --annotate bakta')
+        if getattr(args, 'pathways', None) == 'pathwaygenie':
+            from metahopper_pathways import run_pathways
+            ck.start('pathways', 'PathwayGenie validates per-bin Prodigal/HMMER caches')
+            pathways = run_pathways(out, config, args.pathway_rank, 'final', args.threads,
+                                    args.pathway_jobs, force=getattr(args, 'force_overwrite', False), log=note)
+            warnings.extend(pathways['warnings'])
+            if pathways['status'] == 'partial':
+                ck.fail('pathways', 'Some bins failed; available evidence remains reportable')
+            else:
+                ck.done('pathways', [pathways['manifest']])
+        else:
+            ck.skip('pathways', 'Disabled; use --pathways pathwaygenie')
         if args.inspect != 'off': stage_inspect(args, out, R, reads, ck)
         else: ck.skip('inspection', 'Disabled by --inspect off')
         if not args.skip_report:
@@ -1113,7 +1131,7 @@ def write_report(out, args):
         opts = argparse.Namespace(input=out, output=out / 'metahopper_report.html', bin_set='auto', title=None,
                                   min_length=args.binarena_min_length, max_points=args.report_max_points,
                                   include_uncoordinated=False, no_fasta_stats=False, apply_split=None,
-                                  split_outdir=None, contigs=None)
+                                  split_outdir=None, contigs=None, pathways_rank=getattr(args, 'pathway_rank', 'genus'))
         (out / 'metahopper_report.html').write_text(module.build_report(layout, opts), encoding='utf-8')
         note(f'12   HTML report: {out / "metahopper_report.html"}')
         return True
@@ -1187,6 +1205,9 @@ def cli(argv=None):
     g.add_argument('--annotation-translation-table', choices=[4, 11, 25], type=int, default=11,
                    help='Default code; recognized code-4 taxa and annotation_metadata can override it')
     g.add_argument('--annotation-timeout-h', type=float, default=6, help='Per-bin Bakta timeout; 0 disables it')
+    g.add_argument('--pathways', choices=['pathwaygenie'], help='Run HMM pathway annotation before report generation')
+    g.add_argument('--pathway-rank', default='genus', help='One rank for HMM pathway annotation (default genus)')
+    g.add_argument('--pathway-jobs', type=int, default=3, help='Concurrent bins; shares the --threads worker budget')
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = p.parse_args(tokens)
     try:

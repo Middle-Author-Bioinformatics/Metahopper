@@ -326,3 +326,4 @@ def ordinate(seqs, ks=(4, 5, 6), methods=('pca',), min_len=1000, max_contigs=200
             columns[f'{k}{s2}'] = {c: float(y) for c, (_, y) in zip(ids, xy)}
         log(f'     BinaRena: {k}-mer {"/".join(results) or "no"} ordination on {n:,} contigs')
     return columns
+

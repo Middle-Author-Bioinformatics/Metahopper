@@ -236,3 +236,4 @@ class Checkpoints:
     def finish(self, status='completed'):
         self.status.update(status=status, current_step=None, finished_at=self.now())
         self._save()
+

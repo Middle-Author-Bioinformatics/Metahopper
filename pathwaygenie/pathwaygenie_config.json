@@ -1,0 +1,2086 @@
+{
+  "schema_version": 1,
+  "description": "Activity-level interpretation for the supplied 114-profile HMM panel; edit with source-backed additions.",
+  "components": {
+    "trpA": {
+      "label": "trpA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "trpB": {
+      "label": "trpB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "trpC": {
+      "label": "trpC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "trpE": {
+      "label": "trpE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "trpG": {
+      "label": "trpG",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "glyA": {
+      "label": "glyA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "cysE": {
+      "label": "cysE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "cysK": {
+      "label": "cysK",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisA": {
+      "label": "hisA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisD": {
+      "label": "hisD",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisE": {
+      "label": "hisE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisF": {
+      "label": "hisF",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisG": {
+      "label": "hisG",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisH": {
+      "label": "hisH",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ilvE": {
+      "label": "ilvE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ilvY": {
+      "label": "ilvY",
+      "assay_scope": "targeted",
+      "notes": "Regulator; excluded from biochemical coverage denominator."
+    },
+    "ilvC": {
+      "label": "ilvC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ilvD": {
+      "label": "ilvD",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ribA": {
+      "label": "ribA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ribB": {
+      "label": "ribB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ribD": {
+      "label": "ribD",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ribC": {
+      "label": "ribC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ribH": {
+      "label": "ribH",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "bioA": {
+      "label": "bioA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "bioB": {
+      "label": "bioB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "bioC": {
+      "label": "bioC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "bioD": {
+      "label": "bioD",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "bioF": {
+      "label": "bioF",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "aroA": {
+      "label": "aroA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "aroB": {
+      "label": "aroB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "aroC": {
+      "label": "aroC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "aroE": {
+      "label": "aroE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "aroQ": {
+      "label": "aroQ",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "tyrR": {
+      "label": "tyrR",
+      "assay_scope": "targeted",
+      "notes": "Regulator; excluded from biochemical coverage denominator."
+    },
+    "metA": {
+      "label": "metA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "metB": {
+      "label": "metB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "metC": {
+      "label": "metC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "metE": {
+      "label": "metE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "metF": {
+      "label": "metF",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "metR": {
+      "label": "metR",
+      "assay_scope": "targeted",
+      "notes": "Regulator; excluded from biochemical coverage denominator."
+    },
+    "carA": {
+      "label": "carA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "carB": {
+      "label": "carB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argA": {
+      "label": "argA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argB": {
+      "label": "argB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argC": {
+      "label": "argC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argD": {
+      "label": "argD",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argE": {
+      "label": "argE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argF": {
+      "label": "argF",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argG": {
+      "label": "argG",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "argH": {
+      "label": "argH",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "dapA": {
+      "label": "dapA",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "dapB": {
+      "label": "dapB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "dapD": {
+      "label": "dapD",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "dapE": {
+      "label": "dapE",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "dapF": {
+      "label": "dapF",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "asd": {
+      "label": "asd",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "thrB": {
+      "label": "thrB",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "thrC": {
+      "label": "thrC",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "AAT": {
+      "label": "AAT",
+      "assay_scope": "not_assayed",
+      "notes": "Unresolved host acronym; candidate models are reported but do not establish the reaction."
+    },
+    "acetolactate_synthase_large": {
+      "label": "acetolactate_synthase_large",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "acetolactate_synthase_small": {
+      "label": "acetolactate_synthase_small",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "DAHP_synthase": {
+      "label": "DAHP_synthase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "shikimate_kinase": {
+      "label": "shikimate_kinase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "aspartokinase": {
+      "label": "aspartokinase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "ornithine_aminotransferase": {
+      "label": "ornithine_aminotransferase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "prephenate_dehydratase": {
+      "label": "prephenate_dehydratase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "prephenate_dehydrogenase": {
+      "label": "prephenate_dehydrogenase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisB_dehydratase": {
+      "label": "hisB_dehydratase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "hisB_phosphatase": {
+      "label": "hisB_phosphatase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "homoserine_dehydrogenase": {
+      "label": "homoserine_dehydrogenase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "chorismate_mutase": {
+      "label": "chorismate_mutase",
+      "assay_scope": "targeted",
+      "notes": ""
+    },
+    "trpD_activity": {
+      "label": "trpD_activity",
+      "assay_scope": "fusion_only",
+      "notes": "Only selected fusion profiles assay this activity; a negative result is unassessed, not absence of standalone enzymes."
+    },
+    "trpF_activity": {
+      "label": "trpF_activity",
+      "assay_scope": "fusion_only",
+      "notes": "Only selected fusion profiles assay this activity; a negative result is unassessed, not absence of standalone enzymes."
+    },
+    "hisC_activity": {
+      "label": "hisC_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    },
+    "hisI_activity": {
+      "label": "hisI_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    },
+    "bioH_activity": {
+      "label": "bioH_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    },
+    "dapC_activity": {
+      "label": "dapC_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    },
+    "lysA_activity": {
+      "label": "lysA_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    },
+    "ilvA_activity": {
+      "label": "ilvA_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    },
+    "aromatic_aminotransferase_activity": {
+      "label": "aromatic_aminotransferase_activity",
+      "assay_scope": "not_assayed",
+      "notes": "No sufficiently specific profile in the supplied HMM panel; never code a negative as gene absence."
+    }
+  },
+  "model_rules": {
+    "TIGR00262.1": {
+      "target": "trpA",
+      "components": [
+        "trpA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00263.1": {
+      "target": "trpB",
+      "components": [
+        "trpB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF001369.0": {
+      "target": "trpC",
+      "components": [
+        "trpC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Repeated twice in screenshot. Interpret as indole-3-glycerol-phosphate synthase; NF006945 covers a TrpC/TrpF fusion. The duplicate label does not establish a second specified reaction."
+    },
+    "NF001377.0": {
+      "target": "trpC",
+      "components": [
+        "trpC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Repeated twice in screenshot. Interpret as indole-3-glycerol-phosphate synthase; NF006945 covers a TrpC/TrpF fusion. The duplicate label does not establish a second specified reaction."
+    },
+    "NF006945.0": {
+      "target": "trpC",
+      "components": [
+        "trpC",
+        "trpF_activity"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "Repeated twice in screenshot. Interpret as indole-3-glycerol-phosphate synthase; NF006945 covers a TrpC/TrpF fusion. The duplicate label does not establish a second specified reaction."
+    },
+    "TIGR00564.1": {
+      "target": "trpE",
+      "components": [
+        "trpE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00565.1": {
+      "target": "trpE",
+      "components": [
+        "trpE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01820.1": {
+      "target": "trpE",
+      "components": [
+        "trpE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF005367.0": {
+      "target": "trpG",
+      "components": [
+        "trpG"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "TrpG function can occur in TrpG/TrpD fusions. Some profiles have narrow taxonomic coverage. The shared TrpG/PabA context model alone cannot establish tryptophan biosynthesis."
+    },
+    "NF004169.0": {
+      "target": "trpG",
+      "components": [
+        "trpG"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "TrpG function can occur in TrpG/TrpD fusions. Some profiles have narrow taxonomic coverage. The shared TrpG/PabA context model alone cannot establish tryptophan biosynthesis."
+    },
+    "NF011201.0": {
+      "target": "trpG",
+      "components": [
+        "trpG",
+        "trpD_activity"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "TrpG function can occur in TrpG/TrpD fusions. Some profiles have narrow taxonomic coverage. The shared TrpG/PabA context model alone cannot establish tryptophan biosynthesis."
+    },
+    "NF007073.0": {
+      "target": "trpG",
+      "components": [
+        "trpG",
+        "trpD_activity"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "TrpG function can occur in TrpG/TrpD fusions. Some profiles have narrow taxonomic coverage. The shared TrpG/PabA context model alone cannot establish tryptophan biosynthesis."
+    },
+    "TIGR00566.1": {
+      "target": "trpG",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "TrpG function can occur in TrpG/TrpD fusions. Some profiles have narrow taxonomic coverage. The shared TrpG/PabA context model alone cannot establish tryptophan biosynthesis."
+    },
+    "NF000586.1": {
+      "target": "glyA",
+      "components": [
+        "glyA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Shared one-carbon metabolism enzyme; not a tryptophan-specific pathway marker."
+    },
+    "NF010094.0": {
+      "target": "glyA",
+      "components": [
+        "glyA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Shared one-carbon metabolism enzyme; not a tryptophan-specific pathway marker."
+    },
+    "TIGR01172.1": {
+      "target": "cysE",
+      "components": [
+        "cysE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01139.1": {
+      "target": "cysK",
+      "components": [
+        "cysK"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Repeated twice in screenshot; collapsed to one target. Different cysteine synthases can perform related reactions."
+    },
+    "TIGR00007.1": {
+      "target": "hisA",
+      "components": [
+        "hisA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Repeated twice in screenshot; collapsed to one target. Histidine HisA and tryptophan TrpF isomerases can be homologous; do not infer two specified reactions from duplicate labels."
+    },
+    "TIGR02129.1": {
+      "target": "hisA",
+      "components": [
+        "hisA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Repeated twice in screenshot; collapsed to one target. Histidine HisA and tryptophan TrpF isomerases can be homologous; do not infer two specified reactions from duplicate labels."
+    },
+    "TIGR01261.1": {
+      "target": "hisB",
+      "components": [
+        "hisB_phosphatase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "HisB can be bifunctional or split. Histidinol-phosphatase and imidazoleglycerol-phosphate dehydratase evidence must be tracked separately; a single domain hit does not establish both functions."
+    },
+    "NF002106.0": {
+      "target": "hisB",
+      "components": [
+        "hisB_dehydratase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "HisB can be bifunctional or split. Histidinol-phosphatase and imidazoleglycerol-phosphate dehydratase evidence must be tracked separately; a single domain hit does not establish both functions."
+    },
+    "NF002111.0": {
+      "target": "hisB",
+      "components": [
+        "hisB_dehydratase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "HisB can be bifunctional or split. Histidinol-phosphatase and imidazoleglycerol-phosphate dehydratase evidence must be tracked separately; a single domain hit does not establish both functions."
+    },
+    "NF002114.0": {
+      "target": "hisB",
+      "components": [
+        "hisB_dehydratase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "HisB can be bifunctional or split. Histidinol-phosphatase and imidazoleglycerol-phosphate dehydratase evidence must be tracked separately; a single domain hit does not establish both functions."
+    },
+    "NF003937.0": {
+      "target": "hisB",
+      "components": [
+        "hisB_dehydratase",
+        "hisB_phosphatase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "HisB can be bifunctional or split. Histidinol-phosphatase and imidazoleglycerol-phosphate dehydratase evidence must be tracked separately; a single domain hit does not establish both functions."
+    },
+    "TIGR00069.1": {
+      "target": "hisD",
+      "components": [
+        "hisD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "TIGR00069 is a function-specific domain model; inspect sequence coverage and protein integrity."
+    },
+    "TIGR03188.1": {
+      "target": "hisE",
+      "components": [
+        "hisE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "May be stand-alone or fused with HisI. The model detects the HisE phosphoribosyl-ATP diphosphatase activity, not the full HisI/HisE fusion."
+    },
+    "TIGR00735.1": {
+      "target": "hisF",
+      "components": [
+        "hisF"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-specific domain model; does not replace evidence for the HisH subunit."
+    },
+    "TIGR00070.1": {
+      "target": "hisG",
+      "components": [
+        "hisG"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Long and short enzyme architectures exist; inspect model description and coverage."
+    },
+    "TIGR03455.1": {
+      "target": "hisG",
+      "components": [
+        "hisG"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Long and short enzyme architectures exist; inspect model description and coverage."
+    },
+    "TIGR01855.1": {
+      "target": "hisH",
+      "components": [
+        "hisH"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00118.1": {
+      "target": "ilvB",
+      "components": [
+        "acetolactate_synthase_large"
+      ],
+      "target_call": "shared_family",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "TIGR00118 detects biosynthetic acetolactate synthase large subunits and cannot reliably distinguish IlvB/IlvG/IlvI isozymes. NF006016 is an Enterobacterales-focused IlvB model."
+    },
+    "NF006016.1": {
+      "target": "ilvB",
+      "components": [
+        "acetolactate_synthase_large"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "TIGR00118 detects biosynthetic acetolactate synthase large subunits and cannot reliably distinguish IlvB/IlvG/IlvI isozymes. NF006016 is an Enterobacterales-focused IlvB model."
+    },
+    "NF006524.0": {
+      "target": "ilvG",
+      "components": [
+        "acetolactate_synthase_large"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF006524 is a Pseudomonadota-focused IlvG model; failure outside this range is not absence. Shared acetolactate synthase evidence from the ilvB target is not an IlvG-specific call."
+    },
+    "TIGR01122.1": {
+      "target": "ilvE",
+      "components": [
+        "ilvE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01123.1": {
+      "target": "ilvE",
+      "components": [
+        "ilvE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF008722.0": {
+      "target": "ilvY",
+      "components": [
+        "ilvY"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Transcriptional regulator, not a catalytic step; do not require its presence for pathway completeness."
+    },
+    "TIGR00465.1": {
+      "target": "ilvC",
+      "components": [
+        "ilvC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF004017.0": {
+      "target": "ilvC",
+      "components": [
+        "ilvC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00110.1": {
+      "target": "ilvD",
+      "components": [
+        "ilvD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00119.1": {
+      "target": "ilvN",
+      "components": [
+        "acetolactate_synthase_small"
+      ],
+      "target_call": "shared_family",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "The broad small-subunit profile may not distinguish IlvN from homologous acetolactate synthase regulatory subunits; NF006036 is Enterobacterales-focused."
+    },
+    "NF006036.0": {
+      "target": "ilvN",
+      "components": [
+        "acetolactate_synthase_small"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "The broad small-subunit profile may not distinguish IlvN from homologous acetolactate synthase regulatory subunits; NF006036 is Enterobacterales-focused."
+    },
+    "TIGR00505.1": {
+      "target": "ribA",
+      "components": [
+        "ribA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-specific GTP cyclohydrolase II domain; can occur in a fusion."
+    },
+    "TIGR00506.1": {
+      "target": "ribB",
+      "components": [
+        "ribB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-specific DHBP synthase domain; can occur in a fusion."
+    },
+    "TIGR00326.1": {
+      "target": "ribD",
+      "components": [
+        "ribD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00187.1": {
+      "target": "ribC",
+      "components": [
+        "ribC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as riboflavin synthase EC 2.5.1.9 in the figure. TIGR00187 covers bacterial-type riboflavin synthase (often named ribE); TIGR01506 covers the distinct archaeal-type enzyme. RibC can denote different functions in other nomenclatures."
+    },
+    "TIGR01506.1": {
+      "target": "ribC",
+      "components": [
+        "ribC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as riboflavin synthase EC 2.5.1.9 in the figure. TIGR00187 covers bacterial-type riboflavin synthase (often named ribE); TIGR01506 covers the distinct archaeal-type enzyme. RibC can denote different functions in other nomenclatures."
+    },
+    "TIGR00114.1": {
+      "target": "ribH",
+      "components": [
+        "ribH"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Lumazine synthase EC 2.5.1.78, sometimes named ribE; distinguish it from riboflavin synthase."
+    },
+    "TIGR00508.1": {
+      "target": "bioA",
+      "components": [
+        "bioA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00433.2": {
+      "target": "bioB",
+      "components": [
+        "bioB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR02072.1": {
+      "target": "bioC",
+      "components": [
+        "bioC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00347.1": {
+      "target": "bioD",
+      "components": [
+        "bioD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00858.1": {
+      "target": "bioF",
+      "components": [
+        "bioF"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01356.1": {
+      "target": "aroA",
+      "components": [
+        "aroA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as EPSP synthase. An unrelated chorismate-mutase model also uses aroA; it was excluded."
+    },
+    "TIGR01357.1": {
+      "target": "aroB",
+      "components": [
+        "aroB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00033.1": {
+      "target": "aroC",
+      "components": [
+        "aroC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00507.1": {
+      "target": "aroE",
+      "components": [
+        "aroE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-specific domain profiles; distinguish shikimate dehydrogenase from related quinate/shikimate enzymes."
+    },
+    "TIGR01809.1": {
+      "target": "aroE",
+      "components": [
+        "aroE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-specific domain profiles; distinguish shikimate dehydrogenase from related quinate/shikimate enzymes."
+    },
+    "TIGR00034.1": {
+      "target": "aroH",
+      "components": [
+        "DAHP_synthase"
+      ],
+      "target_call": "shared_family",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as DAHP synthase in the chorismate pathway. TIGR00034 also covers AroF/AroG isozymes; NF009396 is AroH-focused. The alternative meaning chorismate mutase is supplied only in context models."
+    },
+    "NF009396.0": {
+      "target": "aroH",
+      "components": [
+        "DAHP_synthase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as DAHP synthase in the chorismate pathway. TIGR00034 also covers AroF/AroG isozymes; NF009396 is AroH-focused. The alternative meaning chorismate mutase is supplied only in context models."
+    },
+    "TIGR01796.1": {
+      "target": "aroH",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as DAHP synthase in the chorismate pathway. TIGR00034 also covers AroF/AroG isozymes; NF009396 is AroH-focused. The alternative meaning chorismate mutase is supplied only in context models."
+    },
+    "NF002988.0": {
+      "target": "aroL",
+      "components": [
+        "shikimate_kinase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF002988 is Enterobacterales-focused AroL. TIGR01920 detects shikimate kinase more generally and cannot distinguish every AroL/AroK naming convention."
+    },
+    "TIGR01920.1": {
+      "target": "aroL",
+      "components": [
+        "shikimate_kinase"
+      ],
+      "target_call": "shared_family",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF002988 is Enterobacterales-focused AroL. TIGR01920 detects shikimate kinase more generally and cannot distinguish every AroL/AroK naming convention."
+    },
+    "TIGR01088.1": {
+      "target": "aroQ",
+      "components": [
+        "aroQ"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as type II dehydroquinate dehydratase in the chorismate pathway. AroQ also names a chorismate mutase in other organisms; that alternative is supplied only in context models. Confirm intended reaction from the source paper."
+    },
+    "TIGR01806.1": {
+      "target": "aroQ",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "Interpreted as type II dehydroquinate dehydratase in the chorismate pathway. AroQ also names a chorismate mutase in other organisms; that alternative is supplied only in context models. Confirm intended reaction from the source paper."
+    },
+    "NF008085.0": {
+      "target": "tyrR",
+      "components": [
+        "tyrR"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Transcriptional regulator, not a catalytic step; do not require its presence for pathway completeness."
+    },
+    "TIGR01001.2": {
+      "target": "metA",
+      "components": [
+        "metA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes O-succinyltransferase and alternative O-acetyltransferase models. These are different activation reactions; keep the distinction when reconstructing the pathway."
+    },
+    "NF047918.2": {
+      "target": "metA",
+      "components": [
+        "metA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes O-succinyltransferase and alternative O-acetyltransferase models. These are different activation reactions; keep the distinction when reconstructing the pathway."
+    },
+    "TIGR02080.1": {
+      "target": "metB",
+      "components": [
+        "metB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01324.1": {
+      "target": "metC",
+      "components": [
+        "metC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01371.1": {
+      "target": "metE",
+      "components": [
+        "metE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Cobalamin-independent methionine synthase. The cobalamin-dependent alternative MetH is not listed in the screenshot and is not covered by this target."
+    },
+    "TIGR00676.1": {
+      "target": "metF",
+      "components": [
+        "metF"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF011950.0": {
+      "target": "metR",
+      "components": [
+        "metR"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Transcriptional regulator, not a catalytic step; do not require its presence for pathway completeness."
+    },
+    "TIGR01368.1": {
+      "target": "carA",
+      "components": [
+        "carA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-specific small-subunit domain profile; check CarB separately. Also participates in pyrimidine metabolism."
+    },
+    "TIGR01369.1": {
+      "target": "carB",
+      "components": [
+        "carB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes a function-specific domain model and a full-family model; check CarA separately. Shared with pyrimidine metabolism."
+    },
+    "NF003671.0": {
+      "target": "carB",
+      "components": [
+        "carB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes a function-specific domain model and a full-family model; check CarA separately. Shared with pyrimidine metabolism."
+    },
+    "TIGR01890.1": {
+      "target": "argA",
+      "components": [
+        "argA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Model taxonomic range is Pseudomonadati; alternative acetylglutamate synthases and arginine routes are not exhaustively covered."
+    },
+    "TIGR00761.1": {
+      "target": "argB",
+      "components": [
+        "argB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01850.1": {
+      "target": "argC",
+      "components": [
+        "argC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01851.1": {
+      "target": "argC",
+      "components": [
+        "argC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF002797.0": {
+      "target": "argD",
+      "components": [
+        "argD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF002797 is a bacterial acetylornithine transaminase model. Related ArgD/AstC activities may overlap; inspect context. The broader TIGR00707 model is context-only."
+    },
+    "TIGR00707.1": {
+      "target": "argD",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF002797 is a bacterial acetylornithine transaminase model. Related ArgD/AstC activities may overlap; inspect context. The broader TIGR00707 model is context-only."
+    },
+    "TIGR01892.1": {
+      "target": "argE",
+      "components": [
+        "argE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00658.1": {
+      "target": "argF",
+      "components": [
+        "argF"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Ornithine carbamoyltransferase family evidence need not uniquely distinguish argF from equivalent argI naming or all anabolic/catabolic homologs; inspect context and sequence."
+    },
+    "TIGR00032.1": {
+      "target": "argG",
+      "components": [
+        "argG"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00838.1": {
+      "target": "argH",
+      "components": [
+        "argH"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00674.1": {
+      "target": "dapA",
+      "components": [
+        "dapA"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00036.1": {
+      "target": "dapB",
+      "components": [
+        "dapB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR02130.1": {
+      "target": "dapB",
+      "components": [
+        "dapB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00965.1": {
+      "target": "dapD",
+      "components": [
+        "dapD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Selected N-succinyltransferase models. The N-acetyltransferase model TIGR03532 uses the same symbol but represents a different route and was excluded from the main panel."
+    },
+    "TIGR03535.1": {
+      "target": "dapD",
+      "components": [
+        "dapD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Selected N-succinyltransferase models. The N-acetyltransferase model TIGR03532 uses the same symbol but represents a different route and was excluded from the main panel."
+    },
+    "TIGR03536.1": {
+      "target": "dapD",
+      "components": [
+        "dapD"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Selected N-succinyltransferase models. The N-acetyltransferase model TIGR03532 uses the same symbol but represents a different route and was excluded from the main panel."
+    },
+    "TIGR01246.1": {
+      "target": "dapE",
+      "components": [
+        "dapE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR01900.1": {
+      "target": "dapE",
+      "components": [
+        "dapE"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00652.1": {
+      "target": "dapF",
+      "components": [
+        "dapF"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Diaminopimelate epimerase is also relevant to peptidoglycan; presence alone does not establish lysine synthesis."
+    },
+    "NF006570.0": {
+      "target": "lysC",
+      "components": [
+        "aspartokinase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF006570 is lysine-sensitive aspartokinase 3; TIGR00656 covers monofunctional aspartate kinases more generally. Unrelated lysis-system LysC models were excluded."
+    },
+    "TIGR00656.1": {
+      "target": "lysC",
+      "components": [
+        "aspartokinase"
+      ],
+      "target_call": "shared_family",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "NF006570 is lysine-sensitive aspartokinase 3; TIGR00656 covers monofunctional aspartate kinases more generally. Unrelated lysis-system LysC models were excluded."
+    },
+    "TIGR00978.1": {
+      "target": "asd",
+      "components": [
+        "asd"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Aspartate-semialdehyde dehydrogenase. An unrelated archaetidylserine decarboxylase model also uses asd and was excluded."
+    },
+    "TIGR01296.1": {
+      "target": "asd",
+      "components": [
+        "asd"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Aspartate-semialdehyde dehydrogenase. An unrelated archaetidylserine decarboxylase model also uses asd and was excluded."
+    },
+    "TIGR01745.1": {
+      "target": "asd",
+      "components": [
+        "asd"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Aspartate-semialdehyde dehydrogenase. An unrelated archaetidylserine decarboxylase model also uses asd and was excluded."
+    },
+    "NF006959.0": {
+      "target": "thrA",
+      "components": [
+        "aspartokinase",
+        "homoserine_dehydrogenase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "Bifunctional aspartate kinase/homoserine dehydrogenase model focused on Pseudomonadati. A negative result does not exclude a route using separate enzymes."
+    },
+    "TIGR00191.1": {
+      "target": "thrB",
+      "components": [
+        "thrB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00938.1": {
+      "target": "thrB",
+      "components": [
+        "thrB"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "TIGR00260.1": {
+      "target": "thrC",
+      "components": [
+        "thrC"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Function-directed profile; inspect cutoff, HMM coverage, protein integrity, and biological context before assigning a reaction."
+    },
+    "NF008865.0": {
+      "target": "pheA",
+      "components": [
+        "prephenate_dehydratase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes prephenate dehydratase and a bifunctional fusion model. TIGR01797 covers only the chorismate-mutase domain; that domain alone does not establish dehydratase activity."
+    },
+    "NF007910.0": {
+      "target": "pheA",
+      "components": [
+        "prephenate_dehydratase",
+        "chorismate_mutase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "Includes prephenate dehydratase and a bifunctional fusion model. TIGR01797 covers only the chorismate-mutase domain; that domain alone does not establish dehydratase activity."
+    },
+    "TIGR01797.1": {
+      "target": "pheA",
+      "components": [
+        "chorismate_mutase"
+      ],
+      "target_call": "domain_only",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes prephenate dehydratase and a bifunctional fusion model. TIGR01797 covers only the chorismate-mutase domain; that domain alone does not establish dehydratase activity."
+    },
+    "NF006409.0": {
+      "target": "tyrA",
+      "components": [
+        "prephenate_dehydrogenase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes prephenate dehydrogenase and a bifunctional fusion model. TIGR01799 covers only the chorismate-mutase domain; that domain alone does not establish dehydrogenase activity."
+    },
+    "NF008400.0": {
+      "target": "tyrA",
+      "components": [
+        "prephenate_dehydrogenase",
+        "chorismate_mutase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.85,
+      "notes": "Includes prephenate dehydrogenase and a bifunctional fusion model. TIGR01799 covers only the chorismate-mutase domain; that domain alone does not establish dehydrogenase activity."
+    },
+    "TIGR01799.1": {
+      "target": "tyrA",
+      "components": [
+        "chorismate_mutase"
+      ],
+      "target_call": "domain_only",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Includes prephenate dehydrogenase and a bifunctional fusion model. TIGR01799 covers only the chorismate-mutase domain; that domain alone does not establish dehydrogenase activity."
+    },
+    "NF006719.0": {
+      "target": "AAT",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "Unresolved acronym in the figure. It may denote an aspartate/aromatic amino-acid aminotransferase; organism, accession, and intended reaction are not specified. NF006719 is an aromatic amino acid transaminase subfamily profile cross-referenced by human and Drosophila aspartate aminotransferases; despite these cross-references, NCBI metadata lists Bacteria as its curated taxonomic range. NF006228 is an additional aspartate aminotransferase family candidate. PF00155 is a broad class I/II aminotransferase domain profile. All three are context-only candidates, NOT definitive calls of the unspecified host AAT. The unrelated bacterial aat tRNA-protein transferase was excluded."
+    },
+    "NF006228.0": {
+      "target": "AAT",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "Unresolved acronym in the figure. It may denote an aspartate/aromatic amino-acid aminotransferase; organism, accession, and intended reaction are not specified. NF006719 is an aromatic amino acid transaminase subfamily profile cross-referenced by human and Drosophila aspartate aminotransferases; despite these cross-references, NCBI metadata lists Bacteria as its curated taxonomic range. NF006228 is an additional aspartate aminotransferase family candidate. PF00155 is a broad class I/II aminotransferase domain profile. All three are context-only candidates, NOT definitive calls of the unspecified host AAT. The unrelated bacterial aat tRNA-protein transferase was excluded."
+    },
+    "PF00155.28": {
+      "target": "AAT",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "Unresolved acronym in the figure. It may denote an aspartate/aromatic amino-acid aminotransferase; organism, accession, and intended reaction are not specified. NF006719 is an aromatic amino acid transaminase subfamily profile cross-referenced by human and Drosophila aspartate aminotransferases; despite these cross-references, NCBI metadata lists Bacteria as its curated taxonomic range. NF006228 is an additional aspartate aminotransferase family candidate. PF00155 is a broad class I/II aminotransferase domain profile. All three are context-only candidates, NOT definitive calls of the unspecified host AAT. The unrelated bacterial aat tRNA-protein transferase was excluded."
+    },
+    "TIGR01885.1": {
+      "target": "OAT",
+      "components": [
+        "ornithine_aminotransferase"
+      ],
+      "target_call": "specific",
+      "context_only": false,
+      "min_hmm_coverage": 0.0,
+      "notes": "Host ornithine aminotransferase, EC 2.6.1.13, from panel (b). TIGR01885 includes bacterial and eukaryotic sequences and is cross-referenced by reviewed insect OAT entries. PF00202 is only a broad supporting class-III aminotransferase domain."
+    },
+    "PF00202.28": {
+      "target": "OAT",
+      "components": [],
+      "target_call": "candidate",
+      "context_only": true,
+      "min_hmm_coverage": 0.0,
+      "notes": "Host ornithine aminotransferase, EC 2.6.1.13, from panel (b). TIGR01885 includes bacterial and eukaryotic sequences and is cross-referenced by reviewed insect OAT entries. PF00202 is only a broad supporting class-III aminotransferase domain."
+    }
+  },
+  "pathways": [
+    {
+      "id": "tryptophan",
+      "label": "tryptophan",
+      "scored_components": [
+        "trpE",
+        "trpG",
+        "trpC",
+        "trpB",
+        "trpA"
+      ],
+      "route_components": [
+        "trpE",
+        "trpG",
+        "trpD_activity",
+        "trpF_activity",
+        "trpC",
+        "trpB",
+        "trpA"
+      ],
+      "extra_components": [
+        "glyA"
+      ],
+      "target_genes": [
+        "trpA",
+        "trpB",
+        "trpC",
+        "trpC",
+        "trpE",
+        "trpG",
+        "glyA"
+      ],
+      "notes": "Chorismate to tryptophan. TrpD/TrpF are assayed only in selected fusions. GlyA is shared precursor metabolism, not a required tryptophan enzyme.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "cysteine",
+      "label": "cysteine",
+      "scored_components": [
+        "cysE",
+        "cysK"
+      ],
+      "route_components": [
+        "cysE",
+        "cysK"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "cysE",
+        "cysK",
+        "cysK"
+      ],
+      "notes": "Serine plus reduced sulfur to cysteine; upstream sulfate reduction is outside scope.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "histidine",
+      "label": "histidine",
+      "scored_components": [
+        "hisG",
+        "hisE",
+        "hisA",
+        "hisF",
+        "hisH",
+        "hisB_dehydratase",
+        "hisB_phosphatase",
+        "hisD"
+      ],
+      "route_components": [
+        "hisG",
+        "hisE",
+        "hisI_activity",
+        "hisA",
+        "hisF",
+        "hisH",
+        "hisB_dehydratase",
+        "hisC_activity",
+        "hisB_phosphatase",
+        "hisD"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "hisA",
+        "hisA",
+        "hisB",
+        "hisD",
+        "hisE",
+        "hisF",
+        "hisG",
+        "hisH"
+      ],
+      "notes": "",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "valine_isoleucine",
+      "label": "valine isoleucine",
+      "scored_components": [
+        "acetolactate_synthase_large",
+        "acetolactate_synthase_small",
+        "ilvC",
+        "ilvD",
+        "ilvE"
+      ],
+      "route_components": [
+        "acetolactate_synthase_large",
+        "acetolactate_synthase_small",
+        "ilvC",
+        "ilvD",
+        "ilvE",
+        "ilvA_activity"
+      ],
+      "extra_components": [
+        "ilvY"
+      ],
+      "target_genes": [
+        "ilvB",
+        "ilvG",
+        "ilvE",
+        "ilvY",
+        "ilvC",
+        "ilvD",
+        "ilvN"
+      ],
+      "notes": "Shared branched-chain amino-acid core. Isoleucine entry via IlvA is unassayed. Broad ALS models do not distinguish all isozymes; small subunit requirement is route-specific.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "riboflavin",
+      "label": "riboflavin",
+      "scored_components": [
+        "ribA",
+        "ribB",
+        "ribD",
+        "ribH",
+        "ribC"
+      ],
+      "route_components": [
+        "ribA",
+        "ribB",
+        "ribD",
+        "ribH",
+        "ribC"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "ribA",
+        "ribB",
+        "ribD",
+        "ribC",
+        "ribH"
+      ],
+      "notes": "Bacterial-type route from GTP and ribulose-5-phosphate. RibD is bifunctional; conservative coverage is required for its fusion model.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "biotin",
+      "label": "biotin",
+      "scored_components": [
+        "bioC",
+        "bioF",
+        "bioA",
+        "bioD",
+        "bioB"
+      ],
+      "route_components": [
+        "bioC",
+        "bioH_activity",
+        "bioF",
+        "bioA",
+        "bioD",
+        "bioB"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "bioA",
+        "bioB",
+        "bioC",
+        "bioD",
+        "bioF"
+      ],
+      "notes": "BioC-dependent route with central fatty-acid synthesis assumed. BioH is unassayed; other pimelate supply routes are outside scope.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "chorismate",
+      "label": "chorismate",
+      "scored_components": [
+        "DAHP_synthase",
+        "aroB",
+        "aroQ",
+        "aroE",
+        "shikimate_kinase",
+        "aroA",
+        "aroC"
+      ],
+      "route_components": [
+        "DAHP_synthase",
+        "aroB",
+        "aroQ",
+        "aroE",
+        "shikimate_kinase",
+        "aroA",
+        "aroC"
+      ],
+      "extra_components": [
+        "tyrR"
+      ],
+      "target_genes": [
+        "aroA",
+        "aroB",
+        "aroC",
+        "aroE",
+        "aroH",
+        "aroL",
+        "aroQ",
+        "tyrR"
+      ],
+      "notes": "PEP/erythrose-4-phosphate to chorismate. AroQ is interpreted as type-II dehydroquinase; type-I AroD is not assayed. Broad DAHP/shikimate kinase evidence does not establish a specific isozyme name.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "methionine",
+      "label": "methionine",
+      "scored_components": [
+        "metA",
+        "metB",
+        "metC",
+        "metE",
+        "metF"
+      ],
+      "route_components": [
+        "metA",
+        "metB",
+        "metC",
+        "metE",
+        "metF"
+      ],
+      "extra_components": [
+        "metR"
+      ],
+      "target_genes": [
+        "metA",
+        "metB",
+        "metC",
+        "metE",
+        "metF",
+        "metR"
+      ],
+      "notes": "Selected transsulfuration/cobalamin-independent route. MetH and other sulfur assimilation routes are outside scope. Different MetA activation reactions are retained in hit metadata.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "arginine",
+      "label": "arginine",
+      "scored_components": [
+        "argA",
+        "argB",
+        "argC",
+        "argD",
+        "argE",
+        "carA",
+        "carB",
+        "argF",
+        "argG",
+        "argH"
+      ],
+      "route_components": [
+        "argA",
+        "argB",
+        "argC",
+        "argD",
+        "argE",
+        "carA",
+        "carB",
+        "argF",
+        "argG",
+        "argH"
+      ],
+      "extra_components": [
+        "ornithine_aminotransferase"
+      ],
+      "target_genes": [
+        "carA",
+        "carB",
+        "argA",
+        "argB",
+        "argC",
+        "argD",
+        "argE",
+        "argF",
+        "argG",
+        "argH",
+        "OAT"
+      ],
+      "notes": "Conventional acetylated glutamate-to-arginine route. ArgJ alternatives are outside scope; OAT supports only the separate nonacetylated ornithine reaction and cannot substitute for ArgD.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "lysine",
+      "label": "lysine",
+      "scored_components": [
+        "aspartokinase",
+        "asd",
+        "dapA",
+        "dapB",
+        "dapD",
+        "dapE",
+        "dapF"
+      ],
+      "route_components": [
+        "aspartokinase",
+        "asd",
+        "dapA",
+        "dapB",
+        "dapD",
+        "dapC_activity",
+        "dapE",
+        "dapF",
+        "lysA_activity"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "lysC",
+        "asd",
+        "dapA",
+        "dapB",
+        "dapD",
+        "dapE",
+        "dapF"
+      ],
+      "notes": "Selected succinylated diaminopimelate route from aspartate. DapC and LysA are unassayed. DAP enzymes also support peptidoglycan and do not alone establish lysine production.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "threonine",
+      "label": "threonine",
+      "scored_components": [
+        "aspartokinase",
+        "asd",
+        "homoserine_dehydrogenase",
+        "thrB",
+        "thrC"
+      ],
+      "route_components": [
+        "aspartokinase",
+        "asd",
+        "homoserine_dehydrogenase",
+        "thrB",
+        "thrC"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "lysC",
+        "asd",
+        "thrA",
+        "thrB",
+        "thrC"
+      ],
+      "notes": "Aspartate to threonine. ThrA supplies two activities without double counting copies. Standalone homoserine dehydrogenases are not comprehensively assayed.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "phenylalanine",
+      "label": "phenylalanine",
+      "scored_components": [
+        "chorismate_mutase",
+        "prephenate_dehydratase"
+      ],
+      "route_components": [
+        "chorismate_mutase",
+        "prephenate_dehydratase",
+        "aromatic_aminotransferase_activity"
+      ],
+      "extra_components": [
+        "prephenate_dehydrogenase",
+        "AAT"
+      ],
+      "target_genes": [
+        "pheA",
+        "tyrA",
+        "AAT"
+      ],
+      "notes": "Chorismate to phenylalanine. TyrA dehydrogenase is a tyrosine-branch enzyme, not a phenylalanine biosynthetic step. AAT remains unassayed; CM domains do not establish the PheA/TyrA second activity.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    },
+    {
+      "id": "ornithine_aminotransferase_step",
+      "label": "ornithine aminotransferase step",
+      "scored_components": [
+        "ornithine_aminotransferase"
+      ],
+      "route_components": [
+        "ornithine_aminotransferase"
+      ],
+      "extra_components": [],
+      "target_genes": [
+        "OAT"
+      ],
+      "notes": "One nonacetylated ornithine transamination reaction, not a complete ornithine pathway. A bin hit does not identify its taxonomic source as the insect host.",
+      "route_scope": "Selected conventional reactions between stated pathway substrates and products; alternative routes are not exhaustive."
+    }
+  ],
+  "operon_templates": [
+    {
+      "id": "trpEDCBA_projected",
+      "pathway": "tryptophan",
+      "reference_taxon": "Escherichia coli; reference pattern only",
+      "slots": [
+        [
+          "trpE"
+        ],
+        [
+          "trpG"
+        ],
+        [
+          "trpC"
+        ],
+        [
+          "trpB"
+        ],
+        [
+          "trpA"
+        ]
+      ],
+      "min_slots": 2,
+      "min_fraction": 0.5,
+      "max_missing": 2,
+      "source_url": "https://rnajournal.cshlp.org/content/13/8/1141.full.pdf",
+      "notes": "Projected trpE-(trpG/TrpD fusion)-(TrpC/TrpF fusion)-trpB-trpA. Standalone trpD/trpF are not independently assayed."
+    },
+    {
+      "id": "hisGDCBHAFI_projected",
+      "pathway": "histidine",
+      "reference_taxon": "Escherichia coli; reference pattern only",
+      "slots": [
+        [
+          "hisG"
+        ],
+        [
+          "hisD"
+        ],
+        [
+          "hisB_dehydratase",
+          "hisB_phosphatase"
+        ],
+        [
+          "hisH"
+        ],
+        [
+          "hisA"
+        ],
+        [
+          "hisF"
+        ],
+        [
+          "hisE"
+        ]
+      ],
+      "min_slots": 2,
+      "min_fraction": 0.5,
+      "max_missing": 2,
+      "source_url": "https://doi.org/10.1128/ecosalplus.3.6.1.9",
+      "notes": "Projection onto assayed components; hisC is omitted and hisE activity may lie in terminal HisIE. A HisB slot match is not proof of both HisB activities."
+    },
+    {
+      "id": "ilvGMEDA_projected",
+      "pathway": "valine_isoleucine",
+      "reference_taxon": "Escherichia coli; reference pattern only",
+      "slots": [
+        [
+          "acetolactate_synthase_large"
+        ],
+        [
+          "ilvE"
+        ],
+        [
+          "ilvD"
+        ]
+      ],
+      "min_slots": 2,
+      "min_fraction": 0.5,
+      "max_missing": 2,
+      "source_url": "https://pubmed.ncbi.nlm.nih.gov/3550695/",
+      "notes": "Only the large-subunit/E/D projection is assayed; this is not identification of every ilvGMEDA gene or of the IlvG isozyme."
+    },
+    {
+      "id": "argCBH",
+      "pathway": "arginine",
+      "reference_taxon": "Escherichia coli; reference pattern only",
+      "slots": [
+        [
+          "argC"
+        ],
+        [
+          "argB"
+        ],
+        [
+          "argH"
+        ]
+      ],
+      "min_slots": 2,
+      "min_fraction": 0.5,
+      "max_missing": 2,
+      "source_url": "https://pubmed.ncbi.nlm.nih.gov/6761650/",
+      "notes": "The argCBH transcription unit; divergent argE is not required to share its strand."
+    },
+    {
+      "id": "carAB",
+      "pathway": "arginine",
+      "reference_taxon": "Escherichia coli; reference pattern only",
+      "slots": [
+        [
+          "carA"
+        ],
+        [
+          "carB"
+        ]
+      ],
+      "min_slots": 2,
+      "min_fraction": 0.5,
+      "max_missing": 2,
+      "source_url": "https://pubmed.ncbi.nlm.nih.gov/6330744/",
+      "notes": "Shared carbamoyl-phosphate synthase subunits also serve pyrimidine metabolism."
+    },
+    {
+      "id": "thrABC",
+      "pathway": "threonine",
+      "reference_taxon": "Escherichia coli; reference pattern only",
+      "slots": [
+        [
+          "homoserine_dehydrogenase"
+        ],
+        [
+          "thrB"
+        ],
+        [
+          "thrC"
+        ]
+      ],
+      "min_slots": 2,
+      "min_fraction": 0.5,
+      "max_missing": 2,
+      "source_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC1885841/",
+      "notes": "ThrA locus is represented by its homoserine dehydrogenase activity. Alternative split arrangements are allowed as evidence but differ from this reference template."
+    }
+  ]
+}

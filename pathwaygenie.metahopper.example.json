@@ -1,0 +1,6 @@
+{
+  "pathwaygenie_env": "pathwaygenie",
+  "pathwaygenie_hmm_dir": "/home/ark/MAB/bin/PathwayGenie/Pathway_Gene_HMMs",
+  "pathwaygenie_config": "/home/ark/MAB/bin/PathwayGenie/pathwaygenie_config.json",
+  "pathwaygenie_args": []
+}

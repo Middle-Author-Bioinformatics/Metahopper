@@ -532,3 +532,4 @@ def metrics(path, depths, calls, tax):
                 taxonomy=tax.names.get(tid,'unclassified'), category=tax.category(tid),
                 classified_bp_fraction=informative/total if total else 0.,
                 tax_support=weighted[tid]/informative if informative and tid else 0.,lengths=lengths)
+

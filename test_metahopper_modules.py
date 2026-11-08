@@ -212,7 +212,9 @@ class AnnotationTests(unittest.TestCase):
     def test_annotation_report_has_real_results_and_no_fake_specialist_scores(self):
         self.run_annotation()
         html=report.render_annotation(report.RunLayout(self.root,'final'))
-        self.assertIn('GenBank',html);self.assertIn('Specialized pathway, BGC',html)
+        self.assertIn('GenBank',html)
+        self.assertIn('id="annotation-pathways-tab"',html)
+        self.assertIn('No PathwayGenie results found',html)
         self.assertNotIn('virulence factors: 0',html)
 
 
@@ -280,4 +282,5 @@ class ReportTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
 

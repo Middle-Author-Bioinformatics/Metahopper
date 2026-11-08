@@ -69,6 +69,7 @@ from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
 from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, render_annotation_figures
+from metahopper_pathway_view import collect_pathways, render_pathways, render_annotation_sections
 from datetime import datetime
 from pathlib import Path
 
@@ -1731,10 +1732,10 @@ def collect_annotation_rows(layout):
             for row in read_tsv(path)]
 
 
-def render_annotation(layout, rows=None):
+def render_bakta_annotation(layout, rows=None):
     rows = collect_annotation_rows(layout) if rows is None else rows
     out = ['<div class="card"><h2>Per-bin Bakta annotation</h2>']
-    out.append('<p>One selected rank is annotated. Original contig IDs are preserved. These are taxonomic bins and may contain multiple genomes. Specialized pathway, BGC and virulence-screening modules have not been run.</p>')
+    out.append('<p>One selected rank is annotated. Original contig IDs are preserved. These are taxonomic bins and may contain multiple genomes. HMM pathway evidence is shown under Pathways when available. Dedicated BGC and virulence screening are separate analyses.</p>')
     if not rows:
         out.append('<p class="note">No Bakta annotation summary found. Run metahopper_annotate.py on this run directory, then regenerate the report.</p></div>')
         return ''.join(out)
@@ -1762,7 +1763,21 @@ def render_annotation(layout, rows=None):
     return ''.join(out)
 
 
+def render_annotation(layout, rows=None):
+    rows = collect_annotation_rows(layout) if rows is None else rows
+    data, error = None, ''
+    try:
+        data = collect_pathways(layout, getattr(layout, 'pathways_rank', 'genus'), getattr(layout, 'pathways_dir', None))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        error = 'PathwayGenie results could not be loaded: ' + str(exc)
+    return render_annotation_sections(render_bakta_annotation(layout, rows), render_pathways(data, error),
+                                      'genes' if rows else 'pathways' if data else 'genes')
+
+
 def build_report(layout: RunLayout, args) -> str:
+    layout.pathways_rank = getattr(args, 'pathways_rank', 'genus')
+    directory = getattr(args, 'pathways_dir', None)
+    layout.pathways_dir = (directory if directory.is_absolute() else layout.root / directory) if directory is not None else None
     annotation_rows = collect_annotation_rows(layout)
     annotation_keys = {(row.get('rank'), row.get('bin')) for row in annotation_rows if row.get('status') == 'completed'}
     bin_rows = collect_bins(layout, compute_missing=not args.no_fasta_stats)
@@ -1826,6 +1841,8 @@ def parse_args():
     p.add_argument('--graph', type=Path, action='append', default=[], help='Additional GFA1 for preliminary contigs')
     p.add_argument('--graph-max-nodes', type=int, default=4000000, help='Maximum segments per input source graph; large graphs use complete two-link display neighbourhoods')
     p.add_argument('--skip-graphs', action='store_true', help='Omit automatic graph discovery; the viewer can load a catalogue JSON')
+    p.add_argument('--pathways-rank', default='genus', help='Rank used by PathwayGenie (default genus)')
+    p.add_argument('--pathways-dir', type=Path, help='PathwayGenie output folder inside this sample; relative paths are sample-relative')
     p.add_argument("--no-fasta-stats", action="store_true",
                    help="Do not fall back to reading bin FASTAs when a rank has no "
                         "summary.tsv (faster on very large runs).")
