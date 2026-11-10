@@ -1,0 +1,28 @@
+    Release number/name: hmm_PGAP/20.0
+    Date on which the release was initiated: Tue Jun 23 20:27:14 EDT 2026
+    Number of models: 18950
+
+    
+    Count of 
+        New models: 497
+        Deprecated models: 58
+    For models that are persisting, count of models with
+        Updated seeds: 24
+        Updated cut-offs: 35
+        Added/updated names: 51
+        EC numbers:
+            Added: 9
+            Deleted: 0
+            Updated: 2
+        GO terms:
+            Added: 36
+            Deleted: 5
+            Updated: 325
+        PMID(s):
+            Added: 65
+            Deleted: 0
+            Updated: 54
+        gene symbol(s):
+            Added: 22
+            Deleted: 0
+            Updated: 3

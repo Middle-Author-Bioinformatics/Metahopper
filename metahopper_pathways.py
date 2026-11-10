@@ -5,6 +5,8 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -49,17 +51,18 @@ def runtime_config(config, threads=16, jobs=3):
     if threads < 1 or not 1 <= jobs <= threads:
         raise ValueError('PathwayGenie requires 1 <= jobs <= threads')
     script = Path(config.get('pathwaygenie_script') or HERE / 'pathwaygenie/PathwayGenie.py').expanduser().resolve()
-    hmm = Path(config.get('pathwaygenie_hmm_dir') or '').expanduser().resolve()
-    rules = Path(config.get('pathwaygenie_config') or HERE / 'pathwaygenie/pathwaygenie_config.json').expanduser().resolve()
+    hmm = Path(config.get('pathwaygenie_hmm_dir') or script.parent / 'Pathway_Gene_HMMs').expanduser().resolve()
+    rules = Path(config.get('pathwaygenie_config') or script.parent / 'pathwaygenie_config.json').expanduser().resolve()
     if not script.is_file():
         raise ValueError('PathwayGenie script not found: ' + str(script))
-    if not config.get('pathwaygenie_hmm_dir') or not (hmm / 'download_manifest.json').is_file():
-        raise ValueError('Set pathwaygenie_hmm_dir to the existing Pathway_Gene_HMMs directory (including download_manifest.json)')
+    if not (hmm / 'download_manifest.json').is_file():
+        raise ValueError('PathwayGenie HMM panel is incomplete: expected ' + str(hmm / 'download_manifest.json')
+                         + '. Copy the complete MetaHopper/pathwaygenie directory from the update.')
     if not rules.is_file():
         raise ValueError('PathwayGenie pathway configuration not found: ' + str(rules))
     prefix = config.get('tools', {}).get('pathwaygenie')
     if prefix is None:
-        env = config.get('pathwaygenie_env', 'pathwaygenie')
+        env = config.get('pathwaygenie_env')
         prefix = ['conda', 'run', '--no-capture-output', '-n', env, 'python', str(script)] if env else [sys.executable, str(script)]
     if not isinstance(prefix, list) or not prefix or not all(isinstance(x, str) and x for x in prefix):
         raise ValueError('tools.pathwaygenie must be a complete executable/script prefix array')
@@ -73,8 +76,29 @@ def runtime_config(config, threads=16, jobs=3):
     return prefix, hmm, rules, extra
 
 
+def validate_panel(script, hmm, rules, extra=()):
+    """Validate the actual bundled profiles, their provenance and search libraries."""
+    name = '_metahopper_pathwaygenie_' + hashlib.sha256(str(script).encode()).hexdigest()[:16]
+    spec = importlib.util.spec_from_file_location(name, script)
+    if spec is None or spec.loader is None:
+        raise ValueError('Cannot load the bundled PathwayGenie panel validator: ' + str(script))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        configuration = json.loads(rules.read_text())
+        module.validate_config(configuration)
+        models, _, libraries, manifest = module.load_panel(hmm, configuration, '--skip-context' not in extra)
+    except (OSError, KeyError, AttributeError, ValueError) as exc:
+        raise ValueError('PathwayGenie HMM panel validation failed: ' + str(exc)) from exc
+    return dict(profiles=len(models), libraries=len(libraries), panel_profiles=len(manifest['models']),
+                hmm_dir=str(hmm), config=str(rules), script=str(script))
+
+
 def preflight_runtime(config, threads=16, jobs=3):
     prefix, hmm, rules, extra = runtime_config(config, threads, jobs)
+    script = Path(config.get('pathwaygenie_script') or HERE / 'pathwaygenie/PathwayGenie.py').expanduser().resolve()
+    validate_panel(script, hmm, rules, extra)
     try:
         subprocess.run(prefix + ['--version'], text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, timeout=60, check=True)
@@ -217,8 +241,8 @@ def import_results(root, source, rank='genus', stage='final', force=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['run', 'import'])
-    parser.add_argument('-i', '--input', type=Path, required=True, help='MetaHopper sample run directory')
+    parser.add_argument('action', choices=['run', 'import', 'check'])
+    parser.add_argument('-i', '--input', type=Path, help='MetaHopper sample run directory (required for run/import)')
     parser.add_argument('-c', '--config', type=Path, help='MetaHopper config.json (optional for standalone runs)')
     parser.add_argument('--rank', default='genus')
     parser.add_argument('--bin-set', choices=['final', 'preliminary'], default='final')
@@ -226,11 +250,16 @@ def main(argv=None):
     parser.add_argument('--pathwaygenie-dir', type=Path, help='Existing installation with PathwayGenie.py, rules and Pathway_Gene_HMMs')
     parser.add_argument('--hmm-dir', type=Path)
     parser.add_argument('--pathway-config', type=Path)
-    parser.add_argument('--conda-env', help='Environment containing PathwayGenie dependencies; default pathwaygenie')
+    parser.add_argument('--conda-env', help='Optional separate environment; omitted uses the active Python environment')
+    parser.add_argument('--panel-only', action='store_true', help='With check: validate bundled HMMs/rules without checking external tools')
     parser.add_argument('-t', '--threads', type=int, default=16)
     parser.add_argument('-j', '--jobs', type=int, default=3)
     parser.add_argument('--force-overwrite', action='store_true', help='Run: rerun external stages. Import: retain a backup and replace existing results.')
     args = parser.parse_args(argv)
+    if args.action != 'check' and args.input is None:
+        parser.error('run/import requires -i pointing to a MetaHopper sample directory')
+    if args.panel_only and args.action != 'check':
+        parser.error('--panel-only is only valid with check')
     try:
         if args.action == 'import':
             if args.results_dir is None:
@@ -250,6 +279,17 @@ def main(argv=None):
             config['pathwaygenie_config'] = str(args.pathway_config.expanduser().resolve())
         if args.conda_env is not None:
             config['pathwaygenie_env'] = args.conda_env
+        if args.action == 'check':
+            prefix, hmm, rules, extra = runtime_config(config, args.threads, args.jobs)
+            script = Path(config.get('pathwaygenie_script') or HERE / 'pathwaygenie/PathwayGenie.py').expanduser().resolve()
+            info = validate_panel(script, hmm, rules, extra)
+            print(str(info['profiles']) + ' HMM profiles in ' + str(info['libraries']) + ' libraries: metadata, model bodies and checksums verified.')
+            print('HMM directory: ' + str(hmm))
+            print('Python/launcher: ' + ' '.join(prefix))
+            if not args.panel_only:
+                preflight_runtime(config, args.threads, args.jobs)
+                print('PathwayGenie, Prodigal and HMMER checks passed in the selected environment.')
+            return 0
         result = run_pathways(args.input, config, args.rank, args.bin_set, args.threads, args.jobs, args.force_overwrite)
         return 1 if result['status'] != 'completed' else 0
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:

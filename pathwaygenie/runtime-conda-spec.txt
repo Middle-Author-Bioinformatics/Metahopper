@@ -1,0 +1,5 @@
+# Executable dependencies for the bundled MetaHopper PathwayGenie module.
+# Install into the existing MetaHopper environment; no separate env is required.
+# Versions match the supplied successful PathwayGenie run manifest.
+prodigal=2.6.3
+hmmer=3.4

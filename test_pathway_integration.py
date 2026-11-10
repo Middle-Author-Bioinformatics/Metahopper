@@ -127,7 +127,7 @@ class PathwayTests(unittest.TestCase):
     def test_preflight_checks_the_selected_python_environment_before_heavy_steps(self):
         hmm=Path(self.tmp.name)/'HMMs';hmm.mkdir();(hmm/'download_manifest.json').write_text('{}')
         config=dict(pathwaygenie_hmm_dir=str(hmm),pathwaygenie_env='')
-        with patch.object(backend.subprocess,'run',return_value=__import__('subprocess').CompletedProcess([],0,stdout='OK')) as run:
+        with patch.object(backend,'validate_panel',return_value={}),patch.object(backend.subprocess,'run',return_value=__import__('subprocess').CompletedProcess([],0,stdout='OK')) as run:
             backend.preflight_runtime(config,threads=4,jobs=2)
         self.assertEqual(run.call_count,2)
         self.assertIn('--version',run.call_args_list[0].args[0])
@@ -138,9 +138,37 @@ class PathwayTests(unittest.TestCase):
         hmm=Path(self.tmp.name)/'HMMs';hmm.mkdir();(hmm/'download_manifest.json').write_text('{}')
         config=dict(pathwaygenie_hmm_dir=str(hmm),pathwaygenie_env='')
         error=__import__('subprocess').CalledProcessError(1,['python'],output='Missing PathwayGenie tools: hmmsearch')
-        with patch.object(backend.subprocess,'run',side_effect=error):
+        with patch.object(backend,'validate_panel',return_value={}),patch.object(backend.subprocess,'run',side_effect=error):
             with self.assertRaisesRegex(ValueError,'environment/dependency.*hmmsearch'):
                 backend.preflight_runtime(config)
+
+    def test_default_install_uses_nested_resources_and_active_python(self):
+        home=Path(self.tmp.name)/'relocated-repo';nested=home/'pathwaygenie';nested.mkdir(parents=True)
+        (nested/'PathwayGenie.py').write_text('# fixture')
+        (nested/'pathwaygenie_config.json').write_text('{}')
+        hmm=nested/'Pathway_Gene_HMMs';hmm.mkdir();(hmm/'download_manifest.json').write_text('{}')
+        with patch.object(backend,'HERE',home):
+            prefix,found,rules,_=backend.runtime_config({},threads=4,jobs=2)
+        self.assertEqual(prefix,[sys.executable,str(nested/'PathwayGenie.py')])
+        self.assertEqual(found,hmm)
+        self.assertEqual(rules,nested/'pathwaygenie_config.json')
+        self.assertNotIn('conda',prefix)
+
+    def test_bundled_panel_has_114_verified_profiles_and_three_libraries(self):
+        prefix,hmm,rules,extra=backend.runtime_config({})
+        result=backend.validate_panel(Path(prefix[-1]),hmm,rules,extra)
+        self.assertEqual(result['profiles'],114)
+        self.assertEqual(result['panel_profiles'],114)
+        self.assertEqual(result['libraries'],3)
+
+    def test_corrupted_bundled_source_hmm_fails_integrity_check(self):
+        prefix,hmm,rules,_=backend.runtime_config({})
+        damaged=Path(self.tmp.name)/'damaged-panel';shutil.copytree(hmm,damaged)
+        manifest=json.loads((damaged/'download_manifest.json').read_text())
+        source=damaged/manifest['models'][0]['relative_file']
+        with source.open('ab') as handle:handle.write(b'\n# changed\n')
+        with self.assertRaisesRegex(ValueError,'checksum'):
+            backend.validate_panel(Path(prefix[-1]),damaged,rules)
 
     def test_permanent_report_contains_three_main_tabs_and_scoped_download_fix(self):
         args=__import__('argparse').Namespace(title=None,min_length=1000,max_points=100,include_uncoordinated=False,no_fasta_stats=False,skip_graphs=True)

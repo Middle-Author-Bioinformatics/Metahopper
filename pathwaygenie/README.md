@@ -8,14 +8,38 @@ The original 114-profile HMM collection and its metadata are included. No furthe
 
 ## Install and run
 
+When this folder is nested under **MetaHopper**, the script, rules and complete
+HMM panel stay together here. Use MetaHopper's existing environment; no separate
+checkout, environment or HMM download is needed:
+
+```bash
+conda run --no-capture-output -n metahopper-lean \
+  python ~/bin/MetaHopper/metahopper_pathways.py check
+
+conda run --no-capture-output -n metahopper-lean \
+  python ~/bin/MetaHopper/metahopper_pathways.py run \
+  -i /path/to/MetaHopper_sample --rank genus --bin-set final -t 24 -j 3
+```
+
+The wrapper resolves the script, `Pathway_Gene_HMMs/` and configuration relative
+to its own installation and uses the active Python. Its results are written to
+`final/pathways/genus/` and discovered automatically by the report generator.
+Add `--panel-only` to `check` to validate the resources without external tools.
+
 Requires Python 3.9+, Prodigal 2.6.x, and HMMER 3.x. For example:
 
 ```bash
-mamba create -n pathwaygenie -c conda-forge -c bioconda python=3.11 prodigal hmmer
-conda activate pathwaygenie
+mamba install -n metahopper-lean --override-channels \
+  -c conda-forge -c bioconda \
+  --file ~/bin/MetaHopper/pathwaygenie/runtime-conda-spec.txt
 ```
 
-From the extracted PathwayGenie directory:
+Install these executables only if missing. This adds them to the existing
+environment; no Python package is required by this module. The specification
+records the Prodigal 2.6.3/HMMER 3.4 versions used by the supplied successful run.
+
+To use the nested program directly on an arbitrary bin folder, run from this
+PathwayGenie directory:
 
 ```bash
 python PathwayGenie.py \

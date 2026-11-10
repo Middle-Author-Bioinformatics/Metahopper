@@ -1,0 +1,51 @@
+LICENSING TERMS for TIGRFAMs
+
+The original TIGRFAMs database was a research project of the J. Craig Venter Institute
+(JCVI) .  TIGRFAMs, short for The Institute for Genomic Research's database of protein
+families, is a collection of manually curated protein families focusing primarily on
+prokaryotic sequences. It consists of hidden Markov models (HMMs), multiple sequence
+alignments, Gene Ontology (GO) terminology, Enzyme Commission (EC) numbers, gene symbols,
+protein family names, descriptive text, cross-references to related models in TIGRFAMs
+and other databases, and pointers to the literature.  The work has been described in
+the four articles listed in the References section below, and use of the TIGRFAMs
+database must grant proper attribution by citing those articles.
+ 
+As of April 2018, rights were transferred to the National Center for Biotechnology
+Information (NCBI), National Library of Medicine, NIH, for the data to be made
+available for distribution under a Creative Commons Attribution-ShareAlike 4.0 license.
+Please see https://creativecommons.org/licenses/by-sa/4.0/ for a brief summary of the
+license and https://creativecommons.org/licenses/by-sa/4.0/legalcode to see the full text.
+
+
+REFERENCES for TIGRFAMs
+
+TIGRFAMs: a protein family resource for the functional identification of proteins.
+Haft DH, Loftus BJ, Richardson DL, Yang F, Eisen JA, Paulsen IT, White O.
+Nucleic Acids Res. 2001 Jan 1;29(1):41-3.  PMID:11125044
+
+The TIGRFAMs database of protein families.
+Haft DH, Selengut JD, White O.
+Nucleic Acids Res. 2003 Jan 1;31(1):371-3. PMID:12520025
+
+TIGRFAMs and Genome Properties: tools for the assignment of molecular function
+and biological process in prokaryotic genomes.  Selengut JD, Haft DH,
+Davidsen T, Ganapathy A, Gwinn-Giglio M, Nelson WC, Richter AR, White O.
+Nucleic Acids Res. 2007 Jan;35(Database issue):D260-4. Epub 2006 Dec 6 PMID:17151080
+
+TIGRFAMs and Genome Properties in 2013.  Haft DH, Selengut JD, Richter RA,
+Harkins D, Basu MK, Beck E.  Nucleic Acids Res. 2013 Jan;41(Database
+issue):D387-95. doi: 10.1093/nar/gks1234. Epub 2012 Nov 28.  PMID: 23197656
+
+
+DATA AVAILABILITY
+
+The TIGRFAMs files at ftp://ftp.ncbi.nlm.nih.gov/hmm/TIGRFAMs/release_15.0 are
+a verbatim copy of JCVI's release 15.0 of the TIGRFAMs (4488 families, September 16 2014),
+which remains available for now at ftp://ftp.jcvi.org/pub/data/TIGRFAMs/release_15.0/
+but is not guaranteed to persist there in the future. Subsequent releases of TIGRFAMs
+will be made available periodically by NCBI to reflect changes made by NCBI and any
+new models that may be provided by JCVI.  Those releases will appear at the location
+ftp://ftp.ncbi.nlm.nih.gov/hmm/TIGRFAMs/.
+
+Web pages for searching and browsing TIGRFAMs content will be provided at NCBI at a
+future date.

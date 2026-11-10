@@ -1,0 +1,12 @@
+Artifact integrity validation
+Python 3.12.14; pyhmmer 0.12.3
+
+context_ncbi.hmm: 6 profiles parsed, validated, and pressed; unique accession-based names.
+context_pfam.hmm: 2 profiles parsed, validated, and pressed; unique accession-based names.
+pathway_gene_models.hmm: 106 profiles parsed, validated, and pressed; unique accession-based names.
+All 114 individual profiles passed SHA-256, HMMER parsing, internal model validation, model length, and native TC/GA presence checks.
+Native individual HMMs were preserved. Only NAME fields were normalized in combined libraries.
+No empirical sensitivity, specificity, or pathway-completeness benchmark was performed.
+All 112 NCBI model trusted cutoff pairs matched source metadata.
+All local HTML links resolve; the catalog has 70 target rows.
+Downloader smoke test: downloaded TIGR00262.1 into an empty folder, verified SHA-256, and rebuilt its single-model library.

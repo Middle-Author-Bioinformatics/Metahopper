@@ -1,0 +1,2058 @@
+{
+  "created_date": "2026-11-06 America/New_York",
+  "ncbi_release": "20.0",
+  "models": [
+    {
+      "key": "TIGR00262",
+      "accession": "TIGR00262.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00262.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00262.1.hmm",
+      "original_name": "trpA",
+      "description": "JCVI: tryptophan synthase subunit alpha",
+      "length": 256,
+      "TC": "102.35 102.35",
+      "GA": "102.35 102.35",
+      "sha256": "27ee7cd723c2aaddb005a07d39e19215917688bfa0c283a102b4dddad704d6b3",
+      "bytes": 120175,
+      "targets": [
+        "trpA"
+      ]
+    },
+    {
+      "key": "TIGR00263",
+      "accession": "TIGR00263.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00263.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00263.1.hmm",
+      "original_name": "trpB",
+      "description": "JCVI: tryptophan synthase subunit beta",
+      "length": 385,
+      "TC": "392.45 392.45",
+      "GA": "392.45 392.45",
+      "sha256": "1dba3e09e46be9d6833f848da042b6358d9fbed20c08c8afeb2af77b063c4ddb",
+      "bytes": 180159,
+      "targets": [
+        "trpB"
+      ]
+    },
+    {
+      "key": "NF001369",
+      "accession": "NF001369.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF001369.0.HMM",
+      "relative_file": "hmms/ncbi/NF001369.0.hmm",
+      "original_name": "PRK00278.1-1",
+      "description": "NCBI Protein Cluster (PRK): indole-3-glycerol phosphate synthase TrpC",
+      "length": 271,
+      "TC": "329 329",
+      "GA": "329 329",
+      "sha256": "04c4fdd924d49931fc3da261b2b6786831cf108c04212f86b18435e96be5caef",
+      "bytes": 127169,
+      "targets": [
+        "trpC"
+      ]
+    },
+    {
+      "key": "NF001377",
+      "accession": "NF001377.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF001377.0.HMM",
+      "relative_file": "hmms/ncbi/NF001377.0.hmm",
+      "original_name": "PRK00278.2-4",
+      "description": "NCBI Protein Cluster (PRK): indole-3-glycerol phosphate synthase TrpC",
+      "length": 259,
+      "TC": "260 260",
+      "GA": "260 260",
+      "sha256": "e407a142b3ebbba25c66255fa3fb25a0c16732229ecc447ad251105e0ab94dca",
+      "bytes": 121590,
+      "targets": [
+        "trpC"
+      ]
+    },
+    {
+      "key": "NF006945",
+      "accession": "NF006945.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006945.0.HMM",
+      "relative_file": "hmms/ncbi/NF006945.0.hmm",
+      "original_name": "PRK09427.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional indole-3-glycerol-phosphate synthase TrpC/phosphoribosylanthranilate isomerase TrpF",
+      "length": 461,
+      "TC": "380 380",
+      "GA": "380 380",
+      "sha256": "d2a22ef76e113411d0149e9099c0b5a5c1ce9d0ff68be0160fa44a959f1ae9f9",
+      "bytes": 215574,
+      "targets": [
+        "trpC"
+      ]
+    },
+    {
+      "key": "TIGR00564",
+      "accession": "TIGR00564.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00564.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00564.1.hmm",
+      "original_name": "trpE_most",
+      "description": "JCVI: anthranilate synthase component I",
+      "length": 455,
+      "TC": "517.7 517.7",
+      "GA": "517.7 517.7",
+      "sha256": "9c6b17d8f198394ade38aa16b0d628324449fa24e8dcb5ee0ddd22891aa62a4e",
+      "bytes": 212710,
+      "targets": [
+        "trpE"
+      ]
+    },
+    {
+      "key": "TIGR00565",
+      "accession": "TIGR00565.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00565.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00565.1.hmm",
+      "original_name": "trpE_proteo",
+      "description": "JCVI: anthranilate synthase component I",
+      "length": 498,
+      "TC": "494.65 494.65",
+      "GA": "494.65 494.65",
+      "sha256": "5ba58ce728dc309dcbaae017c566fa232c913f235bf90364c4d157419cb13bde",
+      "bytes": 232710,
+      "targets": [
+        "trpE"
+      ]
+    },
+    {
+      "key": "TIGR01820",
+      "accession": "TIGR01820.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01820.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01820.1.hmm",
+      "original_name": "TrpE-arch",
+      "description": "JCVI: anthranilate synthase component I",
+      "length": 449,
+      "TC": "512.05 512.05",
+      "GA": "512.05 512.05",
+      "sha256": "ccd4926a730cc7af2480f2603b7ed5cdd86ae087926f59a4ffdb970f1ec689c5",
+      "bytes": 209924,
+      "targets": [
+        "trpE"
+      ]
+    },
+    {
+      "key": "NF005367",
+      "accession": "NF005367.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF005367.0.HMM",
+      "relative_file": "hmms/ncbi/NF005367.0.hmm",
+      "original_name": "PRK06895.1",
+      "description": "NCBI Protein Cluster (PRK): anthranilate synthase component II",
+      "length": 190,
+      "TC": "265 265",
+      "GA": "265 265",
+      "sha256": "eb6c778553a8bf1d6302a40724c34f731edb2192889ec0476cb22090246dc3f2",
+      "bytes": 89495,
+      "targets": [
+        "trpG"
+      ]
+    },
+    {
+      "key": "NF004169",
+      "accession": "NF004169.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF004169.0.HMM",
+      "relative_file": "hmms/ncbi/NF004169.0.hmm",
+      "original_name": "PRK05637.1",
+      "description": "NCBI Protein Cluster (PRK): anthranilate synthase component II",
+      "length": 210,
+      "TC": "332 332",
+      "GA": "332 332",
+      "sha256": "65af3241032c962baf382b856a6e082c748d17417790d03e1516e7727d46ed82",
+      "bytes": 98795,
+      "targets": [
+        "trpG"
+      ]
+    },
+    {
+      "key": "NF011201",
+      "accession": "NF011201.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF011201.0.HMM",
+      "relative_file": "hmms/ncbi/NF011201.0.hmm",
+      "original_name": "PRK14607.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional anthranilate synthase component II/anthranilate phosphoribosyltransferase",
+      "length": 534,
+      "TC": "670 670",
+      "GA": "670 670",
+      "sha256": "63f871e1a8e5b3e851047ab18693f1f9f7f69373e0a4c6d8d16b7ab33cc009fd",
+      "bytes": 249508,
+      "targets": [
+        "trpG"
+      ]
+    },
+    {
+      "key": "NF007073",
+      "accession": "NF007073.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF007073.0.HMM",
+      "relative_file": "hmms/ncbi/NF007073.0.hmm",
+      "original_name": "PRK09522.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional anthranilate synthase glutamate amidotransferase component TrpG/anthranilate phosphoribosyltransferase TrpD",
+      "length": 531,
+      "TC": "738 738",
+      "GA": "738 738",
+      "sha256": "035f9f1220986cb4367eed3c1de5838a7baf25d85b8626b32d826c8d492e4b4c",
+      "bytes": 248146,
+      "targets": [
+        "trpG"
+      ]
+    },
+    {
+      "key": "TIGR00566",
+      "accession": "TIGR00566.1",
+      "source_database": "TIGRFAM",
+      "group": "context_only",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00566.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00566.1.hmm",
+      "original_name": "trpG_papA",
+      "description": "JCVI: glutamine amidotransferase of anthranilate synthase or aminodeoxychorismate synthase",
+      "length": 192,
+      "TC": "121.05 121.05",
+      "GA": "121.05 121.05",
+      "sha256": "8e1b038e7e0abdc791cf105a990fbecd73ee9afb201178e8d019cb115014da6d",
+      "bytes": 90469,
+      "targets": [
+        "trpG"
+      ]
+    },
+    {
+      "key": "NF000586",
+      "accession": "NF000586.1",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF000586.1.HMM",
+      "relative_file": "hmms/ncbi/NF000586.1.hmm",
+      "original_name": "PRK00011.1",
+      "description": "NCBI Protein Cluster (PRK): serine hydroxymethyltransferase",
+      "length": 404,
+      "TC": "335 335",
+      "GA": "335 335",
+      "sha256": "d3cb9ec18b7343db90f15e77b45e024b60405f6abe906800fcf3bc1789013155",
+      "bytes": 189003,
+      "targets": [
+        "glyA"
+      ]
+    },
+    {
+      "key": "NF010094",
+      "accession": "NF010094.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF010094.0.HMM",
+      "relative_file": "hmms/ncbi/NF010094.0.hmm",
+      "original_name": "PRK13580.1",
+      "description": "NCBI Protein Cluster (PRK): glycine hydroxymethyltransferase",
+      "length": 496,
+      "TC": "735 735",
+      "GA": "735 735",
+      "sha256": "e0624115d41bc9efb7090637b89966c1f96b2002ab6652bc30506924caca6a82",
+      "bytes": 231784,
+      "targets": [
+        "glyA"
+      ]
+    },
+    {
+      "key": "TIGR01172",
+      "accession": "TIGR01172.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01172.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01172.1.hmm",
+      "original_name": "cysE",
+      "description": "JCVI: serine O-acetyltransferase",
+      "length": 162,
+      "TC": "210.65 210.65",
+      "GA": "210.65 210.65",
+      "sha256": "f106c742adc1aa73b93fc947554b41541084ff6db6d89d0dee41fbbcd8c3eacc",
+      "bytes": 76457,
+      "targets": [
+        "cysE"
+      ]
+    },
+    {
+      "key": "TIGR01139",
+      "accession": "TIGR01139.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01139.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01139.1.hmm",
+      "original_name": "cysK",
+      "description": "JCVI: cysteine synthase A",
+      "length": 298,
+      "TC": "350.95 350.95",
+      "GA": "350.95 350.95",
+      "sha256": "8071ee7b5b75cd2be1ec8e9f635db928541fc82e43ea607972f51c994ee9aacb",
+      "bytes": 139685,
+      "targets": [
+        "cysK"
+      ]
+    },
+    {
+      "key": "TIGR00007",
+      "accession": "TIGR00007.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00007.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00007.1.hmm",
+      "original_name": "TIGR00007",
+      "description": "JCVI: 1-(5-phosphoribosyl)-5-[(5-phosphoribosylamino)methylideneamino]imidazole-4-carboxamide isomerase",
+      "length": 231,
+      "TC": "228.95 228.95",
+      "GA": "228.95 228.95",
+      "sha256": "7476fccd659825eb17f27bcf402152492b0710f0fc77b6bd60b218d27d0684d2",
+      "bytes": 108619,
+      "targets": [
+        "hisA"
+      ]
+    },
+    {
+      "key": "TIGR02129",
+      "accession": "TIGR02129.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR02129.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR02129.1.hmm",
+      "original_name": "hisA_euk",
+      "description": "JCVI: phosphoribosylformimino-5-aminoimidazole carboxamide ribotide isomerase",
+      "length": 255,
+      "TC": "229.3 229.3",
+      "GA": "229.3 229.3",
+      "sha256": "5eb20a5d6cba7b6f4e9327dd07369b79ede1660e633b1e3d47342de871b81916",
+      "bytes": 119745,
+      "targets": [
+        "hisA"
+      ]
+    },
+    {
+      "key": "TIGR01261",
+      "accession": "TIGR01261.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01261.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01261.1.hmm",
+      "original_name": "hisB_Nterm",
+      "description": "JCVI: HisB N-terminal histidinol-phosphatase domain",
+      "length": 161,
+      "TC": "140 140",
+      "GA": "140 140",
+      "sha256": "b45c440d3a25319b74901f0329f7996a06406aba060986d2c7a31f9e6d1299e9",
+      "bytes": 76004,
+      "targets": [
+        "hisB"
+      ]
+    },
+    {
+      "key": "NF002106",
+      "accession": "NF002106.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF002106.0.HMM",
+      "relative_file": "hmms/ncbi/NF002106.0.hmm",
+      "original_name": "PRK00951.1-1",
+      "description": "NCBI Protein Cluster (PRK): imidazoleglycerol-phosphate dehydratase HisB",
+      "length": 197,
+      "TC": "283 283",
+      "GA": "283 283",
+      "sha256": "a953f95c219e968b3fc8dd1803fabe34b253114fe547fc0e13c0c8c16cd78596",
+      "bytes": 92764,
+      "targets": [
+        "hisB"
+      ]
+    },
+    {
+      "key": "NF002111",
+      "accession": "NF002111.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF002111.0.HMM",
+      "relative_file": "hmms/ncbi/NF002111.0.hmm",
+      "original_name": "PRK00951.2-1",
+      "description": "NCBI Protein Cluster (PRK): imidazoleglycerol-phosphate dehydratase HisB",
+      "length": 194,
+      "TC": "231 231",
+      "GA": "231 231",
+      "sha256": "61948ce82efe964e1afd8e4a76b26455e60969bdf7f15d5b1d4fafa0bedee7ae",
+      "bytes": 91368,
+      "targets": [
+        "hisB"
+      ]
+    },
+    {
+      "key": "NF002114",
+      "accession": "NF002114.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF002114.0.HMM",
+      "relative_file": "hmms/ncbi/NF002114.0.hmm",
+      "original_name": "PRK00951.2-4",
+      "description": "NCBI Protein Cluster (PRK): imidazoleglycerol-phosphate dehydratase HisB",
+      "length": 190,
+      "TC": "189 189",
+      "GA": "189 189",
+      "sha256": "3235f0b0951e9c403008a13396d190b1bf2a356ee50d330ca22d7364fa215876",
+      "bytes": 89508,
+      "targets": [
+        "hisB"
+      ]
+    },
+    {
+      "key": "NF003937",
+      "accession": "NF003937.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF003937.0.HMM",
+      "relative_file": "hmms/ncbi/NF003937.0.hmm",
+      "original_name": "PRK05446.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional histidinol-phosphatase/imidazoleglycerol-phosphate dehydratase HisB",
+      "length": 355,
+      "TC": "443 443",
+      "GA": "443 443",
+      "sha256": "288caafc45ff3eac344dc0ee40dcec1809a635e6742e7a3b940fea70671dc907",
+      "bytes": 166268,
+      "targets": [
+        "hisB"
+      ]
+    },
+    {
+      "key": "TIGR00069",
+      "accession": "TIGR00069.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00069.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00069.1.hmm",
+      "original_name": "hisD",
+      "description": "JCVI: histidinol dehydrogenase",
+      "length": 393,
+      "TC": "243.8 243.8",
+      "GA": "243.8 243.8",
+      "sha256": "bf0b3b906321d7c81d0dc0767218d9ac88ece2639a36e3a2262d58f0518c8d8a",
+      "bytes": 183866,
+      "targets": [
+        "hisD"
+      ]
+    },
+    {
+      "key": "TIGR03188",
+      "accession": "TIGR03188.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR03188.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR03188.1.hmm",
+      "original_name": "histidine_hisI",
+      "description": "JCVI: phosphoribosyl-ATP diphosphatase",
+      "length": 84,
+      "TC": "42.7 42.7",
+      "GA": "42.7 42.7",
+      "sha256": "61267d8ceff82188fa0c6d2744dfa548311950fbdcf2635cfc95ffacb6fdc9ae",
+      "bytes": 40193,
+      "targets": [
+        "hisE"
+      ]
+    },
+    {
+      "key": "TIGR00735",
+      "accession": "TIGR00735.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00735.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00735.1.hmm",
+      "original_name": "hisF",
+      "description": "JCVI: imidazole glycerol phosphate synthase subunit HisF",
+      "length": 254,
+      "TC": "294.55 294.55",
+      "GA": "294.55 294.55",
+      "sha256": "e4e8585f3bb1b0f9f9ac0c652b70bd79786b52c87ef91ebf3422b5dedbf7a87d",
+      "bytes": 119257,
+      "targets": [
+        "hisF"
+      ]
+    },
+    {
+      "key": "TIGR00070",
+      "accession": "TIGR00070.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00070.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00070.1.hmm",
+      "original_name": "hisG",
+      "description": "JCVI: ATP phosphoribosyltransferase",
+      "length": 183,
+      "TC": "75.75 75.75",
+      "GA": "75.75 75.75",
+      "sha256": "58bc4f868756bbad7eaa4ad44c36cc847e1f468a685693f02b3cc72947cfc0fd",
+      "bytes": 86221,
+      "targets": [
+        "hisG"
+      ]
+    },
+    {
+      "key": "TIGR03455",
+      "accession": "TIGR03455.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR03455.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR03455.1.hmm",
+      "original_name": "HisG_C-term",
+      "description": "JCVI: ATP phosphoribosyltransferase, C-terminal domain",
+      "length": 100,
+      "TC": "40.05 40.05",
+      "GA": "40.05 40.05",
+      "sha256": "f6cb25b7511ee8b64084c16648d3613398f8809c8a9ddf10dbcf4260634c1305",
+      "bytes": 47650,
+      "targets": [
+        "hisG"
+      ]
+    },
+    {
+      "key": "TIGR01855",
+      "accession": "TIGR01855.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01855.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01855.1.hmm",
+      "original_name": "IMP_synth_hisH",
+      "description": "JCVI: imidazole glycerol phosphate synthase subunit HisH",
+      "length": 198,
+      "TC": "105.4 105.4",
+      "GA": "105.4 105.4",
+      "sha256": "de1e816071a0a75d69b37c30d645fab4c263cb404f31c20f70062df10068bf58",
+      "bytes": 93227,
+      "targets": [
+        "hisH"
+      ]
+    },
+    {
+      "key": "TIGR00118",
+      "accession": "TIGR00118.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00118.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00118.1.hmm",
+      "original_name": "acolac_lg",
+      "description": "JCVI: biosynthetic-type acetolactate synthase large subunit",
+      "length": 557,
+      "TC": "538.35 538.35",
+      "GA": "538.35 538.35",
+      "sha256": "088d2d2236a5a3999d4e65c3d706419aaa088b71ec28fd6b3fca7ecf35ccfb21",
+      "bytes": 260159,
+      "targets": [
+        "ilvB"
+      ]
+    },
+    {
+      "key": "NF006016",
+      "accession": "NF006016.1",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006016.1.HMM",
+      "relative_file": "hmms/ncbi/NF006016.1.hmm",
+      "original_name": "PRK08155.1",
+      "description": "NCBI Protein Cluster (PRK): acetolactate synthase large subunit",
+      "length": 554,
+      "TC": "870 870",
+      "GA": "870 870",
+      "sha256": "007219316396e83bfdac06d1b893cab04a9055bc9c5c5c92508c27f5d278621d",
+      "bytes": 258760,
+      "targets": [
+        "ilvB"
+      ]
+    },
+    {
+      "key": "NF006524",
+      "accession": "NF006524.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006524.0.HMM",
+      "relative_file": "hmms/ncbi/NF006524.0.hmm",
+      "original_name": "PRK08978.1",
+      "description": "NCBI Protein Cluster (PRK): acetolactate synthase 2 catalytic subunit",
+      "length": 548,
+      "TC": "738 738",
+      "GA": "738 738",
+      "sha256": "d256eb29fbfccf0d832516b6773c0b36b7c6aac8a6cd8871295da65ee684a5ef",
+      "bytes": 255974,
+      "targets": [
+        "ilvG"
+      ]
+    },
+    {
+      "key": "TIGR01122",
+      "accession": "TIGR01122.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01122.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01122.1.hmm",
+      "original_name": "ilvE_I",
+      "description": "JCVI: branched-chain-amino-acid transaminase",
+      "length": 298,
+      "TC": "245.55 245.55",
+      "GA": "245.55 245.55",
+      "sha256": "ace595d4e4a3d0e0f56d9a1b56f74ad9396a9d5ae7740facffb216fbbd92ef4e",
+      "bytes": 139712,
+      "targets": [
+        "ilvE"
+      ]
+    },
+    {
+      "key": "TIGR01123",
+      "accession": "TIGR01123.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01123.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01123.1.hmm",
+      "original_name": "ilvE_II",
+      "description": "JCVI: branched-chain-amino-acid transaminase",
+      "length": 313,
+      "TC": "250.05 250.05",
+      "GA": "250.05 250.05",
+      "sha256": "9863ab374892394694231fa8877cd7e3624c4adb06646397817bd5c604d3743e",
+      "bytes": 146686,
+      "targets": [
+        "ilvE"
+      ]
+    },
+    {
+      "key": "NF008722",
+      "accession": "NF008722.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF008722.0.HMM",
+      "relative_file": "hmms/ncbi/NF008722.0.hmm",
+      "original_name": "PRK11716.1",
+      "description": "NCBI Protein Cluster (PRK): HTH-type transcriptional activator IlvY",
+      "length": 293,
+      "TC": "246 246",
+      "GA": "246 246",
+      "sha256": "40b307365ee3a5220ce7c1dc9c24e4d9f69a5202146a34bd8b6b8f5c4cd0265c",
+      "bytes": 137397,
+      "targets": [
+        "ilvY"
+      ]
+    },
+    {
+      "key": "TIGR00465",
+      "accession": "TIGR00465.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00465.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00465.1.hmm",
+      "original_name": "ilvC",
+      "description": "JCVI: ketol-acid reductoisomerase",
+      "length": 314,
+      "TC": "226.15 226.15",
+      "GA": "226.15 226.15",
+      "sha256": "8cefe39f79d0ed38477e1009d36d5cb09efb25e016410722a6ee5c48d3f05d1d",
+      "bytes": 147132,
+      "targets": [
+        "ilvC"
+      ]
+    },
+    {
+      "key": "NF004017",
+      "accession": "NF004017.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF004017.0.HMM",
+      "relative_file": "hmms/ncbi/NF004017.0.hmm",
+      "original_name": "PRK05479.1",
+      "description": "NCBI Protein Cluster (PRK): ketol-acid reductoisomerase",
+      "length": 337,
+      "TC": "336 336",
+      "GA": "336 336",
+      "sha256": "fad2e08de9ec48fe0c40770d79b171f159a416eb7544290c7d7e02a091e2d228",
+      "bytes": 157845,
+      "targets": [
+        "ilvC"
+      ]
+    },
+    {
+      "key": "TIGR00110",
+      "accession": "TIGR00110.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00110.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00110.1.hmm",
+      "original_name": "ilvD",
+      "description": "JCVI: dihydroxy-acid dehydratase",
+      "length": 543,
+      "TC": "618.15 618.15",
+      "GA": "618.15 618.15",
+      "sha256": "2845463756e6cb75caace00fc3617123a1597b639387fd194dee2ad78067d0fc",
+      "bytes": 253621,
+      "targets": [
+        "ilvD"
+      ]
+    },
+    {
+      "key": "TIGR00119",
+      "accession": "TIGR00119.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00119.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00119.1.hmm",
+      "original_name": "acolac_sm",
+      "description": "JCVI: acetolactate synthase small subunit",
+      "length": 158,
+      "TC": "56.9 56.9",
+      "GA": "56.9 56.9",
+      "sha256": "44963d05903a516cf8ae37f73a8ccd7060badf03292b0cd8b3c19c2365813520",
+      "bytes": 74599,
+      "targets": [
+        "ilvN"
+      ]
+    },
+    {
+      "key": "NF006036",
+      "accession": "NF006036.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006036.0.HMM",
+      "relative_file": "hmms/ncbi/NF006036.0.hmm",
+      "original_name": "PRK08178.1",
+      "description": "NCBI Protein Cluster (PRK): acetolactate synthase small subunit",
+      "length": 102,
+      "TC": "128 128",
+      "GA": "128 128",
+      "sha256": "32febf5b9cc6c76cd726ee52e911e15941f92b6c0ee9026cf3e3034b8dfc88de",
+      "bytes": 48577,
+      "targets": [
+        "ilvN"
+      ]
+    },
+    {
+      "key": "TIGR00505",
+      "accession": "TIGR00505.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00505.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00505.1.hmm",
+      "original_name": "ribA",
+      "description": "JCVI: GTP cyclohydrolase II",
+      "length": 191,
+      "TC": "205.85 205.85",
+      "GA": "205.85 205.85",
+      "sha256": "1ffa1d38c392e00857d7c144b4792a2284bb7a54488a727501aada504516028f",
+      "bytes": 89934,
+      "targets": [
+        "ribA"
+      ]
+    },
+    {
+      "key": "TIGR00506",
+      "accession": "TIGR00506.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00506.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00506.1.hmm",
+      "original_name": "ribB",
+      "description": "JCVI: 3,4-dihydroxy-2-butanone-4-phosphate synthase",
+      "length": 204,
+      "TC": "177.45 177.45",
+      "GA": "177.45 177.45",
+      "sha256": "33fc54741108640338bea0990684fdd3585b92252109cf726bbbbb201882fa45",
+      "bytes": 96005,
+      "targets": [
+        "ribB"
+      ]
+    },
+    {
+      "key": "TIGR00326",
+      "accession": "TIGR00326.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00326.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00326.1.hmm",
+      "original_name": "eubact_ribD",
+      "description": "JCVI: bifunctional diaminohydroxyphosphoribosylaminopyrimidine deaminase/5-amino-6-(5-phosphoribosylamino)uracil reductase RibD",
+      "length": 343,
+      "TC": "156.35 156.35",
+      "GA": "156.35 156.35",
+      "sha256": "88ca0514a4f3b4f21ad5addb242ecdf4d764cfbd07931ce87b2228ae9717ee73",
+      "bytes": 160723,
+      "targets": [
+        "ribD"
+      ]
+    },
+    {
+      "key": "TIGR00187",
+      "accession": "TIGR00187.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00187.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00187.1.hmm",
+      "original_name": "ribE",
+      "description": "JCVI: riboflavin synthase",
+      "length": 207,
+      "TC": "156.6 156.6",
+      "GA": "156.6 156.6",
+      "sha256": "3e55c495bf7ec17751a0e508c0032c0c09ee4ca998188345e8afdfc6f3ecb680",
+      "bytes": 97372,
+      "targets": [
+        "ribC"
+      ]
+    },
+    {
+      "key": "TIGR01506",
+      "accession": "TIGR01506.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01506.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01506.1.hmm",
+      "original_name": "ribC_arch",
+      "description": "JCVI: riboflavin synthase",
+      "length": 151,
+      "TC": "100.55 100.55",
+      "GA": "100.55 100.55",
+      "sha256": "ba9e13553f825079bb051dbe2e41467b9ce0c20bc80b431a2b72e2ead3cec15d",
+      "bytes": 71341,
+      "targets": [
+        "ribC"
+      ]
+    },
+    {
+      "key": "TIGR00114",
+      "accession": "TIGR00114.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00114.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00114.1.hmm",
+      "original_name": "lumazine-synth",
+      "description": "JCVI: 6,7-dimethyl-8-ribityllumazine synthase",
+      "length": 138,
+      "TC": "84.6 84.6",
+      "GA": "84.6 84.6",
+      "sha256": "f48d931efeddf1d6ab87342dbdfadf7c3ed0f8a2e2b39051566f9c71dcf5dbd6",
+      "bytes": 65312,
+      "targets": [
+        "ribH"
+      ]
+    },
+    {
+      "key": "TIGR00508",
+      "accession": "TIGR00508.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00508.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00508.1.hmm",
+      "original_name": "bioA",
+      "description": "JCVI: adenosylmethionine--8-amino-7-oxononanoate transaminase",
+      "length": 419,
+      "TC": "405 405",
+      "GA": "405 405",
+      "sha256": "31962e33a5c83a1d9d8e49083c97d70cb29ac7ae78b1649aa3c7475804b14f99",
+      "bytes": 195975,
+      "targets": [
+        "bioA"
+      ]
+    },
+    {
+      "key": "TIGR00433",
+      "accession": "TIGR00433.2",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00433.2.HMM",
+      "relative_file": "hmms/ncbi/TIGR00433.2.hmm",
+      "original_name": "bioB",
+      "description": "JCVI: biotin synthase BioB",
+      "length": 307,
+      "TC": "225 225",
+      "GA": "225 225",
+      "sha256": "4c8da6781c5943ae3f9aab56f69b98aa9c5c9cf611a77c389474459dd6719cca",
+      "bytes": 143863,
+      "targets": [
+        "bioB"
+      ]
+    },
+    {
+      "key": "TIGR02072",
+      "accession": "TIGR02072.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR02072.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR02072.1.hmm",
+      "original_name": "BioC",
+      "description": "JCVI: malonyl-ACP O-methyltransferase BioC",
+      "length": 244,
+      "TC": "184.95 184.95",
+      "GA": "184.95 184.95",
+      "sha256": "edbf0c645a8685ccc5faf5d526559d1120fa6c42dea14e603d957724978f2017",
+      "bytes": 114598,
+      "targets": [
+        "bioC"
+      ]
+    },
+    {
+      "key": "TIGR00347",
+      "accession": "TIGR00347.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00347.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00347.1.hmm",
+      "original_name": "bioD",
+      "description": "JCVI: dethiobiotin synthase",
+      "length": 166,
+      "TC": "83.3 83.3",
+      "GA": "83.3 83.3",
+      "sha256": "d2291b2ace0632b446c4a21f2ead9005e45123359af13a147d0eea7ec2b741d8",
+      "bytes": 78303,
+      "targets": [
+        "bioD"
+      ]
+    },
+    {
+      "key": "TIGR00858",
+      "accession": "TIGR00858.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00858.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00858.1.hmm",
+      "original_name": "bioF",
+      "description": "JCVI: 8-amino-7-oxononanoate synthase",
+      "length": 365,
+      "TC": "426.45 426.45",
+      "GA": "426.45 426.45",
+      "sha256": "5e577abcc1ccf8979b47d3847f4315565d02efac0f328798dffa7b780a87ecec",
+      "bytes": 170859,
+      "targets": [
+        "bioF"
+      ]
+    },
+    {
+      "key": "TIGR01356",
+      "accession": "TIGR01356.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01356.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01356.1.hmm",
+      "original_name": "aroA",
+      "description": "JCVI: 3-phosphoshikimate 1-carboxyvinyltransferase",
+      "length": 415,
+      "TC": "287.25 287.25",
+      "GA": "287.25 287.25",
+      "sha256": "e027668790a933912e0e39f934896bf5239f785b286a490841f7098df15e04e9",
+      "bytes": 194122,
+      "targets": [
+        "aroA"
+      ]
+    },
+    {
+      "key": "TIGR01357",
+      "accession": "TIGR01357.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01357.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01357.1.hmm",
+      "original_name": "aroB",
+      "description": "JCVI: 3-dehydroquinate synthase",
+      "length": 344,
+      "TC": "305 305",
+      "GA": "305 305",
+      "sha256": "3b948e40282c822941b5a24c80b59d44c8972fc3b6dc5ea10dc43be54143102b",
+      "bytes": 161070,
+      "targets": [
+        "aroB"
+      ]
+    },
+    {
+      "key": "TIGR00033",
+      "accession": "TIGR00033.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00033.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00033.1.hmm",
+      "original_name": "aroC",
+      "description": "JCVI: chorismate synthase",
+      "length": 351,
+      "TC": "212.2 212.2",
+      "GA": "212.2 212.2",
+      "sha256": "9f28a5c7635e3df46b6380ea94d39f6bec3d8302feeea8026e9e1e110c152de6",
+      "bytes": 164329,
+      "targets": [
+        "aroC"
+      ]
+    },
+    {
+      "key": "TIGR00507",
+      "accession": "TIGR00507.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00507.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00507.1.hmm",
+      "original_name": "aroE",
+      "description": "JCVI: shikimate dehydrogenase",
+      "length": 270,
+      "TC": "200.2 200.2",
+      "GA": "200.2 200.2",
+      "sha256": "3c8431b652ff6dc9d9c31bf3ff2a46887726e4ebbe2f5f7c784ecec720d2a152",
+      "bytes": 126669,
+      "targets": [
+        "aroE"
+      ]
+    },
+    {
+      "key": "TIGR01809",
+      "accession": "TIGR01809.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01809.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01809.1.hmm",
+      "original_name": "Shik-DH-AROM",
+      "description": "JCVI: shikimate dehydrogenase",
+      "length": 282,
+      "TC": "196 196",
+      "GA": "196 196",
+      "sha256": "8facd3d6ca504b67c15fa05705d13f8230aff812a75c87e9f751fb0ba49af7ec",
+      "bytes": 132249,
+      "targets": [
+        "aroE"
+      ]
+    },
+    {
+      "key": "TIGR00034",
+      "accession": "TIGR00034.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00034.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00034.1.hmm",
+      "original_name": "aroFGH",
+      "description": "JCVI: 3-deoxy-7-phosphoheptulonate synthase",
+      "length": 342,
+      "TC": "173.2 173.2",
+      "GA": "173.2 173.2",
+      "sha256": "d7ed1fe47969bdfb92e85d6cffd5a15f298a14270f809367524390873bb35a59",
+      "bytes": 160163,
+      "targets": [
+        "aroH"
+      ]
+    },
+    {
+      "key": "NF009396",
+      "accession": "NF009396.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF009396.0.HMM",
+      "relative_file": "hmms/ncbi/NF009396.0.hmm",
+      "original_name": "PRK12756.1",
+      "description": "NCBI Protein Cluster (PRK): Trp-sensitive 3-deoxy-7-phosphoheptulonate synthase AroH",
+      "length": 349,
+      "TC": "463 463",
+      "GA": "463 463",
+      "sha256": "7d9b6b52ae2d7752eaa739625f5569e5cdd82f54f0bdc41dea8b741d35363e83",
+      "bytes": 163453,
+      "targets": [
+        "aroH"
+      ]
+    },
+    {
+      "key": "TIGR01796",
+      "accession": "TIGR01796.1",
+      "source_database": "TIGRFAM",
+      "group": "context_only",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01796.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01796.1.hmm",
+      "original_name": "CM_mono_aroH",
+      "description": "JCVI: chorismate mutase",
+      "length": 117,
+      "TC": "82 82",
+      "GA": "82 82",
+      "sha256": "debedc11a1d2d275aa11be1296bb2d7519253983a234be904f3dc3931963a42c",
+      "bytes": 55511,
+      "targets": [
+        "aroH"
+      ]
+    },
+    {
+      "key": "NF002988",
+      "accession": "NF002988.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF002988.0.HMM",
+      "relative_file": "hmms/ncbi/NF002988.0.hmm",
+      "original_name": "PRK03731.1",
+      "description": "NCBI Protein Cluster (PRK): shikimate kinase AroL",
+      "length": 174,
+      "TC": "161 161",
+      "GA": "161 161",
+      "sha256": "970503494e0eb8e8b123730c6aba247c4fe4e5f540dbe9a294938cd97b24c9b4",
+      "bytes": 82043,
+      "targets": [
+        "aroL"
+      ]
+    },
+    {
+      "key": "TIGR01920",
+      "accession": "TIGR01920.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01920.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01920.1.hmm",
+      "original_name": "Shik_kin_archae",
+      "description": "JCVI: shikimate kinase",
+      "length": 266,
+      "TC": "126.85 126.85",
+      "GA": "126.85 126.85",
+      "sha256": "05f1b7feb1f63d382477c5bc0f248e365a88ba6c5a9afbadef6f19c9b121ef6b",
+      "bytes": 124819,
+      "targets": [
+        "aroL"
+      ]
+    },
+    {
+      "key": "TIGR01088",
+      "accession": "TIGR01088.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01088.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01088.1.hmm",
+      "original_name": "aroQ",
+      "description": "JCVI: 3-dehydroquinate dehydratase, type II",
+      "length": 141,
+      "TC": "169.85 169.85",
+      "GA": "169.85 169.85",
+      "sha256": "0ddff642ea267c3780da1bc5378787b601fa243bce9452b040c917a24d7a6461",
+      "bytes": 66704,
+      "targets": [
+        "aroQ"
+      ]
+    },
+    {
+      "key": "TIGR01806",
+      "accession": "TIGR01806.1",
+      "source_database": "TIGRFAM",
+      "group": "context_only",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01806.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01806.1.hmm",
+      "original_name": "CM_mono2",
+      "description": "JCVI: gamma subclass chorismate mutase AroQ",
+      "length": 114,
+      "TC": "74.15 74.15",
+      "GA": "74.15 74.15",
+      "sha256": "aa580818c9d410c6ec569ea82121ee1c8586b46918c551a924ec9b5ce8ffa21e",
+      "bytes": 54145,
+      "targets": [
+        "aroQ"
+      ]
+    },
+    {
+      "key": "NF008085",
+      "accession": "NF008085.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF008085.0.HMM",
+      "relative_file": "hmms/ncbi/NF008085.0.hmm",
+      "original_name": "PRK10820.1",
+      "description": "NCBI Protein Cluster (PRK): transcriptional regulator TyrR",
+      "length": 520,
+      "TC": "576 576",
+      "GA": "576 576",
+      "sha256": "e309d783a7258cd200c50be1fe4b57c524f7b098d4d075ccb68983df8bb3849d",
+      "bytes": 242941,
+      "targets": [
+        "tyrR"
+      ]
+    },
+    {
+      "key": "TIGR01001",
+      "accession": "TIGR01001.2",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01001.2.HMM",
+      "relative_file": "hmms/ncbi/TIGR01001.2.hmm",
+      "original_name": "MetA_succinyl",
+      "description": "JCVI: homoserine O-succinyltransferase MetA",
+      "length": 304,
+      "TC": "495 495",
+      "GA": "495 495",
+      "sha256": "210150dd00ff0617ab8d8eb7e566317c0b32df11b16832e219ef6212247cae37",
+      "bytes": 142487,
+      "targets": [
+        "metA"
+      ]
+    },
+    {
+      "key": "NF047918",
+      "accession": "NF047918.2",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF047918.2.HMM",
+      "relative_file": "hmms/ncbi/NF047918.2.hmm",
+      "original_name": "MetA_acetyl",
+      "description": "NCBIFAM: homoserine O-acetyltransferase MetA",
+      "length": 302,
+      "TC": "460.5 460.5",
+      "GA": "460.5 460.5",
+      "sha256": "449751e76a6c6080faf65c1dbc155590de261e3137ba2c5e69c2a3204d136baa",
+      "bytes": 141563,
+      "targets": [
+        "metA"
+      ]
+    },
+    {
+      "key": "TIGR02080",
+      "accession": "TIGR02080.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR02080.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR02080.1.hmm",
+      "original_name": "O_succ_thio_ly",
+      "description": "JCVI: cystathionine gamma-synthase",
+      "length": 382,
+      "TC": "504.55 504.55",
+      "GA": "504.55 504.55",
+      "sha256": "76d2a4f9aa2ad6518e2915734390c1e0aae98da2936cd6afc75ebea66106d550",
+      "bytes": 178770,
+      "targets": [
+        "metB"
+      ]
+    },
+    {
+      "key": "TIGR01324",
+      "accession": "TIGR01324.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01324.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01324.1.hmm",
+      "original_name": "cysta_beta_ly_B",
+      "description": "JCVI: cystathionine beta-lyase",
+      "length": 377,
+      "TC": "365.9 365.9",
+      "GA": "365.9 365.9",
+      "sha256": "8906645f4f913317742d533e0fd72c30358d523dacb51f475cbc8a81f5a0cd5c",
+      "bytes": 176436,
+      "targets": [
+        "metC"
+      ]
+    },
+    {
+      "key": "TIGR01371",
+      "accession": "TIGR01371.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01371.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01371.1.hmm",
+      "original_name": "met_syn_B12ind",
+      "description": "JCVI: 5-methyltetrahydropteroyltriglutamate--homocysteine S-methyltransferase",
+      "length": 754,
+      "TC": "929.95 929.95",
+      "GA": "929.95 929.95",
+      "sha256": "c1d6407e1ffed33a4cfc8020c7a7c15eeca1cfb245a51d1d1b925cc67f9a327c",
+      "bytes": 351792,
+      "targets": [
+        "metE"
+      ]
+    },
+    {
+      "key": "TIGR00676",
+      "accession": "TIGR00676.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00676.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00676.1.hmm",
+      "original_name": "fadh2",
+      "description": "JCVI: methylenetetrahydrofolate reductase [NAD(P)H]",
+      "length": 275,
+      "TC": "293.7 293.7",
+      "GA": "293.7 293.7",
+      "sha256": "9a9ab1e17bc1f6ad7e07eb7939b1564b7bc6ad155f217f7e6a9c45cd4ba117be",
+      "bytes": 129019,
+      "targets": [
+        "metF"
+      ]
+    },
+    {
+      "key": "NF011950",
+      "accession": "NF011950.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF011950.0.HMM",
+      "relative_file": "hmms/ncbi/NF011950.0.hmm",
+      "original_name": "PRK15421.1",
+      "description": "NCBI Protein Cluster (PRK): HTH-type transcriptional regulator MetR",
+      "length": 317,
+      "TC": "382 382",
+      "GA": "382 382",
+      "sha256": "835a9f596c6f56f10ce4ba459591debabaf6903a7e3f6e8cc397dac8f1bf948d",
+      "bytes": 148556,
+      "targets": [
+        "metR"
+      ]
+    },
+    {
+      "key": "TIGR01368",
+      "accession": "TIGR01368.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01368.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01368.1.hmm",
+      "original_name": "CPSaseIIsmall",
+      "description": "JCVI: glutamine-hydrolyzing carbamoyl-phosphate synthase small subunit",
+      "length": 361,
+      "TC": "307.35 307.35",
+      "GA": "307.35 307.35",
+      "sha256": "34ca71a345d65d126b2b901929f6c972e597b94592567c25f55354df115f598a",
+      "bytes": 169040,
+      "targets": [
+        "carA"
+      ]
+    },
+    {
+      "key": "TIGR01369",
+      "accession": "TIGR01369.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01369.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01369.1.hmm",
+      "original_name": "CPSaseII_lrg",
+      "description": "JCVI: carbamoyl-phosphate synthase (glutamine-hydrolyzing) large subunit",
+      "length": 1052,
+      "TC": "1027 1027",
+      "GA": "1027 1027",
+      "sha256": "20a726fd47b1a539325527472aafccca5a779eb55c03109d6bfe04c8e5143e65",
+      "bytes": 490348,
+      "targets": [
+        "carB"
+      ]
+    },
+    {
+      "key": "NF003671",
+      "accession": "NF003671.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF003671.0.HMM",
+      "relative_file": "hmms/ncbi/NF003671.0.hmm",
+      "original_name": "PRK05294.1",
+      "description": "NCBI Protein Cluster (PRK): carbamoyl-phosphate synthase large subunit",
+      "length": 1058,
+      "TC": "599 599",
+      "GA": "599 599",
+      "sha256": "9884da400df7f8c8009b8eb96d47dddaf4d86b389ba37b12af7dcf2cfbc01c1d",
+      "bytes": 493126,
+      "targets": [
+        "carB"
+      ]
+    },
+    {
+      "key": "TIGR01890",
+      "accession": "TIGR01890.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01890.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01890.1.hmm",
+      "original_name": "N-Ac-Glu-synth",
+      "description": "JCVI: amino-acid N-acetyltransferase",
+      "length": 429,
+      "TC": "202.85 202.85",
+      "GA": "202.85 202.85",
+      "sha256": "8c625ac5f45c5ebb6391fae180ffcb0f944cb5cf6d114bc46187463ce26dc05e",
+      "bytes": 200626,
+      "targets": [
+        "argA"
+      ]
+    },
+    {
+      "key": "TIGR00761",
+      "accession": "TIGR00761.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00761.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00761.1.hmm",
+      "original_name": "argB",
+      "description": "JCVI: acetylglutamate kinase",
+      "length": 231,
+      "TC": "151.3 151.3",
+      "GA": "151.3 151.3",
+      "sha256": "1f40bb8d02eb7afbf6548e79800c96be5594f78ba357a68af6ca130285fc7e7b",
+      "bytes": 108534,
+      "targets": [
+        "argB"
+      ]
+    },
+    {
+      "key": "TIGR01850",
+      "accession": "TIGR01850.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01850.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01850.1.hmm",
+      "original_name": "argC",
+      "description": "JCVI: N-acetyl-gamma-glutamyl-phosphate reductase",
+      "length": 345,
+      "TC": "233.6 233.6",
+      "GA": "233.6 233.6",
+      "sha256": "16d62175bc87dca05cb795caf49079aa84b5ea3b651676a774ef018aca23b1ab",
+      "bytes": 161567,
+      "targets": [
+        "argC"
+      ]
+    },
+    {
+      "key": "TIGR01851",
+      "accession": "TIGR01851.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01851.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01851.1.hmm",
+      "original_name": "argC_other",
+      "description": "JCVI: N-acetyl-gamma-glutamyl-phosphate reductase",
+      "length": 310,
+      "TC": "229.85 229.85",
+      "GA": "229.85 229.85",
+      "sha256": "deefab78d87ed40f3966a0cc136f70061ca6ed6deb5eb6ed496b46ae22efa62c",
+      "bytes": 145299,
+      "targets": [
+        "argC"
+      ]
+    },
+    {
+      "key": "NF002797",
+      "accession": "NF002797.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF002797.0.HMM",
+      "relative_file": "hmms/ncbi/NF002797.0.hmm",
+      "original_name": "PRK02936.1",
+      "description": "NCBI Protein Cluster (PRK): acetylornithine transaminase",
+      "length": 385,
+      "TC": "496 496",
+      "GA": "496 496",
+      "sha256": "b953271ae4ec1189ffa9fa77d359e11fd471e2db28cdb95f4897df2c3560eec7",
+      "bytes": 180165,
+      "targets": [
+        "argD"
+      ]
+    },
+    {
+      "key": "TIGR00707",
+      "accession": "TIGR00707.1",
+      "source_database": "TIGRFAM",
+      "group": "context_only",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00707.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00707.1.hmm",
+      "original_name": "argD",
+      "description": "JCVI: acetylornithine/succinylornithine family transaminase",
+      "length": 381,
+      "TC": "410.05 410.05",
+      "GA": "410.05 410.05",
+      "sha256": "64ef822cd71ea8eb8063b6d7911f8fc74af7d67380bf80a24215f9d654bd1f8e",
+      "bytes": 178319,
+      "targets": [
+        "argD"
+      ]
+    },
+    {
+      "key": "TIGR01892",
+      "accession": "TIGR01892.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01892.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01892.1.hmm",
+      "original_name": "AcOrn-deacetyl",
+      "description": "JCVI: acetylornithine deacetylase",
+      "length": 365,
+      "TC": "297.7 297.7",
+      "GA": "297.7 297.7",
+      "sha256": "e385f22d2bf50b40e95b28944d500abc78a5ab99765f16d24375961860c72bbd",
+      "bytes": 170857,
+      "targets": [
+        "argE"
+      ]
+    },
+    {
+      "key": "TIGR00658",
+      "accession": "TIGR00658.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00658.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00658.1.hmm",
+      "original_name": "orni_carb_tr",
+      "description": "JCVI: ornithine carbamoyltransferase",
+      "length": 304,
+      "TC": "280.85 280.85",
+      "GA": "280.85 280.85",
+      "sha256": "d63271404e4f711447ba4fb96b211e6b7199d47b5ae71beb39e2ebf26ecf28e6",
+      "bytes": 142501,
+      "targets": [
+        "argF"
+      ]
+    },
+    {
+      "key": "TIGR00032",
+      "accession": "TIGR00032.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00032.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00032.1.hmm",
+      "original_name": "argG",
+      "description": "JCVI: argininosuccinate synthase",
+      "length": 394,
+      "TC": "268.2 268.2",
+      "GA": "268.2 268.2",
+      "sha256": "848ef053e393e1af0ee4721a88bd32c65edda99ff15e484d48ffe1ce91caca32",
+      "bytes": 184334,
+      "targets": [
+        "argG"
+      ]
+    },
+    {
+      "key": "TIGR00838",
+      "accession": "TIGR00838.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00838.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00838.1.hmm",
+      "original_name": "argH",
+      "description": "JCVI: argininosuccinate lyase",
+      "length": 455,
+      "TC": "279.5 279.5",
+      "GA": "279.5 279.5",
+      "sha256": "c5d9ffbd4cc4d7daa86e4aeda08382cb62a53b502c4de9aef8ab2fb15f9debc1",
+      "bytes": 212697,
+      "targets": [
+        "argH"
+      ]
+    },
+    {
+      "key": "TIGR00674",
+      "accession": "TIGR00674.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00674.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00674.1.hmm",
+      "original_name": "dapA",
+      "description": "JCVI: 4-hydroxy-tetrahydrodipicolinate synthase",
+      "length": 286,
+      "TC": "206.15 206.15",
+      "GA": "206.15 206.15",
+      "sha256": "8754b2a8e445bc5ca5adb2a74128a709f6549b05358fa52708c376d13a35c0eb",
+      "bytes": 134133,
+      "targets": [
+        "dapA"
+      ]
+    },
+    {
+      "key": "TIGR00036",
+      "accession": "TIGR00036.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00036.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00036.1.hmm",
+      "original_name": "dapB",
+      "description": "JCVI: 4-hydroxy-tetrahydrodipicolinate reductase",
+      "length": 270,
+      "TC": "122 122",
+      "GA": "122 122",
+      "sha256": "a87d50d50582467e7343d8d791bf78a75f18767be3dd5014f920b610beb10426",
+      "bytes": 126678,
+      "targets": [
+        "dapB"
+      ]
+    },
+    {
+      "key": "TIGR02130",
+      "accession": "TIGR02130.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR02130.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR02130.1.hmm",
+      "original_name": "dapB_plant",
+      "description": "JCVI: dihydrodipicolinate reductase",
+      "length": 275,
+      "TC": "294.55 294.55",
+      "GA": "294.55 294.55",
+      "sha256": "1bbebaa92b37c1393368e07cf09f4d7dafdc7e22bd1f64c041169dae4d939278",
+      "bytes": 129012,
+      "targets": [
+        "dapB"
+      ]
+    },
+    {
+      "key": "TIGR00965",
+      "accession": "TIGR00965.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00965.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00965.1.hmm",
+      "original_name": "dapD",
+      "description": "JCVI: 2,3,4,5-tetrahydropyridine-2,6-dicarboxylate N-succinyltransferase",
+      "length": 271,
+      "TC": "375.4 375.4",
+      "GA": "375.4 375.4",
+      "sha256": "b9ac4797280541b4e5167667d166e0f0a469748670b33d479f3181bbeae3549f",
+      "bytes": 127175,
+      "targets": [
+        "dapD"
+      ]
+    },
+    {
+      "key": "TIGR03535",
+      "accession": "TIGR03535.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR03535.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR03535.1.hmm",
+      "original_name": "DapD_actino",
+      "description": "JCVI: 2,3,4,5-tetrahydropyridine-2,6-dicarboxylate N-succinyltransferase",
+      "length": 320,
+      "TC": "441.5 441.5",
+      "GA": "441.5 441.5",
+      "sha256": "58d0ec2901342c5fbcc4b87a60ca3aa704a93ad638ecff1e6e63b2317d6cbced",
+      "bytes": 149972,
+      "targets": [
+        "dapD"
+      ]
+    },
+    {
+      "key": "TIGR03536",
+      "accession": "TIGR03536.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR03536.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR03536.1.hmm",
+      "original_name": "DapD_gpp",
+      "description": "JCVI: 2,3,4,5-tetrahydropyridine-2,6-dicarboxylate N-succinyltransferase",
+      "length": 341,
+      "TC": "518.45 518.45",
+      "GA": "518.45 518.45",
+      "sha256": "e062696a057dd2e9d2a610bc66a94bc46c74714fa42aefc8a66a055a27077ea0",
+      "bytes": 159737,
+      "targets": [
+        "dapD"
+      ]
+    },
+    {
+      "key": "TIGR01246",
+      "accession": "TIGR01246.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01246.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01246.1.hmm",
+      "original_name": "dapE_proteo",
+      "description": "JCVI: succinyl-diaminopimelate desuccinylase",
+      "length": 370,
+      "TC": "361.8 361.8",
+      "GA": "361.8 361.8",
+      "sha256": "394b1452e76d670140aa7d99c91361880ad8f9643e68b82b2784c16938679150",
+      "bytes": 173190,
+      "targets": [
+        "dapE"
+      ]
+    },
+    {
+      "key": "TIGR01900",
+      "accession": "TIGR01900.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01900.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01900.1.hmm",
+      "original_name": "dapE-gram_pos",
+      "description": "JCVI: succinyl-diaminopimelate desuccinylase",
+      "length": 351,
+      "TC": "304.2 304.2",
+      "GA": "304.2 304.2",
+      "sha256": "0328b598cf1d0d0a90faae86f94a9015d7cecd52d6b00a89cc65f73715c3e151",
+      "bytes": 164361,
+      "targets": [
+        "dapE"
+      ]
+    },
+    {
+      "key": "TIGR00652",
+      "accession": "TIGR00652.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00652.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00652.1.hmm",
+      "original_name": "DapF",
+      "description": "JCVI: diaminopimelate epimerase",
+      "length": 270,
+      "TC": "114.65 114.65",
+      "GA": "114.65 114.65",
+      "sha256": "6b26ea1b94363126a5359c924402451476fcdb24b1c5a1934e1044c5032b00bd",
+      "bytes": 126670,
+      "targets": [
+        "dapF"
+      ]
+    },
+    {
+      "key": "NF006570",
+      "accession": "NF006570.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006570.0.HMM",
+      "relative_file": "hmms/ncbi/NF006570.0.hmm",
+      "original_name": "PRK09084.1",
+      "description": "NCBI Protein Cluster (PRK): lysine-sensitive aspartokinase 3",
+      "length": 452,
+      "TC": "455 455",
+      "GA": "455 455",
+      "sha256": "60189c86691e995aacf1dc66a1ae0a5aa00719b99cbf434cae3b91b65e696aa3",
+      "bytes": 211325,
+      "targets": [
+        "lysC"
+      ]
+    },
+    {
+      "key": "TIGR00656",
+      "accession": "TIGR00656.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00656.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00656.1.hmm",
+      "original_name": "asp_kin_monofn",
+      "description": "JCVI: aspartate kinase, monofunctional class",
+      "length": 407,
+      "TC": "402.25 402.25",
+      "GA": "402.25 402.25",
+      "sha256": "487315bcd5872e79878a4cd1ced12e1780a6d85d6c89b62905175b51ab7c2b0e",
+      "bytes": 190403,
+      "targets": [
+        "lysC"
+      ]
+    },
+    {
+      "key": "TIGR00978",
+      "accession": "TIGR00978.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00978.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00978.1.hmm",
+      "original_name": "asd_EA",
+      "description": "JCVI: aspartate-semialdehyde dehydrogenase",
+      "length": 342,
+      "TC": "301.2 301.2",
+      "GA": "301.2 301.2",
+      "sha256": "0de983294ed46c1b2f289ca33ea37ea411743500924fb048f41ddf3085b16780",
+      "bytes": 160163,
+      "targets": [
+        "asd"
+      ]
+    },
+    {
+      "key": "TIGR01296",
+      "accession": "TIGR01296.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01296.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01296.1.hmm",
+      "original_name": "asd_B",
+      "description": "JCVI: aspartate-semialdehyde dehydrogenase",
+      "length": 339,
+      "TC": "324.2 324.2",
+      "GA": "324.2 324.2",
+      "sha256": "90a60a815f29f0cfdc28ffe413651e89e59b05f61e6ae57058dc96f7e41d0f55",
+      "bytes": 158770,
+      "targets": [
+        "asd"
+      ]
+    },
+    {
+      "key": "TIGR01745",
+      "accession": "TIGR01745.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01745.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01745.1.hmm",
+      "original_name": "asd_gamma",
+      "description": "JCVI: aspartate-semialdehyde dehydrogenase",
+      "length": 366,
+      "TC": "402.9 402.9",
+      "GA": "402.9 402.9",
+      "sha256": "a30a3d0aa9ea925ed1b36b3cbc41ddd756080c445a5de41f2a0093161594a689",
+      "bytes": 171327,
+      "targets": [
+        "asd"
+      ]
+    },
+    {
+      "key": "NF006959",
+      "accession": "NF006959.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006959.0.HMM",
+      "relative_file": "hmms/ncbi/NF006959.0.hmm",
+      "original_name": "PRK09436.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional aspartate kinase/homoserine dehydrogenase I",
+      "length": 819,
+      "TC": "726 726",
+      "GA": "726 726",
+      "sha256": "2ca1afb8ce6ee4fa0b4c47528999cd19818c04c1d24ed0062bc6f16829f92ef8",
+      "bytes": 382004,
+      "targets": [
+        "thrA"
+      ]
+    },
+    {
+      "key": "TIGR00191",
+      "accession": "TIGR00191.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00191.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00191.1.hmm",
+      "original_name": "thrB",
+      "description": "JCVI: homoserine kinase",
+      "length": 304,
+      "TC": "168.25 168.25",
+      "GA": "168.25 168.25",
+      "sha256": "0b3bb4e60e0b32ba3ce5a2b27bd2224eed39ed587166345602e57e9db8ddd7d9",
+      "bytes": 142479,
+      "targets": [
+        "thrB"
+      ]
+    },
+    {
+      "key": "TIGR00938",
+      "accession": "TIGR00938.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00938.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00938.1.hmm",
+      "original_name": "thrB_alt",
+      "description": "JCVI: homoserine kinase",
+      "length": 307,
+      "TC": "255.9 255.9",
+      "GA": "255.9 255.9",
+      "sha256": "55756b4727cbc7bcfdbd89e23578cb2ff7dc45de7ab6680b05a90b9cc82a0dd7",
+      "bytes": 143872,
+      "targets": [
+        "thrB"
+      ]
+    },
+    {
+      "key": "TIGR00260",
+      "accession": "TIGR00260.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR00260.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR00260.1.hmm",
+      "original_name": "thrC",
+      "description": "JCVI: threonine synthase",
+      "length": 340,
+      "TC": "167.1 167.1",
+      "GA": "167.1 167.1",
+      "sha256": "2d3e9ab2c865eee1d27181d17e6c638e18ef1757c70e90e616ea59094d0d6477",
+      "bytes": 159211,
+      "targets": [
+        "thrC"
+      ]
+    },
+    {
+      "key": "NF008865",
+      "accession": "NF008865.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF008865.0.HMM",
+      "relative_file": "hmms/ncbi/NF008865.0.hmm",
+      "original_name": "PRK11898.1",
+      "description": "NCBI Protein Cluster (PRK): prephenate dehydratase",
+      "length": 284,
+      "TC": "219 219",
+      "GA": "219 219",
+      "sha256": "075b8e3b722beca15794a15153cdf14f4c3aa71d9a45732edbd5c7c4fb021bcf",
+      "bytes": 133195,
+      "targets": [
+        "pheA"
+      ]
+    },
+    {
+      "key": "NF007910",
+      "accession": "NF007910.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF007910.0.HMM",
+      "relative_file": "hmms/ncbi/NF007910.0.hmm",
+      "original_name": "PRK10622.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional chorismate mutase/prephenate dehydratase",
+      "length": 386,
+      "TC": "577 577",
+      "GA": "577 577",
+      "sha256": "882aca059cf3889fb19c036888fd90cc180e565fd88d112ade7a9fc3c7ddb95e",
+      "bytes": 180655,
+      "targets": [
+        "pheA"
+      ]
+    },
+    {
+      "key": "TIGR01797",
+      "accession": "TIGR01797.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01797.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01797.1.hmm",
+      "original_name": "CM_P_1",
+      "description": "JCVI: chorismate mutase",
+      "length": 83,
+      "TC": "73.7 73.7",
+      "GA": "73.7 73.7",
+      "sha256": "0352788e87045113810d809f77a3885402b11790516370c585ff5d5e40845da3",
+      "bytes": 39705,
+      "targets": [
+        "pheA"
+      ]
+    },
+    {
+      "key": "NF006409",
+      "accession": "NF006409.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006409.0.HMM",
+      "relative_file": "hmms/ncbi/NF006409.0.hmm",
+      "original_name": "PRK08655.1-3",
+      "description": "NCBI Protein Cluster (PRK): prephenate dehydrogenase",
+      "length": 290,
+      "TC": "310 310",
+      "GA": "310 310",
+      "sha256": "e3709e052aedf96536f15ebc22fc2afd4f40988462877e463736c52aa27dc080",
+      "bytes": 135987,
+      "targets": [
+        "tyrA"
+      ]
+    },
+    {
+      "key": "NF008400",
+      "accession": "NF008400.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF008400.0.HMM",
+      "relative_file": "hmms/ncbi/NF008400.0.hmm",
+      "original_name": "PRK11199.1",
+      "description": "NCBI Protein Cluster (PRK): bifunctional chorismate mutase/prephenate dehydrogenase",
+      "length": 374,
+      "TC": "273 273",
+      "GA": "273 273",
+      "sha256": "cc5368e77f75c24f05dc112fc789ee761ce1c8348489c2f7f90756f391df70a8",
+      "bytes": 175078,
+      "targets": [
+        "tyrA"
+      ]
+    },
+    {
+      "key": "TIGR01799",
+      "accession": "TIGR01799.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01799.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01799.1.hmm",
+      "original_name": "CM_T",
+      "description": "JCVI: chorismate mutase",
+      "length": 83,
+      "TC": "95.9 95.9",
+      "GA": "95.9 95.9",
+      "sha256": "7c6a004584fb28d37dfbefb2d941a77334636fe081050e9f6c147431ccb07930",
+      "bytes": 39700,
+      "targets": [
+        "tyrA"
+      ]
+    },
+    {
+      "key": "NF006719",
+      "accession": "NF006719.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "context_only",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006719.0.HMM",
+      "relative_file": "hmms/ncbi/NF006719.0.hmm",
+      "original_name": "PRK09257.1",
+      "description": "NCBI Protein Cluster (PRK): aromatic amino acid transaminase",
+      "length": 397,
+      "TC": "377 377",
+      "GA": "377 377",
+      "sha256": "1a31aa517f1c5c1b5d26532fe813d485e7b0eb0378a00995b27886475fda1434",
+      "bytes": 185748,
+      "targets": [
+        "AAT"
+      ]
+    },
+    {
+      "key": "NF006228",
+      "accession": "NF006228.0",
+      "source_database": "NCBIfam/PRK",
+      "group": "context_only",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/NF006228.0.HMM",
+      "relative_file": "hmms/ncbi/NF006228.0.hmm",
+      "original_name": "PRK08360.1",
+      "description": "NCBI Protein Cluster (PRK): aspartate aminotransferase family protein",
+      "length": 443,
+      "TC": "608 608",
+      "GA": "608 608",
+      "sha256": "47edadf1c540e63ae17cc5b21a05480dcfc9ac5372af08c56ed94aa3dc7371c1",
+      "bytes": 207147,
+      "targets": [
+        "AAT"
+      ]
+    },
+    {
+      "key": "PF00155",
+      "accession": "PF00155.28",
+      "source_database": "Pfam",
+      "group": "context_only",
+      "url": "https://www.ebi.ac.uk/interpro/api/entry/pfam/PF00155/?annotation=hmm",
+      "relative_file": "hmms/pfam/PF00155.hmm",
+      "original_name": "Aminotran_1_2",
+      "description": "Aminotransferase class I and II",
+      "length": 361,
+      "TC": "19.7 19.7;",
+      "GA": "19.7 19.7;",
+      "sha256": "bb1f559c07980c67031f33265c4c9f428f11edbcb57eb216fe680545c52cab4c",
+      "bytes": 169077,
+      "targets": [
+        "AAT"
+      ]
+    },
+    {
+      "key": "TIGR01885",
+      "accession": "TIGR01885.1",
+      "source_database": "TIGRFAM",
+      "group": "function_models",
+      "url": "https://ftp.ncbi.nlm.nih.gov/hmm/20.0/hmm_PGAP.HMM/TIGR01885.1.HMM",
+      "relative_file": "hmms/ncbi/TIGR01885.1.hmm",
+      "original_name": "Orn_aminotrans",
+      "description": "JCVI: ornithine--oxo-acid transaminase",
+      "length": 402,
+      "TC": "378.4 378.4",
+      "GA": "378.4 378.4",
+      "sha256": "73429621ec29d8ddccad6563d826b8265b33252160554aadf4217f208e7981ed",
+      "bytes": 188069,
+      "targets": [
+        "OAT"
+      ]
+    },
+    {
+      "key": "PF00202",
+      "accession": "PF00202.28",
+      "source_database": "Pfam",
+      "group": "context_only",
+      "url": "https://www.ebi.ac.uk/interpro/api/entry/pfam/PF00202/?annotation=hmm",
+      "relative_file": "hmms/pfam/PF00202.hmm",
+      "original_name": "Aminotran_3",
+      "description": "Aminotransferase class-III",
+      "length": 403,
+      "TC": "30.5 30.5;",
+      "GA": "30.5 30.5;",
+      "sha256": "9b12c46939ae68628bb3aec5427193babc7714ff34984252b531a40d2e507f3b",
+      "bytes": 188600,
+      "targets": [
+        "OAT"
+      ]
+    }
+  ]
+}
