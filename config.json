@@ -3,33 +3,19 @@
   "taxdump": "/home/ark/databases/taxdump",
   "phyloflash_db": "/home/ark/databases/phyloflash/138.1",
   "bakta_db": "/home/ark/databases/bakta-compatible-1.10.3/db",
-  "checkm": [
-    "conda",
-    "run",
-    "--no-capture-output",
-    "-n",
-    "checkm_env",
-    "checkm"
-  ],
   "tools": {
+    "checkm": [
+      "conda", "run", "--no-capture-output",
+      "-n", "checkm_env", "checkm"
+    ],
     "phyloFlash.pl": [
-      "conda",
-      "run",
-      "--no-capture-output",
-      "-n",
-      "mh-phyloflash",
-      "phyloFlash.pl"
+      "conda", "run", "--no-capture-output",
+      "-n", "mh-phyloflash", "phyloFlash.pl"
     ],
     "tiara": [
-      "conda",
-      "run",
-      "--no-capture-output",
-      "-n",
-      "mh-tiara",
-      "tiara"
+      "conda", "run", "--no-capture-output",
+      "-n", "mh-tiara", "tiara"
     ],
-    "bakta": [
-      "bakta"
-    ]
+    "bakta": ["bakta"]
   }
 }
