@@ -82,26 +82,32 @@ class Checkpoints:
     """
 
     @classmethod
-    def read_only(cls, out, force=False, contexts=None, previous_contexts=None):
+    def read_only(cls, out, force=False, contexts=None, previous_contexts=None, namespace=None):
         """Inspect completion proofs without creating directories or changing logs."""
         self = cls.__new__(cls)
-        self.out = Path(out).resolve()
-        self.dir = self.out / 'work/checkpoints'
+        self._locations(out, namespace)
         self.enabled, self.force = True, force
         self.contexts, self.previous_contexts = contexts or {}, previous_contexts
-        self.status_path = self.out / 'pipeline_status.json'
         self.legacy_run = not self.status_path.exists()
         return self
 
-    def __init__(self, out, enabled=True, force=False, contexts=None, previous_contexts=None, log=print):
+    def _locations(self, out, namespace=None):
+        if namespace is not None and (not isinstance(namespace, str) or not namespace or
+                                      not namespace.replace('_', '').replace('-', '').isalnum()):
+            raise ValueError('Invalid checkpoint namespace')
         self.out = Path(out).resolve()
         self.dir = self.out / 'work/checkpoints'
+        if namespace:
+            self.dir = self.dir / namespace
+        self.status_path = self.out / ((namespace + '_status.json') if namespace else 'pipeline_status.json')
+        self.timeline = self.out / ((namespace + '.log') if namespace else 'pipeline.log')
+
+    def __init__(self, out, enabled=True, force=False, contexts=None, previous_contexts=None, log=print, namespace=None):
+        self._locations(out, namespace)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.enabled, self.force = enabled, force
         self.contexts, self.previous_contexts = contexts or {}, previous_contexts
         self.log = log
-        self.status_path = self.out / 'pipeline_status.json'
-        self.timeline = self.out / 'pipeline.log'
         self.legacy_run = not self.status_path.exists()
         try:
             self.status = json.loads(self.status_path.read_text())

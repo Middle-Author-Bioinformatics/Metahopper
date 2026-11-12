@@ -141,6 +141,49 @@ def load_pipeline(args):
     return module
 
 
+def load_postprocess(args):
+    path = args.pipeline_dir / 'metahopper_postprocess.py'
+    if not path.is_file():
+        raise ValueError('Install metahopper_postprocess.py from the existing-final-bins update.')
+    sys.path.insert(0, str(args.pipeline_dir))
+    spec = importlib.util.spec_from_file_location('_metahopper_final_bins', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def select_reusable_final(args, samples):
+    pipeline = load_pipeline(args)
+    postprocess = load_postprocess(args)
+    config = load_config(args)
+    selected = []
+    for sample in samples:
+        if not (sample.output / 'run.json').is_file():
+            print('Skipping ' + sample.name + ': no recorded run', flush=True)
+            continue
+        rows = {r['stage']: r for r in pipeline.audit_reuse(sample_options(pipeline, args, sample), config, sample.output)}
+        failed = [name for name in ('assembly', 'preliminary_diamond') if rows[name]['status'] != 'REUSE']
+        if failed:
+            print('Skipping ' + sample.name + ': retained ' + ', '.join(failed) + ' not verified for reuse', flush=True)
+            continue
+        try:
+            postprocess.validate_final(sample.output)
+        except (OSError, ValueError) as exc:
+            print('Skipping ' + sample.name + ': ' + str(exc), flush=True)
+            continue
+        selected.append(sample)
+    if not selected:
+        raise ValueError('No samples have both reusable assembly/search outputs and usable existing final bins. No analysis was started.')
+    return selected
+
+
+def postprocess_command(args, sample):
+    return [sys.executable, str(args.pipeline_dir / 'metahopper_postprocess.py'),
+            '-i', str(sample.output), '-c', str(args.config), '-t', str(args.threads),
+            '--memory', str(args.memory), '--pathway-jobs', str(args.pathway_jobs),
+            '--graph-max-nodes', str(args.graph_max_nodes), '--megahit-max-links', str(args.megahit_max_links)]
+
+
 def load_config(args):
     config = json.loads(args.config.read_text())
     if not isinstance(config, dict):
@@ -189,6 +232,9 @@ def publish_command(args, sample):
                '--megahit-max-links', str(args.megahit_max_links), '--pathways-rank', 'genus']
     if args.aws_profile:
         command += ['--profile', args.aws_profile]
+    if args.existing_final_only:
+        # The postprocessor has just refreshed both catalogue and HTML.
+        command.append('--skip-refresh')
     return command
 
 
@@ -217,8 +263,13 @@ def preflight(args, sample):
             raise ValueError('Install the latest complete Pathways update: ' + str(script))
     if not args.publish_only:
         config = load_config(args)
-        module = load_pipeline(args)
-        module.validate(sample_options(module, args, sample), config)
+        if args.existing_final_only:
+            module = load_postprocess(args)
+            module.validate_final(sample.output)
+            module.validate(config, args.threads, args.pathway_jobs)
+        else:
+            module = load_pipeline(args)
+            module.validate(sample_options(module, args, sample), config)
         print('MetaHopper, Bakta database, PathwayGenie panel and environment checks passed.', flush=True)
     if shutil.which('aws') is None:
         raise ValueError('AWS CLI is missing from this environment/PATH.')
@@ -228,10 +279,10 @@ def preflight(args, sample):
     print('AWS credentials are available. S3 upload permissions are checked when publishing.', flush=True)
 
 
-def verify_completed(output):
+def verify_completed(output, existing_final_only=False):
     """A zero exit status alone does not prove that optional analyses succeeded."""
     run = json.loads((output / 'run.json').read_text())
-    state = json.loads((output / 'pipeline_status.json').read_text())
+    state = json.loads((output / ('postprocess_status.json' if existing_final_only else 'pipeline_status.json')).read_text())
     if run.get('status') != 'completed' or state.get('current_step'):
         raise ValueError('Sample pipeline has not completed: ' + str(output))
     steps = state.get('steps', {})
@@ -245,6 +296,13 @@ def verify_completed(output):
     report = output / 'metahopper_report.html'
     if not report.is_file() or not report.stat().st_size:
         raise ValueError('Report is missing or empty: ' + str(report))
+    if existing_final_only:
+        if state.get('status') != 'completed' or state.get('mode') != 'existing_final_bins':
+            raise ValueError('Final-bin postprocessing has not completed')
+        from metahopper_state import fingerprint
+        current = {str(p.relative_to(output)): fingerprint(p) for p in sorted((output / 'final/bins').glob('*/*.fasta'))}
+        if not current or current != state.get('bin_fastas'):
+            raise ValueError('Final bin FASTAs changed since postprocessing')
     summary = output / 'final/annotation/genus/summary.tsv'
     with summary.open() as handle:
         rows = list(csv.DictReader(handle, delimiter='\t'))
@@ -315,10 +373,11 @@ def run_batch(args, samples):
             if not args.publish_only:
                 # Recheck immediately before this sample, since earlier ones may take hours.
                 audit_samples(args, [sample], enforce=True)
-                run_logged(pipeline_command(args, sample), Path(row['pipeline_log']))
+                run_logged(postprocess_command(args, sample) if args.existing_final_only else pipeline_command(args, sample),
+                           Path(row['pipeline_log']))
             row['stage'] = 'verify'
             save_summary(summary, rows)
-            verify_completed(sample.output)
+            verify_completed(sample.output, args.existing_final_only)
             row['stage'] = 'publish'
             save_summary(summary, rows)
             run_logged(publish_command(args, sample), Path(row['publish_log']))
@@ -354,6 +413,8 @@ def parse_args(argv=None):
     parser.add_argument('--megahit-max-links', type=int, default=10000000)
     parser.add_argument('--sample', action='append', help='Only this input stem; repeat to select several. Explicit APHCOR uses its existing -2 output.')
     parser.add_argument('--exclude', action='append', default=[], help='Additional input stem to exclude')
+    parser.add_argument('--existing-final-only', action='store_true',
+                        help='Select only runs with verified assembly/search caches and existing final bins; run quality/annotations/report/publishing on those bins without rebuilding them')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--plan', action='store_true', help='Print selected commands; no analysis, checks or uploads')
     mode.add_argument('--preflight-only', action='store_true', help='Check software, database, HMM panel and AWS credentials; no analysis/upload')
@@ -373,6 +434,8 @@ def parse_args(argv=None):
         parser.error('Graph limits must be positive')
     if args.publish_only and args.force_overwrite:
         parser.error('--publish-only cannot be combined with --force-overwrite')
+    if args.existing_final_only and (args.force_overwrite or args.allow_recompute):
+        parser.error('--existing-final-only preserves existing bins and cannot be combined with recomputation flags')
     if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', args.bucket):
         parser.error('--bucket must be an S3 bucket name')
     if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*/?', args.prefix)
@@ -387,10 +450,12 @@ def main(argv=None):
     if args.sample and set(args.sample) & set(args.exclude):
         raise ValueError('A sample cannot be both selected and excluded.')
     samples = discover_samples(args.source, args.sample, excluded)
+    if args.existing_final_only:
+        samples = select_reusable_final(args, samples)
     print('Selected ' + str(len(samples)) + ' samples: ' + ', '.join(s.name for s in samples), flush=True)
     if args.plan:
         for sample in samples:
-            print('\n' + shlex.join(pipeline_command(args, sample)))
+            print('\n' + shlex.join(postprocess_command(args, sample) if args.existing_final_only else pipeline_command(args, sample)))
             print(shlex.join(publish_command(args, sample)))
         return 0
     if args.reuse_audit:
