@@ -3,7 +3,7 @@
 
 Run with the Python in metahopper-lean. No additional Python packages required.
 Default: discover *_R1/R2.fq.gz or .fastq.gz, excluding APHCOR_AUC2351.
-Use --plan to print commands, or --preflight-only to check setup without analysis.
+Use --reuse-audit to inspect saved assemblies/searches without running analysis.
 """
 from __future__ import annotations
 
@@ -43,6 +43,46 @@ def now():
     return datetime.now().astimezone().isoformat(timespec='seconds')
 
 
+def saved_reads_match(folder, read1, read2):
+    manifest = json.loads((folder / 'run.json').read_text())
+    arguments = manifest.get('arguments', {})
+    def matches(value, expected):
+        if not value:
+            return False
+        path = Path(os.path.expandvars(str(value))).expanduser()
+        possibilities = [path] if path.is_absolute() else [folder.parent / path, folder / path]
+        return any(candidate.resolve() == expected.resolve() for candidate in possibilities)
+    return matches(arguments.get('read1'), read1) and matches(arguments.get('read2'), read2)
+
+
+def choose_output(source, name, read1, read2):
+    preferred = source / ('APHCOR_AUC2351-2' if name == 'APHCOR_AUC2351' else name)
+    candidates = [preferred]
+    if name.endswith('_combined'):
+        candidates.append(source / name[:-len('_combined')])
+    for folder in candidates:
+        if (folder / 'run.json').is_file():
+            if not saved_reads_match(folder, read1, read2):
+                raise ValueError('Saved read pair does not match the selected inputs in ' + str(folder / 'run.json')
+                                 + '. Review these inputs before reusing this run.')
+            return folder
+        if folder.exists() and any(folder.iterdir()):
+            raise ValueError('Existing output has no usable run.json: ' + str(folder))
+    # Also recognize a renamed run when its saved input pair identifies it.
+    matches = []
+    for manifest in sorted(source.glob('*/run.json')):
+        if manifest.parent in candidates:
+            continue
+        try:
+            if saved_reads_match(manifest.parent, read1, read2):
+                matches.append(manifest.parent)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    if len(matches) > 1:
+        raise ValueError('Several saved runs use these inputs: ' + ', '.join(map(str, matches)))
+    return matches[0] if matches else preferred
+
+
 def discover_samples(source, selected=None, excluded=()):
     pairs = {}
     for extension in ('.fq.gz', '.fastq.gz'):
@@ -66,25 +106,79 @@ def discover_samples(source, selected=None, excluded=()):
             raise ValueError('Missing R1 or R2 mate for ' + name)
         if any(not p.is_file() or p.stat().st_size == 0 for p in pair.values()):
             raise ValueError('Missing or empty FASTQ: ' + name)
-        # Explicitly selecting the already processed example reuses its real run.
-        output_name = 'APHCOR_AUC2351-2' if name == 'APHCOR_AUC2351' else name
-        samples.append(Sample(name, pair[1].resolve(), pair[2].resolve(), source / output_name))
+        output = choose_output(source, name, pair[1], pair[2])
+        samples.append(Sample(name, pair[1].resolve(), pair[2].resolve(), output))
     if not samples:
         raise ValueError('No selected paired FASTQs found in ' + str(source))
     return samples
 
 
 def pipeline_command(args, sample):
-    command = [sys.executable, str(args.pipeline_dir / 'MetaHopper.py'),
-               '-1', str(sample.read1), '-2', str(sample.read2), '-o', str(sample.output),
+    command = [sys.executable, str(args.pipeline_dir / 'MetaHopper.py')]
+    if (sample.output / 'run.json').is_file():
+        command += ['--resume', str(sample.output)]
+    else:
+        command += ['-1', str(sample.read1), '-2', str(sample.read2), '-o', str(sample.output),
+                    '--rescue-eukarya', '--skip-phyloflash']
+    command += [
                '-c', str(args.config), '-t', str(args.threads), '--memory', str(args.memory),
-               '--rescue-eukarya', '--skip-phyloflash', '--checkm',
+               '--checkm',
                '--annotate', 'bakta', '--annotation-rank', 'genus',
                '--pathways', 'pathwaygenie', '--pathway-rank', 'genus',
                '--pathway-jobs', str(args.pathway_jobs)]
     if args.force_overwrite:
         command.append('--force-overwrite')
     return command
+
+
+def load_pipeline(args):
+    sys.path.insert(0, str(args.pipeline_dir))
+    spec = importlib.util.spec_from_file_location('_metahopper_batch_preflight', args.pipeline_dir / 'MetaHopper.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, 'parse_args') or not hasattr(module, 'audit_reuse'):
+        raise ValueError('Install the updated MetaHopper.py and metahopper_state.py supplied with this resume fix.')
+    return module
+
+
+def load_config(args):
+    config = json.loads(args.config.read_text())
+    if not isinstance(config, dict):
+        raise ValueError('MetaHopper config must be a JSON object: ' + str(args.config))
+    for key in ('diamond_db', 'taxdump', 'phyloflash_db', 'bakta_db', 'annotation_metadata',
+                'pathwaygenie_script', 'pathwaygenie_hmm_dir', 'pathwaygenie_config'):
+        if config.get(key):
+            value = Path(os.path.expandvars(config[key])).expanduser()
+            config[key] = str((args.config.parent / value).resolve())
+    return config
+
+
+def sample_options(module, args, sample):
+    options = module.parse_args(pipeline_command(args, sample)[2:])
+    for key in ('read1', 'read2', 'assembly', 'assembly_graph', 'references'):
+        if getattr(options, key, None):
+            setattr(options, key, str(Path(getattr(options, key)).expanduser().resolve()))
+    return options
+
+
+def audit_samples(args, samples, module=None, config=None, enforce=False):
+    module = module or load_pipeline(args)
+    config = config if config is not None else load_config(args)
+    blockers = []
+    for sample in samples:
+        print('\n' + sample.name + ' -> ' + str(sample.output), flush=True)
+        if not (sample.output / 'run.json').is_file():
+            print('  NEW: no saved run; the pipeline will start this sample.', flush=True)
+            continue
+        options = sample_options(module, args, sample)
+        for row in module.audit_reuse(options, config, sample.output):
+            print('  ' + row['stage'] + ': ' + row['status'] + ' — ' + row['reason'], flush=True)
+            if row['stage'] in ('assembly', 'preliminary_diamond') and row['retained'] and row['status'] != 'REUSE':
+                blockers.append(sample.name + ': ' + row['stage'])
+    if blockers and enforce and not (args.allow_recompute or args.force_overwrite):
+        raise ValueError('Retained assemblies/searches could not be verified for reuse: ' + '; '.join(blockers)
+                         + '. No analysis was started. Review --reuse-audit; --allow-recompute explicitly permits rebuilding invalid stages.')
+    return blockers
 
 
 def publish_command(args, sample):
@@ -122,19 +216,9 @@ def preflight(args, sample):
         if not all(flag in result.stdout for flag in flags):
             raise ValueError('Install the latest complete Pathways update: ' + str(script))
     if not args.publish_only:
-        config = json.loads(args.config.read_text())
-        if not isinstance(config, dict):
-            raise ValueError('MetaHopper config must be a JSON object: ' + str(args.config))
-        for key in ('diamond_db', 'taxdump', 'phyloflash_db', 'bakta_db', 'annotation_metadata',
-                    'pathwaygenie_script', 'pathwaygenie_hmm_dir', 'pathwaygenie_config'):
-            if config.get(key):
-                value = Path(os.path.expandvars(config[key])).expanduser()
-                config[key] = str((args.config.parent / value).resolve())
-        sys.path.insert(0, str(args.pipeline_dir))
-        spec = importlib.util.spec_from_file_location('_metahopper_batch_preflight', args.pipeline_dir / 'MetaHopper.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        module.validate(validation_options(args, sample), config)
+        config = load_config(args)
+        module = load_pipeline(args)
+        module.validate(sample_options(module, args, sample), config)
         print('MetaHopper, Bakta database, PathwayGenie panel and environment checks passed.', flush=True)
     if shutil.which('aws') is None:
         raise ValueError('AWS CLI is missing from this environment/PATH.')
@@ -208,6 +292,8 @@ def batch_lock(source):
 
 def run_batch(args, samples):
     preflight(args, samples[0])
+    if not args.publish_only:
+        audit_samples(args, samples, enforce=True)
     if args.preflight_only:
         return 0
     base = args.source / 'batch_logs'
@@ -227,6 +313,8 @@ def run_batch(args, samples):
             row['stage'] = 'verify' if args.publish_only else 'pipeline'
             save_summary(summary, rows)
             if not args.publish_only:
+                # Recheck immediately before this sample, since earlier ones may take hours.
+                audit_samples(args, [sample], enforce=True)
                 run_logged(pipeline_command(args, sample), Path(row['pipeline_log']))
             row['stage'] = 'verify'
             save_summary(summary, rows)
@@ -270,6 +358,8 @@ def parse_args(argv=None):
     mode.add_argument('--plan', action='store_true', help='Print selected commands; no analysis, checks or uploads')
     mode.add_argument('--preflight-only', action='store_true', help='Check software, database, HMM panel and AWS credentials; no analysis/upload')
     mode.add_argument('--publish-only', action='store_true', help='Verify completed outputs and retry publishing without running the pipeline')
+    mode.add_argument('--reuse-audit', action='store_true', help='Read saved settings/checkpoints and print reuse decisions; no analysis, AWS calls or output changes')
+    parser.add_argument('--allow-recompute', action='store_true', help='Allow retained assemblies/searches to be rebuilt when their reuse proofs fail')
     parser.add_argument('--force-overwrite', action='store_true', help='Explicitly recompute enabled pipeline stages instead of reusing successes')
     args = parser.parse_args(argv)
     for key in ('source', 'pipeline_dir', 'publisher'):
@@ -303,6 +393,8 @@ def main(argv=None):
             print('\n' + shlex.join(pipeline_command(args, sample)))
             print(shlex.join(publish_command(args, sample)))
         return 0
+    if args.reuse_audit:
+        return 1 if audit_samples(args, samples) else 0
     with batch_lock(args.source):
         return run_batch(args, samples)
 

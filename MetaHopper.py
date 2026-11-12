@@ -126,6 +126,60 @@ def checkpoint_context(args, config):
 # ---------------------------------------------------------------------------------------
 # FASTA helpers
 # ---------------------------------------------------------------------------------------
+def audit_reuse(args, config, out):
+    """Predict early-stage reuse with the pipeline's real checks, without writes."""
+    out = Path(out).resolve()
+    previous = json.loads((out / 'run.json').read_text())
+    old_config = previous.get('config')
+    old_arguments = previous.get('arguments')
+    previous_contexts = None
+    if old_config and old_arguments:
+        try:
+            previous_contexts = checkpoint_context(argparse.Namespace(**old_arguments), old_config)
+        except (AttributeError, TypeError, KeyError):
+            # Missing old settings are not evidence for modern defaults.
+            previous_contexts = None
+    ck = Checkpoints.read_only(out, force=getattr(args, 'force_overwrite', False),
+                               contexts=checkpoint_context(args, config), previous_contexts=previous_contexts)
+    qdir = out / 'qc'
+    reads = [qdir / 'qc.R1.fq.gz'] + ([qdir / 'qc.R2.fq.gz'] if args.read2 else [])
+    assembly = out / ('assembly/preliminary_contigs.fasta' if args.assembly else 'megahit/final.contigs.fa')
+    assembly_outputs = [assembly]
+    if getattr(args, 'assembly_graph', None):
+        suffix = '.gfa.gz' if str(args.assembly_graph).endswith('.gz') else '.gfa'
+        assembly_outputs.append(out / 'assembly' / ('preliminary_graph' + suffix))
+    cdir = out / 'classification'
+    specs = [('qc', [args.read1, args.read2], reads + [qdir / 'fastp.json', qdir / 'fastp.html'], []),
+             ('assembly', ([args.assembly] if args.assembly else reads) + [getattr(args, 'assembly_graph', None)],
+              assembly_outputs, [] if args.assembly else ['qc']),
+             ('preliminary_prodigal', [assembly], [cdir / 'orfs.faa', cdir / 'orfs.gff'], ['assembly'])]
+    if args.prefilter == 'tiara':
+        specs.append(('tiara', [assembly], [cdir / 'tiara.tsv'], ['assembly']))
+    specs.append(('preliminary_diamond', [cdir / 'orfs.faa'] + ([cdir / 'tiara.tsv'] if args.prefilter == 'tiara' else []),
+                  [out / 'diamond/hits.tsv'], ['preliminary_prodigal'] + (['tiara'] if args.prefilter == 'tiara' else [])))
+    rows, statuses = [], {}
+    for stage, inputs, outputs, dependencies in specs:
+        missing = [str(path) for path in outputs if not path.is_file()]
+        changed_upstream = [name for name in dependencies if statuses[name] != 'REUSE']
+        record = ck.peek(stage, inputs=inputs, required=outputs, legacy_path=out / 'run.json')
+        if record and not changed_upstream:
+            status, reason = 'REUSE', 'Completion proof, settings, input and output metadata match'
+        else:
+            status = 'RECOMPUTE' if any(path.is_file() for path in outputs) else 'NEW'
+            if getattr(args, 'force_overwrite', False):
+                reason = '--force-overwrite was selected'
+            elif missing:
+                reason = 'Missing required output: ' + ', '.join(missing)
+            elif changed_upstream:
+                reason = 'Upstream stage would run again: ' + ', '.join(changed_upstream)
+            else:
+                reason = 'No matching successful checkpoint or eligible completed legacy run; settings, files or tools may have changed'
+        statuses[stage] = status
+        rows.append(dict(stage=stage, status=status, reason=reason, outputs=list(map(str, outputs)),
+                         retained=any(path.is_file() for path in outputs)))
+    return rows
+
+
 def write_fasta(path, records, wrap=70):
     """7.4 write_fasta: plain, 70-column."""
     with open(path, 'w') as fh:
@@ -432,7 +486,8 @@ def stage_qc(runner, args, out, ck):
     qdir = out / 'qc'; qc1, qc2 = qdir / 'qc.R1.fq.gz', qdir / 'qc.R2.fq.gz'
     reads = [qc1] + ([qc2] if args.read2 else [])
     outputs = reads + [qdir / 'fastp.json', qdir / 'fastp.html']
-    if ck.get('qc', inputs=[args.read1, args.read2], required=outputs): return reads
+    if ck.get('qc', inputs=[args.read1, args.read2], required=outputs,
+              legacy_path=out / 'logs/previous_run.json'): return reads
     note('2    Read QC (fastp)')
     qdir.mkdir(exist_ok=True)
     cmd = ['-i', args.read1, '-o', qc1, '--thread', min(args.threads, 16), '--qualified_quality_phred', '20',
@@ -475,7 +530,7 @@ def stage_assembly(runner, args, out, reads, ck):
     if getattr(args, 'assembly_graph', None):
         suffix = '.gfa.gz' if str(args.assembly_graph).endswith('.gz') else '.gfa'
         outputs.append(out / 'assembly' / ('preliminary_graph' + suffix))
-    if ck.get('assembly', inputs=inputs, required=outputs):
+    if ck.get('assembly', inputs=inputs, required=outputs, legacy_path=out / 'logs/previous_run.json'):
         # Backfill graphs for completed runs without assembling reads again.
         if not args.assembly and stage_megahit_graph(out, ck, getattr(args, 'force_overwrite', False)):
             shutil.rmtree(out / 'work/megahit', ignore_errors=True)
@@ -525,7 +580,8 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
     cdir = out / ('classification' if label == 'preliminary' else 'final/classification')
     cdir.mkdir(parents=True, exist_ok=True)
     faa = cdir / 'orfs.faa'
-    if not ck.get(f'{label}_prodigal', inputs=[assembly], required=[faa, cdir / 'orfs.gff']):
+    if not ck.get(f'{label}_prodigal', inputs=[assembly], required=[faa, cdir / 'orfs.gff'],
+                  legacy_path=out / 'logs/previous_run.json'):
         note(f'4    {label}: Prodigal ORFs')
         runner.run('prodigal', ['-i', assembly, '-a', faa, '-o', cdir / 'orfs.gff', '-f', 'gff', '-p', 'meta', '-q'],
                    f'{label}_prodigal')
@@ -534,7 +590,7 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
     pre, selected = {}, None
     if args.prefilter == 'tiara' and label == 'preliminary':
         tpath = cdir / 'tiara.tsv'
-        if not ck.get('tiara', inputs=[assembly], required=[tpath]):
+        if not ck.get('tiara', inputs=[assembly], required=[tpath], legacy_path=out / 'logs/previous_run.json'):
             note('4    Tiara domain prefilter')
             runner.run('tiara', ['-i', assembly, '-o', tpath, '-m', args.min_contig_len, '-t', args.threads, '--probabilities'],
                        'tiara')
@@ -549,7 +605,8 @@ def classify_assembly(runner, args, config, out, assembly, seqs, tax, ck, warnin
     hits = (out / 'diamond' / 'hits.tsv') if label == 'preliminary' else (out / 'final' / 'diamond' / 'hits.tsv')
     hits.parent.mkdir(parents=True, exist_ok=True)
     diamond_inputs = [faa] + ([cdir / 'tiara.tsv'] if args.prefilter == 'tiara' and label == 'preliminary' else [])
-    if not ck.get(f'{label}_diamond', inputs=diamond_inputs, required=[hits]):
+    if not ck.get(f'{label}_diamond', inputs=diamond_inputs, required=[hits],
+                  legacy_path=out / 'logs/previous_run.json'):
         query = cdir / 'diamond_query.faa'
         cap = None if args.max_orfs_per_contig == 'all' else int(args.max_orfs_per_contig)
         total, sent = write_query(faa, query, selected, orfs, cap, args.orf_selection)
@@ -608,7 +665,10 @@ def run_pipeline(args, config, out):
         pass
     previous_contexts = None
     if previous and previous.get('arguments') and previous.get('config'):
-        previous_contexts = checkpoint_context(argparse.Namespace(**previous['arguments']), previous['config'])
+        try:
+            previous_contexts = checkpoint_context(argparse.Namespace(**previous['arguments']), previous['config'])
+        except (AttributeError, TypeError, KeyError):
+            previous_contexts = None
     runner = Runner(config, out, args.memory)
     # Preserve the previous manifest's timestamp: old completed runs can supply a
     # success proof for stages that had no individual checkpoint in older releases.
@@ -1140,7 +1200,7 @@ def write_report(out, args):
         return False
 
 
-def cli(argv=None):
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0], formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('-1', '--read1'); p.add_argument('-2', '--read2')
     p.add_argument('-o', '--out'); p.add_argument('-c', '--config')
@@ -1228,9 +1288,16 @@ def cli(argv=None):
             args = argparse.Namespace(**prev)
         elif not (args.read1 and args.out and args.config):
             p.error('-1, -o and -c are required unless using --resume RUN_DIR')
-        main(args)
+        return args
     except (ValueError, RuntimeError, OSError, ImportError) as e:
         p.exit(1, 'ERROR: ' + str(e) + '\n')
+
+
+def cli(argv=None):
+    try:
+        return main(parse_args(argv))
+    except (ValueError, RuntimeError, OSError, ImportError) as e:
+        raise SystemExit('ERROR: ' + str(e)) from None
 
 
 if __name__ == '__main__':

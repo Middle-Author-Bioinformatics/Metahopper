@@ -81,6 +81,18 @@ class Checkpoints:
     Interrupted, failed, missing, changed, or corrupt records are never successes.
     """
 
+    @classmethod
+    def read_only(cls, out, force=False, contexts=None, previous_contexts=None):
+        """Inspect completion proofs without creating directories or changing logs."""
+        self = cls.__new__(cls)
+        self.out = Path(out).resolve()
+        self.dir = self.out / 'work/checkpoints'
+        self.enabled, self.force = True, force
+        self.contexts, self.previous_contexts = contexts or {}, previous_contexts
+        self.status_path = self.out / 'pipeline_status.json'
+        self.legacy_run = not self.status_path.exists()
+        return self
+
     def __init__(self, out, enabled=True, force=False, contexts=None, previous_contexts=None, log=print):
         self.out = Path(out).resolve()
         self.dir = self.out / 'work/checkpoints'
