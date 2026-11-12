@@ -3,6 +3,14 @@
   "taxdump": "/home/ark/databases/taxdump",
   "phyloflash_db": "/home/ark/databases/phyloflash/138.1",
   "bakta_db": "/home/ark/databases/bakta-compatible-1.10.3/db",
+  "checkm": [
+    "conda",
+    "run",
+    "--no-capture-output",
+    "-n",
+    "checkm_env",
+    "checkm"
+  ],
   "tools": {
     "phyloFlash.pl": [
       "conda",
