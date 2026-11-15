@@ -1097,7 +1097,8 @@ def stage_final(runner, args, config, out, R, groups, seqs, binnable, calls, acc
     return summaries
 
 
-def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings, ck, legacy_run=None):
+def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings, ck, legacy_run=None,
+               preserve_other_ranks=False):
     """One CheckM run over every distinct named final bin (Unclassified excluded)."""
     table = out / 'final/checkm.tsv'
     scored = [bins_dir / rank / 'summary.tsv' for rank in ranks]
@@ -1129,6 +1130,21 @@ def run_checkm(runner, args, out, bins_dir, ranks, summaries, warnings, ck, lega
             results = list(reader)
         if {row.get('Bin Id') for row in results} != set(keymap):
             raise RuntimeError('CheckM did not report every submitted bin')
+        if preserve_other_ranks and table.is_file():
+            with table.open() as handle:
+                reader = csv.DictReader(handle, delimiter='\t')
+                fields = reader.fieldnames
+                selected_names = {name for rank, name in keymap.values()}
+                retained = [row for row in reader if row.get('Bin Id') and (
+                    row['Bin Id'].split('__', 1)[0] not in ranks if '__' in row['Bin Id']
+                    else row['Bin Id'] not in selected_names)]
+            if retained:
+                # A genus-only update must not discard saved results for other ranks.
+                fields = list(dict.fromkeys((fields or []) + list(results[0])))
+                with partial.open('w', newline='') as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fields, delimiter='\t')
+                    writer.writeheader()
+                    writer.writerows(retained + results)
         partial.replace(table)
     except RuntimeError as e:
         warnings.append(f'CheckM failed: {e}'); ck.fail('checkm', str(e)); return
@@ -1257,7 +1273,7 @@ def parse_args(argv=None):
     g.add_argument('--report-max-points', type=int, default=25000)
     g.add_argument('--skip-report', action='store_true')
     g.add_argument('--skip-phyloflash', action='store_true')
-    g.add_argument('--checkm', action='store_true')
+    g.add_argument('--checkm', action='store_true', help='Run CheckM on final bins (off by default; the batch wrapper enables it)')
     g = p.add_argument_group('per-bin annotation')
     g.add_argument('--annotate', choices=['bakta'], help='Annotate final bacterial bins; requires config.bakta_db')
     g.add_argument('--annotation-rank', default='genus', help='Annotate one rank to avoid duplicating nested bins')

@@ -70,7 +70,7 @@ let binMatches=searchBins('sOdAlIs');
 assert(binMatches.length>0);
 assert(binMatches.every(row=>row.dataset.binName.toLowerCase().includes('sodalis')));
 assert(new Set(binMatches.map(row=>row.dataset.rank)).size>=2,'search remained constrained to the selected rank');
-assert.equal(el('rank-filter').disabled,true);assert.equal(el('rank-filter').value,'genus');
+assert.equal(el('rank-filter').disabled,false);assert.equal(el('rank-filter').value,'genus');
 assert(el('bin-search-status').textContent.includes(binMatches.length+' matching bins'));
 const underscored=rankRows.find(row=>row.dataset.binName.includes('_'));assert(underscored);
 binMatches=searchBins('  '+underscored.dataset.binName.replace(/_/g,'  ').toUpperCase()+'  ');
@@ -88,9 +88,9 @@ assert(rankRows.every(row=>(row.style.display==='')===(row.dataset.rank==='genus
 searchBins('Sodalis');searchBins('');
 assert(rankRows.every(row=>(row.style.display==='')===(row.dataset.rank==='genus')));
 assert.deepEqual(rankRows.map(row=>row.innerHTML),originalMetrics,'search changed bin metrics');
-assert(html.match(/Classified bins<\/div><div class="v">[0-9,]+<\/div>/));
-assert(html.match(/Assembly size<\/div><div class="v">[^<]+<\/div>/));
-assert(html.includes('Contigs plotted</div><div class="v">'+initial.scatter.nShown.toLocaleString()+'</div>'));
+assert(!html.includes('class="stats"'));
+assert(!html.includes('id="bin-quality-figure"'));
+assert(html.includes('id="bin-partition-figure"'));
 function lassoAll(){
  const cv=el('cv');cv.listeners[process.env.TEST_POINTER==='1'?'pointerdown':'mousedown']({clientX:0,clientY:0});
  for(const [x,y] of [[1000,0],[1000,540],[0,540],[0,0]])cv.listeners[process.env.TEST_POINTER==='1'?'pointermove':'mousemove']({clientX:x,clientY:y});
@@ -152,7 +152,7 @@ async function finish(){
  catalogue.run_name='wrong-run';await el('graph-file').onchange.call(el('graph-file'));
  assert(el('graph-status').textContent.includes('does not match this report'));
  el('graph-close').click();assert.equal(el('graph-dialog').open,false);
- console.log(JSON.stringify({contigs:initial.scatter.nShown,genus_colours:genus.size,checks:['exactly three tabs','Bins summary cards','Phylum default and rank switching','taxonomic-name search across ranks','case/space/underscore matching','no-match and literal-input handling','clear/Escape restore selected rank','bin metrics preserved by search','dot/legend agreement','opaque palette','unique genus colours','explicit manual colour mode','graph button selection','graph neighbourhood and strand links','source graph isolation','SVG download','wrong-run catalogue rejection']},null,2));
+ console.log(JSON.stringify({contigs:initial.scatter.nShown,genus_colours:genus.size,checks:['exactly three tabs','Phylum default and rank switching','taxonomic-name search across ranks','case/space/underscore matching','no-match and literal-input handling','clear/Escape restore selected rank','bin metrics preserved by search','dot/legend agreement','opaque palette','unique genus colours','explicit manual colour mode','graph button selection','graph neighbourhood and strand links','source graph isolation','SVG download','wrong-run catalogue rejection']},null,2));
 }
 finish().catch(error=>{console.error(error);process.exitCode=1;});
 

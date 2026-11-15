@@ -68,7 +68,8 @@ import hashlib
 from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
-from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, render_annotation_figures
+from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, render_annotation_figures, json_script
+from metahopper_taxonomy import is_unbinned, taxonomy_summary, assembly_partition
 from metahopper_pathway_view import collect_pathways, render_pathways, render_annotation_sections
 from datetime import datetime
 from pathlib import Path
@@ -179,7 +180,8 @@ class RunLayout:
         self.refinement = self._first(base / "classification" / "bin_refinement.tsv")
         self.provenance = self._first(self.root / "final" / "assembly" / "contig_provenance.tsv")
         self.consolidated = self._first(
-            self.root / "final" / "assembly" / "consolidated_contigs.fasta")
+            self.root / "final" / "assembly" / "consolidated_contigs.fasta") or self._first(
+            self.root / "final" / "assembly" / "contigs.fasta")
         self.megahit = self._first(self.root / "megahit" / "final.contigs.fa")
 
     @staticmethod
@@ -259,7 +261,7 @@ def collect_bins(layout: RunLayout, compute_missing: bool):
             name = fasta.stem
             record = {
                 "rank": rank, "bin": name,
-                "unclassified": name.lower() == "unclassified",
+                "unclassified": is_unbinned(name),
                 "stage": layout.stage,
                 "fasta_asset": fasta.relative_to(layout.root).as_posix(),
             }
@@ -658,7 +660,6 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
   }
   function apply(){
     var query = normalise(search.value), count = 0, ranks = new Set();
-    sel.disabled = !!query;
     clear.disabled = search.value.length === 0;
     Array.prototype.forEach.call(document.querySelectorAll('#bin-table tbody tr'), function(tr){
       var show = query ? normalise(tr.dataset.binName).indexOf(query) !== -1 : tr.dataset.rank === sel.value;
@@ -1384,17 +1385,8 @@ def refinement_cell(row):
     return '<td class="l refinement-cell" data-v="'+esc(label)+'" title="'+esc(title)+'"><span class="pill '+klass+'">'+lines[0]+'</span>'+''.join('<div class="note">'+line+'</div>' for line in lines[1:])+'</td>'
 
 
-def render_bin_stats(ranks, scatter):
-    stats = [('Classified bins', str(sum(r['num_classified_bins'] for r in ranks))),
-             ('Assembly size', human_bp(max((r['total_bp'] for r in ranks), default=0))),
-             ('Contigs plotted', f"{scatter['nShown']:,}" if scatter else '0')]
-    return '<div class="stats">' + ''.join(
-        '<div class="stat"' + (' title="Named bins across the available ranks; these taxonomic groups are nested."' if label == 'Classified bins' else '') +
-        f'><div class="k">{esc(label)}</div><div class="v">{esc(value)}</div></div>'
-        for label, value in stats) + '</div>'
-
-
-def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
+def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=None):
+    bin_rows = [row for row in bin_rows if not is_unbinned(row['bin'])]
     has_checkm = any(r.get("completeness_percent") is not None or r.get('contamination_percent') is not None for r in bin_rows)
     has_reas = any(r.get("reassembly_outcome") or r.get('reassembled_contigs') is not None for r in bin_rows)
     head = ['<th class="l">rank</th>', '<th class="l">bin</th>', "<th>contigs</th>",
@@ -1406,7 +1398,10 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
         head += ['<th class="l">refinement</th>']
     head += ['<th class="l">FASTA</th>']
     order = RANK_ORDER
-    ranks = sorted(ranks, key=lambda row: order.get(row['rank'], len(order)))
+    ranks = sorted((r for r in ranks if order.get(r['rank'], 99) >= order['phylum']),
+                   key=lambda row: order.get(row['rank'], len(order)))
+    shown_ranks = {r['rank'] for r in ranks}
+    bin_rows = [row for row in bin_rows if row['rank'] in shown_ranks]
     default_rank = next((r['rank'] for r in ranks if r['rank'] == 'phylum'),
                         ranks[0]['rank'] if ranks else '')
     out = ['<div class="card"><div class="row" style="margin-bottom:12px">'
@@ -1422,8 +1417,14 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
                'autocomplete="off" spellcheck="false" aria-describedby="bin-search-help bin-search-status"></div>'
                '<button type="button" id="bin-search-clear" disabled>Clear</button></div>'
                '<p id="bin-search-help" class="note">Searches bin names across all ranks. '
-               'Matching bins retain their rank and all available size, quality and refinement metrics.</p>'
+               'Matching bins retain their rank and all available size, quality and refinement metrics. '
+               'The rank selector also controls the full assembly partition below.</p>'
                '<p id="bin-search-status" class="note" role="status" aria-live="polite"></p>')
+    quality_ranks = sorted({r['rank'] for r in bin_rows if r.get('completeness_percent') is not None
+                            or r.get('contamination_percent') is not None}, key=rank_key)
+    out.append('<p class="note">' + ('Saved CheckM results: ' + esc(', '.join(quality_ranks))
+                + '. NA means no quality result for that bin.' if quality_ranks else
+                'No saved CheckM results were found for these bins.') + '</p>')
     out.append('<div class="scroll"><table class="sortable" id="bin-table"><thead><tr>'
                + "".join(head) + "</tr></thead><tbody>")
     for row in bin_rows:
@@ -1450,11 +1451,8 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=()):
         out.append("".join(cells))
     out.append("</tbody></table></div>")
     out.append('<p id="bin-search-empty" class="note" hidden></p>')
-    if has_reas:
-        out.append('<p class="note" style="margin-top:10px">Refinement compares preliminary and displayed bin totals. Final taxonomic regrouping can change membership. Detailed candidate outcomes remain in the run files.</p>')
     out.append("</div>")
-    out.append(render_bin_stats(ranks, scatter))
-    out.append(render_bin_figures(bin_rows))
+    out.append(render_bin_figures(bin_rows, partition))
     return "\n".join(out)
 
 
@@ -1782,6 +1780,8 @@ def build_report(layout: RunLayout, args) -> str:
     annotation_keys = {(row.get('rank'), row.get('bin')) for row in annotation_rows if row.get('status') == 'completed'}
     bin_rows = collect_bins(layout, compute_missing=not args.no_fasta_stats)
     ranks = rank_totals(bin_rows)
+    partition = assembly_partition(layout, bin_rows, iter_fasta, read_tsv)
+    taxonomy = taxonomy_summary(layout.root.name, layout.stage, bin_rows)
     scatter = build_scatter(layout, args.min_length, args.max_points,
                             not args.include_uncoordinated)
     tabs = [{"id": "bins", "label": "Bins"}, {"id": "binarena", "label": "BinaRena"},
@@ -1810,7 +1810,8 @@ def build_report(layout: RunLayout, args) -> str:
             .replace("__TITLE__", esc(title))
             .replace("__SUBTITLE__", subtitle)
             .replace("__TABS__", json.dumps(tabs))
-            .replace("__BINS__", render_bins(bin_rows, ranks, scatter, annotation_keys))
+            .replace("__BINS__", render_bins(bin_rows, ranks, scatter, annotation_keys, partition)
+                     + json_script('metahopper-taxonomy-data', taxonomy))
             .replace("__ANNOTATION__", render_annotation(layout, annotation_rows))
             .replace("__BINARENA__", render_binarena(scatter))
             .replace("__GRAPH_UI__", VIEWER_HTML)
