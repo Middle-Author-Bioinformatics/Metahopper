@@ -276,9 +276,9 @@ class ReportTests(unittest.TestCase):
         for name in ('overview','inspection','files'):
             self.assertNotIn('id="pane-'+name+'"',html)
         self.assertNotIn('>all ranks</option>',html)
-        self.assertIn('Classified bins',html)
-        self.assertIn('Assembly size',html)
-        self.assertIn('Contigs plotted',html)
+        self.assertNotIn('class="stats"',html)
+        self.assertNotIn('Contigs plotted',html)
+        self.assertIn('Assembly partition',html)
 
 
 if __name__=='__main__':unittest.main()

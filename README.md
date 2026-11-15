@@ -99,8 +99,8 @@ identifiers, use `--force-overwrite`.
 ## Report navigation
 
 The report has exactly three tabs: **Bins**, **BinaRena**, and **Annotation**.
-Bins opens first with classified-bin, assembly-size and plotted-contig cards above
-the table. The rank selector starts at Phylum and offers one rank at a time;
+Bins opens first with the bin table above the assembly-partition and log-scale
+contiguity figures. The rank selector starts at Phylum and offers one rank at a time;
 there is no combined all-ranks view. If Phylum was not produced, the highest
 available rank opens instead. Backend inspection and detailed audit files remain
 available in the run directory.
@@ -108,10 +108,9 @@ Use **Search taxonomic name** above the Bins table to find matching bin names
 across every available rank. Matching ignores capitalization and treats spaces
 and underscores alike; partial names work. Each matching row retains its rank,
 size, contig statistics, CheckM scores when available, and refinement summary.
-The rank selector pauses while a search is active. **Clear**, Escape, or deleting
-the query restores the previous rank selection. No matches are shown explicitly.
-The classified-bin card retains the total across available ranks; these groups
-are nested, so it is not a count of distinct genomes. Annotation rows are marked
+The rank selector controls the partition even while a search spans ranks.
+**Clear**, Escape, or deleting the query returns the table to that selected rank.
+No matches are shown explicitly. Annotation rows are marked
 stale if their source bin changed or disappeared since annotation.
 
 ## Fix colors and add graph review to an existing run
@@ -303,6 +302,45 @@ Pathway reconstruction, BGC detection and a dedicated virulence screen remain
 `.faa`, `.gbff`, coordinates and locus IDs through `modules.json`. Bakta's own
 expert annotations are retained in its raw output; they are separate from a
 future dedicated screening workflow.
+
+## Update CheckM and reports for existing samples
+
+`MetaHopper.py` runs CheckM only when `--checkm` is selected. The batch wrapper
+enables it by default. Generating or publishing HTML imports saved quality
+results; it does not launch CheckM. Quality values belong to a specific rank/bin:
+a genus-only assessment does not supply phylum or family scores.
+
+For completed sample directories with saved final genus bins:
+
+```bash
+conda run --no-capture-output -n metahopper-lean \
+  python ~/bin/MetaHopper/metahopper_postprocess.py \
+  --source /data/samples -c ~/bin/MetaHopper/config.json \
+  --checkm-only --skip-report -t 24 --memory 64
+```
+
+This uses `tools.checkm` from the config, including a command prefix such as
+`["conda", "run", "--no-capture-output", "-n", "checkm_env", "checkm"]`.
+It runs/reuses CheckM on final genus bins, preserves scores at other ranks, and
+does not run QC, assembly, NR DIAMOND, read mapping, Unicycler, Bakta or
+PathwayGenie. Matching successful CheckM checkpoints are reused. Progress is
+recorded in `postprocess_status.json` and `postprocess.log`. Existing bin FASTAs
+are checked for changes before and after processing.
+
+Use `-i /data/samples/Sample01` instead of `--source` for one sample, or repeat
+`--sample Sample01 --sample Sample02` with `--source`. Samples run sequentially;
+failures are reported without discarding successful updates. `--skip-report`
+defers presentation/graph processing to the publisher so it happens once. Omit
+it to regenerate local HTML immediately. Run the updated viewer publisher
+afterward, with the correct project prefix, to refresh HTML and publish the
+sample assets and taxonomic search index.
+
+The Bins table hides generic Unclassified/Unbinned/Unassigned buckets while
+retaining domain assignments such as `unclassified_Bacteria`. The assembly
+partition figure includes every base of the full displayed assembly once at the
+selected rank; black is unbinned sequence. It stays complete during a taxon
+search. Inconsistent membership is reported instead of drawing an incorrect
+partition. Bin size and N50 use log10 axes; CheckM values remain in the table.
 
 ## Validation
 

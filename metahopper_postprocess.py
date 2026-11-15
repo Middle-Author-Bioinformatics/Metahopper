@@ -34,6 +34,8 @@ def validate_final(root):
     manifest = json.loads((root / 'run.json').read_text())
     if manifest.get('status') != 'completed':
         raise ValueError('Existing-final mode requires a completed saved run: ' + str(root))
+    if not isinstance(manifest.get('arguments'), dict):
+        raise ValueError('Saved run arguments are missing: ' + str(root / 'run.json'))
     base = root / 'final'
     fastas = sorted((base / 'bins/genus').glob('*.fasta'))
     if not fastas or any(not p.stat().st_size for p in fastas):
@@ -50,9 +52,10 @@ def validate_final(root):
     return fastas
 
 
-def validate(config, threads=24, jobs=3):
-    annotation.validate_config(config)
-    pathways.preflight_runtime(config, threads, jobs)
+def validate(config, threads=24, jobs=3, checkm_only=False):
+    if not checkm_only:
+        annotation.validate_config(config)
+        pathways.preflight_runtime(config, threads, jobs)
     prefix = config.get('tools', {}).get('checkm', ['checkm'])
     if not isinstance(prefix, list) or not prefix or not all(isinstance(v, str) and v for v in prefix):
         raise ValueError('tools.checkm must be an executable-prefix array')
@@ -105,14 +108,15 @@ def prepare_report(root, max_nodes, max_links):
                     '--bin-set', 'final', '--graph-max-nodes', str(max_nodes), '--pathways-rank', 'genus'], check=True)
 
 
-def run(root, config_path, threads=24, jobs=3, memory=64, max_nodes=4000000, max_links=10000000):
+def run(root, config_path, threads=24, jobs=3, memory=64, max_nodes=4000000, max_links=10000000,
+        checkm_only=False, refresh_report=True):
     root = Path(root).resolve()
     config_path = Path(config_path).expanduser().resolve()
     config = load_config(config_path)
     with output_lock(root):
         fastas = validate_final(root)
         frozen = sequence_snapshot(root)
-        validate(config, threads, jobs)
+        validate(config, threads, jobs, checkm_only=checkm_only)
         ensure_final_export(root, fastas)
         options = pipeline.parse_args(['--resume', str(root), '-c', str(config_path),
                                       '-t', str(threads), '--memory', str(memory), '--checkm'])
@@ -146,26 +150,31 @@ def run(root, config_path, threads=24, jobs=3, memory=64, max_nodes=4000000, max
                 ck.start('checkm', 'Reusing verified existing CheckM results')
                 ck.done('checkm', [table, root / 'final/bins/genus/summary.tsv'])
             else:
-                pipeline.run_checkm(runner, options, root, root / 'final/bins', ['genus'], summaries, warnings, ck)
+                pipeline.run_checkm(runner, options, root, root / 'final/bins', ['genus'], summaries, warnings, ck,
+                                    preserve_other_ranks=True)
             if ck.status['steps'].get('checkm', {}).get('status') == 'failed':
                 raise RuntimeError('CheckM failed; inspect the sample CheckM log')
-            ck.start('annotation', 'Bakta checks per-bin content caches')
-            result = annotation.annotate_run(root, config, rank='genus', stage='final', threads=threads,
-                                             mode=options.annotation_mode, timeout_h=options.annotation_timeout_h,
-                                             translation_table=options.annotation_translation_table, log=print)
-            if any(row['status'] == 'failed' for row in result['bins']):
-                raise RuntimeError('Bakta has failed bins; successful bin annotations remain cached')
-            ck.done('annotation', [result['summary']])
-            ck.start('pathways', 'PathwayGenie checks per-bin content caches')
-            result = pathways.run_pathways(root, config, rank='genus', stage='final', threads=threads, jobs=jobs, log=print)
-            if result['status'] != 'completed':
-                raise RuntimeError('PathwayGenie has failed bins; successful searches remain cached')
-            ck.done('pathways', [result['manifest']])
+            if not checkm_only:
+                ck.start('annotation', 'Bakta checks per-bin content caches')
+                result = annotation.annotate_run(root, config, rank='genus', stage='final', threads=threads,
+                                                 mode=options.annotation_mode, timeout_h=options.annotation_timeout_h,
+                                                 translation_table=options.annotation_translation_table, log=print)
+                if any(row['status'] == 'failed' for row in result['bins']):
+                    raise RuntimeError('Bakta has failed bins; successful bin annotations remain cached')
+                ck.done('annotation', [result['summary']])
+                ck.start('pathways', 'PathwayGenie checks per-bin content caches')
+                result = pathways.run_pathways(root, config, rank='genus', stage='final', threads=threads, jobs=jobs, log=print)
+                if result['status'] != 'completed':
+                    raise RuntimeError('PathwayGenie has failed bins; successful searches remain cached')
+                ck.done('pathways', [result['manifest']])
             if sequence_snapshot(root) != frozen:
                 raise RuntimeError('Final bin FASTAs changed during processing; publication is blocked')
-            ck.start('report')
-            prepare_report(root, max_nodes, max_links)
-            ck.done('report', [root / 'metahopper_report.html'])
+            if refresh_report:
+                ck.start('report')
+                prepare_report(root, max_nodes, max_links)
+                ck.done('report', [root / 'metahopper_report.html'])
+            else:
+                ck.skip('report', 'Report refresh deferred to the publisher')
             if sequence_snapshot(root) != frozen:
                 raise RuntimeError('Final bin FASTAs changed during report generation')
             ck.finish('completed')
@@ -177,7 +186,14 @@ def run(root, config_path, threads=24, jobs=3, memory=64, max_nodes=4000000, max
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('-i', '--input', type=Path, required=True)
+    locations = parser.add_mutually_exclusive_group(required=True)
+    locations.add_argument('-i', '--input', type=Path, help='One completed sample directory')
+    locations.add_argument('--source', type=Path, help='Parent directory of completed sample folders (CheckM-only mode)')
+    parser.add_argument('--sample', action='append', help='Folder name within --source; may be repeated')
+    parser.add_argument('--checkm-only', action='store_true',
+                        help='Assess saved final genus bins and refresh the report; skip Bakta and PathwayGenie')
+    parser.add_argument('--skip-report', action='store_true',
+                        help='With --checkm-only, defer HTML/graph refresh to publish_reports.py')
     parser.add_argument('-c', '--config', type=Path, required=True)
     parser.add_argument('-t', '--threads', type=int, default=24)
     parser.add_argument('--memory', type=int, default=64)
@@ -185,10 +201,40 @@ def main():
     parser.add_argument('--graph-max-nodes', type=int, default=4000000)
     parser.add_argument('--megahit-max-links', type=int, default=10000000)
     args = parser.parse_args()
-    if args.memory < 4 or not 1 <= args.pathway_jobs <= args.threads or min(args.graph_max_nodes, args.megahit_max_links) < 1:
+    if args.source and not args.checkm_only:
+        parser.error('--source requires --checkm-only')
+    if args.skip_report and not args.checkm_only:
+        parser.error('--skip-report requires --checkm-only')
+    if args.sample and not args.source:
+        parser.error('--sample requires --source')
+    if (args.memory < 4 or args.threads < 1 or (not args.checkm_only and not 1 <= args.pathway_jobs <= args.threads)
+            or min(args.graph_max_nodes, args.megahit_max_links) < 1):
         parser.error('Invalid thread, memory or graph limits')
     try:
-        run(args.input, args.config, args.threads, args.pathway_jobs, args.memory, args.graph_max_nodes, args.megahit_max_links)
+        roots = [args.input]
+        if args.source:
+            if not args.source.is_dir():
+                raise ValueError('--source must be an existing directory')
+            roots = sorted(p.parent.parent.parent for p in args.source.glob('*/final/bins/genus') if p.is_dir())
+            if args.sample:
+                roots = [p for p in roots if p.name in set(args.sample)]
+                missing = set(args.sample) - {p.name for p in roots}
+                if missing:
+                    raise ValueError('No saved final genus bins for: ' + ', '.join(sorted(missing)))
+            if not roots:
+                raise ValueError('No direct sample folders with final genus bins were found')
+        failures = []
+        for root in roots:
+            print('\nUpdating ' + str(root), flush=True)
+            try:
+                run(root, args.config, args.threads, args.pathway_jobs, args.memory,
+                    args.graph_max_nodes, args.megahit_max_links, checkm_only=args.checkm_only,
+                    refresh_report=not args.skip_report)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                failures.append(root.name)
+                print('ERROR: ' + root.name + ': ' + str(exc), file=sys.stderr, flush=True)
+        if failures:
+            raise RuntimeError('Failed samples (successful updates are retained): ' + ', '.join(failures))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         parser.exit(1, 'ERROR: ' + str(exc) + '\n')
 
