@@ -21,12 +21,12 @@ class Element{
 }
 for(const m of html.matchAll(/<(\w+)[^>]*\bid="([^"]+)"[^>]*>/g))elements.set(m[2],new Element(m[1]));
 elements.get('annotation-feature-data').textContent=JSON.stringify(data);
-const document={getElementById:id=>elements.get(id),createElement:tag=>new Element(tag),querySelectorAll:()=>[],
+const document={getElementById:id=>elements.get(id),createElement:tag=>new Element(tag),createTextNode:text=>({textContent:text}),querySelectorAll:()=>[],
  addEventListener:(name,fn)=>{listeners[name]=fn;},querySelector:()=>({click(){selectedTab=true;}}),body:new Element('body')};
 vm.runInNewContext(code,{document,window:{MHCharts:{bar(){}}},console,Blob,setTimeout:fn=>fn(),URL:{createObjectURL(value){blob=value;return 'blob:test';},revokeObjectURL(){}}});
 const el=id=>elements.get(id),trigger=(id,name)=>el(id).listeners[name].call(el(id)),rows=()=>el('annotation-feature-body').children;
 (async()=>{
- assert.equal(rows().length,100);assert(el('annotation-feature-status').textContent.includes('207 matching features'));
+ assert.equal(rows().length,100);assert.equal(el('annotation-type-total').textContent,'207');assert(!html.includes('id="annotation-products-figure"'));assert(!html.includes('data-feature-sort="pseudogene"'));assert(el('annotation-feature-status').textContent.includes('207 matching features'));
  el('annotation-bin').value=data.bins[0].key;trigger('annotation-bin','change');
  assert(el('annotation-feature-status').textContent.includes('206 matching features'));
  trigger('annotation-next','click');assert(el('annotation-page').textContent.startsWith('Page 2 of 3'));
@@ -40,7 +40,7 @@ const el=id=>elements.get(id),trigger=(id,name)=>el(id).listeners[name].call(el(
  trigger('annotation-clear','click');el('annotation-type').value='trna';trigger('annotation-type','change');assert.equal(rows().length,1);
  el('annotation-type').value='cds';el('annotation-category').value='pseudogene';trigger('annotation-category','change');assert.equal(rows().length,2);
  el('annotation-search').value='hypothetical';trigger('annotation-search','input');assert.equal(rows().length,1);assert.equal(rows()[0].children[5].children[0].textContent,'Hypothetical');
- trigger('annotation-clear','click');el('annotation-category').value='pseudo-unknown';trigger('annotation-category','change');assert.equal(rows().length,1);assert.equal(rows()[0].children[6].textContent,'Unavailable');
+ trigger('annotation-clear','click');el('annotation-category').value='pseudo-unknown';trigger('annotation-category','change');assert.equal(rows().length,1);assert.notEqual(rows()[0].className,'feature-pseudogene');
  trigger('annotation-export','click');assert((await blob.text()).includes('unavailable'));
  trigger('annotation-clear','click');el('annotation-search').value='this does not exist';trigger('annotation-search','input');assert.equal(el('annotation-export').disabled,true);
  el('annotation-search').value='<img src=x';trigger('annotation-search','input');assert.equal(rows().length,1);assert(rows()[0].children[3].textContent.startsWith('<img src=x'));
@@ -52,7 +52,7 @@ const el=id=>elements.get(id),trigger=(id,name)=>el(id).listeners[name].call(el(
  assert.equal(el('annotation-protein-download').attributes['data-sample-asset'],data.bins[1].protein_path);
  el('annotation-load-json').files=[{text:async()=>JSON.stringify({features:[{locus:'LOCAL',type:'cds',sequence:'contig_1',product:'hypothetical protein',pseudogene:{},aa:'MQQ',nt:'ATG'}]})}];
  await trigger('annotation-load-json','change');assert(el('annotation-import-status').textContent.startsWith('Loaded 1 real'));
- assert.equal(rows()[0].children[6].textContent,'Flagged');assert.equal(rows()[0].children[5].children[0].textContent,'Hypothetical');
+ assert.equal(rows()[0].className,'feature-pseudogene');assert(rows()[0].children[3].children.some(n=>n.className==='feature-tag pseudogene'));assert.equal(rows()[0].children[5].children[0].textContent,'Hypothetical');
  el('annotation-load-json').files=[{text:async()=>JSON.stringify({features:[{type:'cds',sequence:'foreign_contig'}]})}];
  await trigger('annotation-load-json','change');assert(el('annotation-import-status').textContent.includes('outside the selected bin'));assert.equal(rows()[0].children[1].children[0].textContent,'LOCAL');
  console.log('Explorer passed: bin links, independent categories, unknown flags, safe text, search, pagination, sequences, filtered exports, local JSON and contig validation.');

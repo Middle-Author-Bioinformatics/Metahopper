@@ -84,13 +84,13 @@ function reportDOM(ranks) {
 
 const ranks=['phylum','class','order','family','genus','species'];
 const report=reportDOM(ranks);
-assert.deepEqual(report.el('bin-figure-rank').options.map(o=>o.value),ranks);
-assert.equal(report.el('bin-figure-rank').value,'phylum');
+assert(!report.html.includes('bin-figure-rank'),'plots must not introduce another rank selector');
+assert.deepEqual(report.el('rank-filter').options.map(o=>o.value),ranks);
+assert.equal(report.el('rank-filter').value,'phylum');
 for(const [i,rank] of ranks.entries()) {
-  // Changes from either control update the table, both titles and actual SVG data.
-  report.change(i%2?'rank-filter':'bin-figure-rank',rank);
+  // One rank control updates the table, both titles and actual SVG data.
+  report.change('rank-filter',rank);
   assert.equal(report.el('rank-filter').value,rank);
-  assert.equal(report.el('bin-figure-rank').value,rank);
   assert.equal(report.visibleRows().length,i+2);
   assert(report.visibleRows().every(r=>r.dataset.rank===rank));
   assert.equal(report.circles().length,i+2);
@@ -107,12 +107,12 @@ for(const [i,rank] of ranks.entries()) {
   assert(Math.abs(heights.reduce((a,b)=>a+b,0)-280)<1e-8,'ribbons must conserve the assembly at every rank');
 }
 
-report.change('bin-figure-rank','genus');
+report.change('rank-filter','genus');
 report.search('sHaReD tAxOn');
-assert.equal(report.visibleRows().length,6,'table search should still span all ranks');
+assert.equal(report.visibleRows().length,1,'table search must use the shared rank');
 assert.equal(report.circles().length,1,'scatter search must stay at the selected rank');
 assert.equal(report.flows().length,7,'search must retain the complete partition');
-report.change('bin-figure-rank','species');
+report.change('rank-filter','species');
 assert.equal(report.flows().length,8,'plot rank must remain selectable during search');
 report.search('no such taxon');
 assert(report.el('bin-contiguity-figure').textContent.includes('No paired values'));
@@ -125,7 +125,7 @@ assert.equal(report.circles().length,7,'Clear should refresh the figures');
 
 // The dashboard focuses a bin by assigning the rank, then dispatching search input.
 report.el('rank-filter').value='genus';report.search('Shared');
-assert.equal(report.el('bin-figure-rank').value,'genus');
+assert.equal(report.el('rank-filter').value,'genus');
 assert(report.el('bin-partition-title').textContent.endsWith('Genus'));
 report.flows()[1].dispatchEvent(new Event('click'));
 assert.equal(report.visibleRows().length,1);
@@ -135,7 +135,7 @@ assert.equal(report.flows().length,7);
 
 // No assumptions about Phylum being present in a saved report.
 const genusOnly=reportDOM(['genus']);
-assert.equal(genusOnly.el('bin-figure-rank').value,'genus');
+assert.equal(genusOnly.el('rank-filter').value,'genus');
 assert.equal(genusOnly.circles().length,2);
 assert(report.html.includes('#bin-figures{grid-template-columns:minmax(0,1fr)}'));
 assert(report.html.includes('#bin-figures .figure-host{max-height:none;overflow:visible}'));

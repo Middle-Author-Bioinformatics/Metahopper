@@ -30,11 +30,10 @@
  function link(id,path){var n=el(id);n.hidden=!path;if(path){n.setAttribute('data-sample-asset',path);n.setAttribute('href',path.split('/').map(encodeURIComponent).join('/'));}}
  function chooseBin(){pool=all.filter(function(r){return select.value==='all'||r.bin.key===select.value;});page=0;updateTypes();render(true);}
  function chip(label,value,filter){var button=document.createElement('button');button.type='button';button.className=category.value===filter?'active':'';button.textContent=label+' · '+value.toLocaleString();button.addEventListener('click',function(){category.value=filter;type.value='all';page=0;render(false);});return button;}
- function charts(){if(!window.MHCharts)return;var types={};pool.forEach(function(r){var kind=r.row[index.type].toLowerCase();types[kind]=(types[kind]||0)+1;});
-  window.MHCharts.bar(el('annotation-types-figure'),Object.keys(types).sort(function(a,b){return types[b]-types[a];}).map(function(kind){return {label:typeName(kind),kind:kind,values:[types[kind]]};}),{title:'Feature types',unit:'Annotated features',empty:'Gene records are not embedded in this report yet.',onPick:function(row){type.value=row.kind;category.value='all';page=0;render(false);el('annotation-browser').scrollIntoView({block:'start'});}});
-  var named=pool.filter(function(r){return protein(r)&&hyp(r)===false;}).length,hypothetical=pool.filter(function(r){return protein(r)&&hyp(r)===true;}).length,unknown=pool.filter(function(r){return protein(r)&&hyp(r)===null;}).length;
-  var rows=[{label:'Non-hypothetical',kind:'named',values:[named],colors:['#207b86']},{label:'Hypothetical',kind:'hypothetical',values:[hypothetical],colors:['#dc9747']},{label:'Unassigned product',kind:'unassigned',values:[unknown],colors:['#9baab2']}].filter(function(r){return r.values[0]>0;});
-  window.MHCharts.bar(el('annotation-products-figure'),rows,{title:'Protein product categories',unit:'Predicted protein features',empty:'No protein feature records are loaded.',onPick:function(row){category.value=row.kind;type.value='proteins';page=0;render(false);el('annotation-browser').scrollIntoView({block:'start'});}});
+ function featureCounts(){var types={};pool.forEach(function(r){var kind=r.row[index.type].toLowerCase();types[kind]=(types[kind]||0)+1;});
+  var body=el('annotation-type-counts');body.textContent='';
+  Object.keys(types).sort(function(a,b){return types[b]-types[a];}).forEach(function(kind){var tr=document.createElement('tr'),td=document.createElement('td'),button=document.createElement('button');button.type='button';button.className='annotation-feature-link';button.textContent=typeName(kind);button.addEventListener('click',function(){type.value=kind;category.value='all';page=0;render(false);el('annotation-browser').scrollIntoView({block:'start'});});td.appendChild(button);tr.appendChild(td);textCell(tr,types[kind].toLocaleString());body.appendChild(tr);});
+  el('annotation-type-total').textContent=pool.length.toLocaleString();
  }
  function sortValue(r,field){if(field==='bin')return r.bin.key;if(field==='pseudogene')return pseudoName(r);if(field==='aa_length')return r.detail.aa_length;if(field==='start'||field==='end')return Number(r.row[index[field]])||0;return r.row[index[field]]||'';}
  function textCell(tr,text,cls){var td=document.createElement('td');td.textContent=text===undefined||text===null||text===''?'—':String(text);if(cls)td.className=cls;tr.appendChild(td);return td;}
@@ -44,8 +43,10 @@
   var body=el('annotation-feature-body');body.textContent='';var pages=Math.max(1,Math.ceil(matches.length/pageSize));page=Math.max(0,Math.min(page,pages-1));
   matches.slice(page*pageSize,(page+1)*pageSize).forEach(function(r){var row=r.row,tr=document.createElement('tr');
    textCell(tr,r.bin.rank+' / '+r.bin.bin,'l');var locus=textCell(tr,'','l'),button=document.createElement('button');button.type='button';button.className='annotation-feature-link';button.textContent=row[index.locus_tag]||row[index.type]+' '+row[index.start];button.addEventListener('click',function(){openFeature(r);});locus.textContent='';locus.appendChild(button);
-   textCell(tr,row[index.gene],'l');textCell(tr,row[index.product],'l product-cell');textCell(tr,typeName(row[index.type]),'l');var cat=textCell(tr,'','l'),badge=document.createElement('span');badge.className='feature-tag '+(hyp(r)===true?'hypothetical':protein(r)?'named':'');badge.textContent=categoryName(r);cat.textContent='';cat.appendChild(badge);
-   var ps=textCell(tr,pseudoName(r),'l');if(pseudo(r)===true)ps.className+=' feature-pseudogene';textCell(tr,row[index.contig],'l');textCell(tr,row[index.start]);textCell(tr,row[index.end]);textCell(tr,row[index.strand],'l');textCell(tr,r.detail.aa_length);textCell(tr,row[index.db_xrefs],'l reference-cell');body.appendChild(tr);
+   var gene=textCell(tr,row[index.gene],'l feature-gene'),product=textCell(tr,row[index.product],'l product-cell');
+   if(pseudo(r)===true){tr.className='feature-pseudogene';button.title='Pseudogene'+(r.detail.pseudogene_note?': '+r.detail.pseudogene_note:'');var flag=document.createElement('span');flag.className='feature-tag pseudogene';flag.textContent='Pseudogene';product.appendChild(document.createTextNode(' '));product.appendChild(flag);}
+   textCell(tr,typeName(row[index.type]),'l');var cat=textCell(tr,'','l'),badge=document.createElement('span');badge.className='feature-tag '+(hyp(r)===true?'hypothetical':protein(r)?'named':'');badge.textContent=categoryName(r);cat.textContent='';cat.appendChild(badge);
+   textCell(tr,row[index.contig],'l');textCell(tr,row[index.start]);textCell(tr,row[index.end]);textCell(tr,row[index.strand],'l');textCell(tr,r.detail.aa_length);textCell(tr,row[index.db_xrefs],'l reference-cell');body.appendChild(tr);
   });
   var selected=bins.find(function(b){return b.key===select.value;});
   el('annotation-browser-title').textContent='Gene and protein explorer'+(selected?' — '+selected.bin.replace(/_/g,' '):' — all bins');
@@ -60,7 +61,7 @@
   link('annotation-feature-download',selected&&selected.features_path);link('annotation-protein-download',selected&&selected.protein_path);link('annotation-fasta-download',selected&&selected.fasta_path);
   var chips=el('annotation-category-chips');chips.textContent='';chips.appendChild(chip('All features',pool.length,'all'));chips.appendChild(chip('Hypothetical proteins',pool.filter(function(r){return protein(r)&&hyp(r)===true;}).length,'hypothetical'));chips.appendChild(chip('Pseudogenes',pool.filter(function(r){return pseudo(r)===true;}).length,'pseudogene'));
   var unknown=pool.filter(function(r){return protein(r)&&pseudo(r)===null;}).length;if(unknown)chips.appendChild(chip('Pseudogene status unavailable',unknown,'pseudo-unknown'));
-  if(redrawCharts)charts();
+  if(redrawCharts)featureCounts();
  }
  function download(text,name,mime){var url=URL.createObjectURL(new Blob([text],{type:mime||'text/plain;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},1000);}
  function safeName(s){return String(s).replace(/[^A-Za-z0-9_.-]/g,'_');}

@@ -154,7 +154,7 @@ class AnnotationViewTests(unittest.TestCase):
         bins=report.render_bins([dict(rank='phylum',bin='Test')],[dict(rank='phylum',num_classified_bins=1,total_bp=9)])
         self.assertLess(bins.index('id="bin-table"'),bins.index('id="bin-figures"'))
         annotation=report.render_annotation(self.layout)
-        self.assertLess(annotation.index('id="annotation-summary-table"'),annotation.index('id="annotation-overview-figure"'))
+        self.assertLess(annotation.index('id="annotation-summary-table"'),annotation.index('id="annotation-browser"'))
         self.assertIn('white-space:nowrap!important',annotation)
         self.assertIn('.asset-link[hidden]{display:none}',annotation)
 

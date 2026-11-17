@@ -68,7 +68,7 @@ import hashlib
 from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
-from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, render_annotation_figures, json_script
+from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, json_script
 from metahopper_taxonomy import is_unbinned, taxonomy_summary, assembly_partition
 from metahopper_pathway_view import collect_pathways, render_pathways, render_annotation_sections
 from datetime import datetime
@@ -662,12 +662,12 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     var query = normalise(search.value), count = 0, ranks = new Set();
     clear.disabled = search.value.length === 0;
     Array.prototype.forEach.call(document.querySelectorAll('#bin-table tbody tr'), function(tr){
-      var show = query ? normalise(tr.dataset.binName).indexOf(query) !== -1 : tr.dataset.rank === sel.value;
+      var show = tr.dataset.rank === sel.value && (!query || normalise(tr.dataset.binName).indexOf(query) !== -1);
       tr.style.display = show ? '' : 'none';
       if (show){ count++; ranks.add(tr.dataset.rank); }
     });
     status.textContent = query
-      ? count + ' matching bin' + (count === 1 ? '' : 's') + ' across ' + ranks.size + ' rank' + (ranks.size === 1 ? '' : 's') + '. Clear the search to return to the selected rank.'
+      ? count + ' matching bin' + (count === 1 ? '' : 's') + ' at the ' + sel.value + ' rank.'
       : count + ' bin' + (count === 1 ? '' : 's') + ' at the ' + sel.value + ' rank.';
     empty.hidden = count !== 0;
     empty.textContent = query ? 'No bins match this taxonomic name. Try a shorter name.' : 'No bins are available at this rank.';
@@ -1406,8 +1406,8 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=Non
     default_rank = next((r['rank'] for r in ranks if r['rank'] == 'phylum'),
                         ranks[0]['rank'] if ranks else '')
     out = ['<div class="card"><div class="row" style="margin-bottom:12px">'
-           '<div style="max-width:220px"><label for="rank-filter">Rank</label>'
-           '<select id="rank-filter" title="Choose the table and plot rank; taxonomic searches show table matches across ranks">']
+           '<div id="bin-rank-control" style="max-width:220px"><label for="rank-filter">Taxonomic rank</label>'
+           '<select id="rank-filter" title="Controls the bin table and both plots">']
     for row in ranks:
         selected = ' selected' if row['rank'] == default_rank else ''
         out.append(f'<option value="{esc(row["rank"])}"{selected}>{esc(row["rank"].capitalize())}</option>')
@@ -1417,9 +1417,8 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=Non
                '<input id="bin-search" type="search" placeholder="e.g. Sodalis or Wolbachia" '
                'autocomplete="off" spellcheck="false" aria-describedby="bin-search-help bin-search-status"></div>'
                '<button type="button" id="bin-search-clear" disabled>Clear</button></div>'
-               '<p id="bin-search-help" class="note">Searches bin names across all ranks. '
-               'Matching bins retain their rank and all available size, quality and refinement metrics. '
-               'The rank selector also controls both plots below.</p>'
+               '<p id="bin-search-help" class="note">Search bin names at the selected taxonomic rank. '
+               'One rank controls this table and both plots below.</p>'
                '<p id="bin-search-status" class="note" role="status" aria-live="polite"></p>')
     quality_ranks = sorted({r['rank'] for r in bin_rows if r.get('completeness_percent') is not None
                             or r.get('contamination_percent') is not None}, key=rank_key)
@@ -1757,7 +1756,6 @@ def render_bakta_annotation(layout, rows=None):
                         links.append('<a class="asset-link" href="'+esc(quote(rel.as_posix(),safe='/'))+'" data-sample-asset="'+esc(rel.as_posix())+'" download>'+('Protein FASTA' if label == 'proteins' else label)+'</a>')
         out.append('<td class="l annotation-path"><div class="asset-links">'+(''.join(links) or '&ndash;')+'</div></td></tr>')
     out.append('</tbody></table></div><p class="note">Click a completed bin to inspect its gene and product list below. The list is embedded in this HTML. Sequence and annotation file downloads use this sample’s published assets in the AWS viewer, or the adjacent run files offline.</p></div>')
-    out.append(render_annotation_figures(rows))
     out.append(render_browser(collect_features(layout, rows)))
     return ''.join(out)
 

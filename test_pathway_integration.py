@@ -44,6 +44,21 @@ class PathwayTests(unittest.TestCase):
         self.assertEqual(next(r for r in data['components'] if r['bin_id']=='A' and r['component']=='c3')['value'],'NA')
         self.assertEqual(next(r for r in data['bins'] if r['bin_id']=='A')['accepted_proteins'],1)
 
+    def test_panel_links_describe_configured_models_and_unmeasured_steps(self):
+        data=self.data();genes={r['component']:r for r in data['panel_genes']}
+        self.assertEqual(genes['c1']['gene'],'g1')
+        self.assertEqual(genes['c1']['models'],'SYNTHETIC_c1')
+        self.assertTrue(genes['c1']['counted_in_coverage'])
+        self.assertFalse(genes['c3']['measured'])
+        self.assertFalse(genes['c3']['counted_in_coverage'])
+        html=view.render_pathways(data)
+        shown=json.loads(re.search(r'id="metahopper-pathways-data">(.*?)</script>',html,re.S)[1])
+        self.assertNotIn('components',shown)
+        self.assertNotIn('neighborhoods',shown)
+        self.assertNotIn('operons',shown)
+        self.assertIn('components',data)  # The source evidence is retained.
+        self.assertEqual(shown['proteins']['A\x1fc0000001_1']['aa'],'MK*')
+
     def test_legacy_results_are_discovered_without_running_tools(self):
         legacy=self.root/'final/bins/pathwaygenie';shutil.move(str(self.output),legacy)
         layout=report.RunLayout(self.root,'final');data=view.collect_pathways(layout)
