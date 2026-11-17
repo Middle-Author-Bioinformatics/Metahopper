@@ -234,6 +234,16 @@ def read_results(directory, sample_root, stage='final', rank='genus', verify_inp
     for pid in dict.fromkeys(r['pathway'] for r in data['summary']):
         if not any(p['id'] == pid for p in ordered):
             ordered.append(dict(id=pid, label=pid.replace('_', ' '), notes=''))
+    panel_genes = []
+    for definition in data['definitions']:
+        rules = [(accession, rule) for accession, rule in config.get('model_rules', {}).items()
+                 if definition['component'] in rule.get('components', [])]
+        panel_genes.append(dict(pathway=definition['pathway'], component=definition['component'],
+            gene='; '.join(dict.fromkeys(rule.get('target', '') for _, rule in rules if rule.get('target')))
+                 or definition.get('label') or definition['component'],
+            models='; '.join(accession for accession, _ in rules),
+            counted_in_coverage=definition.get('in_heatmap_denominator') == '1',
+            measured=definition.get('assay_scope') != 'not_assayed', notes=definition.get('notes', '')))
     if not verify_inputs:
         warnings.append('Preview of the supplied output files. Input-bin checksums have not been compared with current MetaHopper FASTAs.')
     assets = []
@@ -253,7 +263,7 @@ def read_results(directory, sample_root, stage='final', rank='genus', verify_inp
                   'overlap_fraction', 'max_intervening_genes', 'max_neighborhood_bp', 'operon_order',
                   'operon_strand', 'operon_max_missing', 'operon_min_fraction', 'skip_context')}
     return dict(data, schema=SCHEMA, run_name=root.name, stage=stage, rank=rank,
-                directory=directory.relative_to(root).as_posix(), pathways=ordered, proteins=proteins,
+                directory=directory.relative_to(root).as_posix(), pathways=ordered, panel_genes=panel_genes, proteins=proteins,
                 files=assets, inputs=inputs, warnings=warnings, parameters=parameters,
                 version=manifest.get('version', ''), finished_utc=manifest.get('finished_utc', ''),
                 tool_versions=manifest.get('versions', {}), preview=not verify_inputs)
@@ -274,8 +284,12 @@ def render_pathways(data=None, error=''):
         return ('<section class="card"><h2>HMM pathway annotation</h2><p class="note">'
                 + html.escape(error or 'No PathwayGenie results found. Run metahopper_pathways.py, or import an existing PathwayGenie output folder, then regenerate the report.') + '</p></section>')
     script = Path(__file__).with_name('metahopper_pathway_browser.js').read_text()
+    # Original evidence stays on disk; the report needs only hits and panel definitions.
+    displayed = {key: value for key, value in data.items() if key not in {'components', 'neighborhoods', 'operons'}}
+    hit_proteins = {row['bin_id'] + '\x1f' + row['protein'] for row in data['hits']}
+    displayed['proteins'] = {key: value for key, value in data['proteins'].items() if key in hit_proteins}
     return ('<style>' + PATHWAY_CSS + '</style>' + PATHWAY_HTML
-            + json_script('metahopper-pathways-data', data) + '<script>' + script + '</script>')
+            + json_script('metahopper-pathways-data', displayed) + '<script>' + script + '</script>')
 
 
 def render_annotation_sections(genes, pathways, default='genes'):
@@ -301,7 +315,6 @@ PATHWAY_CSS = '''
 .pathway-map table{font-size:.77rem}.pathway-map th{min-width:95px;white-space:normal;max-width:115px;text-align:center}.pathway-map th:first-child{min-width:230px;text-align:left;white-space:nowrap;position:sticky;left:0;z-index:2}
 .pathway-map td{padding:2px;min-width:95px}.pathway-map button{width:100%;border:0;border-radius:3px;padding:8px 4px;font-size:.78rem;font-variant-numeric:tabular-nums}.pathway-map button:focus-visible{outline:2px solid #16222b;outline-offset:-3px}
 .pathway-map tbody th{background:var(--card);font-weight:500}.pathway-key{display:flex;gap:12px;flex-wrap:wrap;font-size:.78rem;color:var(--mut);margin:8px 0}.pathway-key i{display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle;border:1px solid var(--line)}
-#pathway-neighborhood-figure{overflow:auto;margin-top:10px}#pathway-neighborhood-figure svg{display:block;width:100%;min-width:650px;max-height:180px}
 .pathway-warning{background:#fff6e9;border-left:3px solid #dca54f;padding:9px 12px;font-size:.83rem;margin:10px 0}
 .pathway-dialog{width:min(1000px,95vw);max-height:90vh;border:1px solid var(--line);border-radius:12px;padding:20px;color:var(--ink)}.pathway-dialog::backdrop{background:rgba(15,23,42,.45)}
 .pathway-sequence{max-height:200px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7f8;padding:12px;border:1px solid var(--line);border-radius:7px;font-size:.8rem}
@@ -311,20 +324,25 @@ PATHWAY_CSS = '''
 
 PATHWAY_HTML = '''
 <section class="card" id="pathway-browser">
- <h2>PathwayGenie functional annotation</h2>
- <p class="note">HMM evidence from independently predicted Prodigal genes. Panel coverage measures the configured, scored components; it is not pathway activity or abundance. Unmeasured steps can remain at 100% panel coverage. Taxonomic bins can contain multiple genomes, so combined component evidence need not belong to one organism.</p>
- <div id="pathway-warnings"></div><div class="stats" id="pathway-stats"></div>
- <div class="pathway-controls"><div><label for="pathway-bin">Bin</label><select id="pathway-bin"></select></div><div><label for="pathway-pathway">Pathway</label><select id="pathway-pathway"></select></div><div><label for="pathway-search">Search bins, pathways, targets or model hits</label><input id="pathway-search" type="search" placeholder="e.g. Wolbachia, biotin, bioB, TIGR" autocomplete="off"></div></div>
- <div class="pathway-actions"><label class="pathway-check"><input type="checkbox" id="pathway-hide-zero" checked>Hide bins with all-zero panel results</label><button type="button" id="pathway-reset">Reset filters</button><button type="button" id="pathway-export-summary">Filtered pathway CSV</button><a id="pathway-summary-download" class="asset-link" download>Original pathway CSV</a><button type="button" id="pathway-bakta">Bakta annotations for this bin</button></div>
+ <h2>Pathway annotation</h2>
+ <p class="note">Coverage shows how much of the configured HMM panel was detected. It does not establish a complete or active pathway. Taxonomic bins may contain multiple genomes.</p>
+ <div id="pathway-warnings"></div>
+ <div class="pathway-controls"><div><label for="pathway-bin">Bin</label><select id="pathway-bin"></select></div><div><label for="pathway-pathway">Pathway</label><select id="pathway-pathway"></select></div><div><label for="pathway-search">Search genes, pathways or HMMs</label><input id="pathway-search" type="search" placeholder="e.g. Wolbachia, biotin, bioB" autocomplete="off"></div></div>
+ <div class="pathway-actions"><label class="pathway-check"><input type="checkbox" id="pathway-hide-zero" checked>Hide bins with 0% coverage</label><button type="button" id="pathway-reset">Reset filters</button><button type="button" id="pathway-bakta">Bakta annotations for this bin</button></div>
  <p class="note" id="pathway-selection-status" role="status" aria-live="polite"></p>
- <div class="pathway-scroll"><table id="pathway-summary-table"><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th>Panel coverage</th><th>Detected / scored</th><th class="l">Panel status</th><th class="l">Selected route</th><th>Operon support</th><th class="l">Input / run</th></tr></thead><tbody id="pathway-summary-body"></tbody></table></div>
+ <div class="pathway-scroll"><table id="pathway-summary-table"><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th>Coverage</th><th>Detected / measured</th><th class="l">Status</th><th class="l">Panel</th></tr></thead><tbody id="pathway-summary-body"></tbody></table></div>
  <div class="pathway-actions"><button type="button" id="pathway-summary-prev">Previous</button><span class="note" id="pathway-summary-page"></span><button type="button" id="pathway-summary-next">Next</button></div>
 </section>
-<section class="card"><h2>Scored component coverage by bin</h2><div class="pathway-key"><span><i style="background:#eff3f4"></i>0%: no accepted panel evidence</span><span><i style="background:#8bbcc1"></i>Partial panel</span><span><i style="background:#176d79"></i>100%: scored panel complete</span><span><i style="background:#ddd7e2"></i>Unavailable / failed / stale</span></div><div class="pathway-scroll pathway-map" id="pathway-heatmap"></div><p class="note">Click a cell to inspect that bin/pathway. Gray cells are unavailable, not zero. By default, all-zero bins are hidden; the full QC table remains available below.</p></section>
-<section class="card" id="pathway-components-card"><h2>Component evidence</h2><p class="note" id="pathway-component-status"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Pathway / component</th><th class="l">Assay scope</th><th>Scored panel</th><th>Selected route</th><th class="l">Evidence</th><th>Protein copies</th><th class="l">Accepted proteins</th><th class="l">Candidate proteins</th><th class="l">Notes</th></tr></thead><tbody id="pathway-component-body"></tbody></table></div><div class="pathway-actions"><button type="button" id="pathway-component-prev">Previous</button><span class="note" id="pathway-component-page"></span><button type="button" id="pathway-component-next">Next</button><button type="button" id="pathway-export-components">Filtered component CSV</button></div></section>
-<section class="card" id="pathway-hits-card"><h2>Supporting HMM hits</h2><p class="note">Accepted model evidence can still identify a shared family rather than an exact gene. The review filter includes these accepted non-specific calls as well as fragments and context candidates.</p><div class="pathway-actions"><label for="pathway-hit-filter">Evidence filter</label><select id="pathway-hit-filter" style="width:auto"><option value="all">All model hits</option><option value="accepted">Accepted component evidence</option><option value="review">Review / non-specific evidence</option></select><button type="button" id="pathway-export-hits">Filtered hits CSV</button><button type="button" id="pathway-export-proteins">Filtered protein FASTA</button></div>
-<p class="note" id="pathway-hit-status" role="status"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Protein</th><th class="l">Target</th><th class="l">Product / model</th><th class="l">Call specificity</th><th class="l">Status / reason</th><th>HMM coverage</th><th>Sequence bits</th><th>Domain bits</th><th>Independent E-value</th><th class="l">Contig</th><th>Start</th><th>End</th><th class="l">Strand</th></tr></thead><tbody id="pathway-hit-body"></tbody></table></div><div class="pathway-actions"><button type="button" id="pathway-hit-prev">Previous</button><span class="note" id="pathway-hit-page"></span><button type="button" id="pathway-hit-next">Next</button></div></section>
-<section class="card"><h2>Gene neighborhoods and reference-operon support</h2><p class="note">Neighborhoods stay within one contig. Operon support is a reference-pattern heuristic from 0 to 1, not a probability or a measure of biochemical completion. Click a neighborhood to inspect gene order and orientation.</p><div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th class="l">Neighborhood</th><th class="l">Contig</th><th>Start</th><th>End</th><th>Proteins</th><th class="l">Observed order</th><th class="l">Reference template</th><th>Support</th></tr></thead><tbody id="pathway-neighborhood-body"></tbody></table></div><div id="pathway-neighborhood-figure"></div><p class="note" id="pathway-neighborhood-details"></p><div class="pathway-actions"><button type="button" id="pathway-export-neighborhoods">Filtered neighborhoods CSV</button><button type="button" id="pathway-export-operons">Filtered operon CSV</button></div></section>
-<section class="card"><h2>Run quality and original files</h2><p class="note" id="pathway-run-details"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Run status</th><th class="l">Input check</th><th>Contigs</th><th>Size (bp)</th><th>Predicted ORFs</th><th>Accepted model hits</th><th>Proteins with accepted hits</th><th>Review hits</th><th class="l">Reason</th></tr></thead><tbody id="pathway-qc-body"></tbody></table></div><p class="note">Original downloads preserve PathwayGenie’s output, including records from any bins flagged as stale above. Bakta locus tags and PathwayGenie protein IDs belong to different gene-calling runs.</p><details><summary>Analysis settings</summary><dl id="pathway-parameters"></dl></details><details style="margin-top:12px"><summary>Download original PathwayGenie files</summary><label for="pathway-file-search">Filter file names</label><input type="search" id="pathway-file-search" placeholder="e.g. accepted_hits, proteins.faa, biotin" style="max-width:500px"><div class="pathway-actions" id="pathway-file-links"></div><p class="note" id="pathway-file-status"></p></details></section>
+<section class="card"><h2>Pathway coverage by bin</h2><div class="pathway-key"><span><i style="background:#eff3f4"></i>No detected panel genes</span><span><i style="background:#8bbcc1"></i>Some targets detected</span><span><i style="background:#176d79"></i>All panel targets detected</span><span><i style="background:#ddd7e2"></i>Unavailable</span></div><div class="pathway-scroll pathway-map" id="pathway-heatmap"></div><p class="note">Click a cell to see its HMM hits. Use “Panel genes” in the table above to inspect what was measured.</p></section>
+<section class="card" id="pathway-hits-card"><h2>HMM hits</h2><p class="note">One row per model hit. Shared-family matches do not identify an exact gene. Click a protein for its sequence and details, or a pathway to view its panel genes.</p>
+ <div class="pathway-actions"><label for="pathway-hit-filter">Show</label><select id="pathway-hit-filter" style="width:auto"><option value="accepted">Accepted hits</option><option value="all">All hits</option><option value="review">Hits to review</option></select></div>
+ <p class="note" id="pathway-hit-status" role="status"></p>
+ <div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th class="l">Gene / product</th><th class="l">Protein</th><th class="l">HMM</th><th class="l">Match</th><th>E-value</th><th>HMM coverage</th></tr></thead><tbody id="pathway-hit-body"></tbody></table></div>
+ <div class="pathway-actions"><button type="button" id="pathway-hit-prev">Previous</button><span class="note" id="pathway-hit-page"></span><button type="button" id="pathway-hit-next">Next</button></div>
+</section>
+<section class="card"><h2>Download pathway tables</h2><div class="pathway-actions"><button type="button" id="pathway-export-summary">Pathway summary TSV</button><button type="button" id="pathway-export-hits">HMM hits TSV</button><button type="button" id="pathway-export-panels">Panel genes TSV</button></div><p class="note">Downloads follow the selected bins, pathways and filters.</p>
+ <details><summary>Run details</summary><p class="note" id="pathway-run-details"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Run status</th><th class="l">Input check</th><th>Size (bp)</th><th>Predicted proteins</th><th class="l">Reason</th></tr></thead><tbody id="pathway-qc-body"></tbody></table></div><dl id="pathway-parameters"></dl></details>
+</section>
+<dialog class="pathway-dialog" id="pathway-panel-dialog"><div class="row" style="justify-content:space-between"><h2 id="pathway-panel-title">Panel genes</h2><button type="button" id="pathway-panel-close">Close</button></div><p class="note" id="pathway-panel-note"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Gene / component</th><th class="l">HMM models</th><th class="l">Notes</th></tr></thead><tbody id="pathway-panel-body"></tbody></table></div></dialog>
 <dialog class="pathway-dialog" id="pathway-protein-dialog"><div class="row" style="justify-content:space-between"><h2 id="pathway-protein-title"></h2><button type="button" id="pathway-protein-close">Close</button></div><dl id="pathway-protein-fields"></dl><div class="pathway-actions"><button type="button" id="pathway-protein-aa-download">Protein FASTA</button><button type="button" id="pathway-protein-nt-download">Coding-sequence FASTA</button><button type="button" id="pathway-locate-contig">Locate contig in BinaRena</button></div><h2>Predicted protein</h2><pre class="pathway-sequence" id="pathway-protein-aa"></pre><h2>Coding sequence</h2><pre class="pathway-sequence" id="pathway-protein-nt"></pre><p class="note" id="pathway-protein-message"></p></dialog>
 '''

@@ -17,6 +17,7 @@ def fixture(root, output=None):
     output.mkdir(parents=True,exist_ok=True)
     inputs=[];qc=[];summary=[];components=[];hits=[]
     config={'pathways':[dict(id='p1',label='Synthetic panel',scored_components=['c1','c2'],route_components=['c1','c2','c3'],extra_components=[],target_genes=['g1','g2','AAT'],notes='Synthetic fixture only; unmeasured c3.')],
+            'model_rules':{'SYNTHETIC_c1':{'target':'g1','components':['c1']},'SYNTHETIC_c2':{'target':'g2','components':['c2']}},
             'components':{'c1':{'assay_scope':'targeted'},'c2':{'assay_scope':'targeted'},'c3':{'assay_scope':'not_assayed'}}}
     config_bytes=(json.dumps(config,indent=2)+'\n').encode();(output/'config_used.json').write_bytes(config_bytes)
     definitions=[dict(pathway='p1',component=c,label=c,assay_scope='not_assayed' if c=='c3' else 'targeted',in_heatmap_denominator=int(c!='c3'),in_route_definition=1,notes='Synthetic') for c in ['c1','c2','c3']]

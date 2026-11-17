@@ -30,9 +30,6 @@ FIGURE_CSS = '''
 .report-figures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-bottom:16px}
 .report-figures .card{margin:0;min-width:0}.report-figures .wide{grid-column:1/-1}
 #bin-figures{grid-template-columns:minmax(0,1fr)}
-.bin-figure-controls{display:flex;align-items:end;gap:16px;flex-wrap:wrap}
-.bin-figure-controls label{display:block}.bin-figure-controls select{min-width:160px}
-.bin-figure-controls .figure-note{flex:1;min-width:220px;margin:0}
 .figure-host{max-height:500px;overflow:auto;min-height:120px}.figure-host svg{width:100%;height:auto;display:block;font-family:inherit}
 #bin-figures .figure-host{max-height:none;overflow:visible}
 #bin-figures .figure-host svg{min-width:0;margin:0 auto;max-width:1100px}
@@ -132,7 +129,6 @@ CHART_JS = r'''
 
 BIN_FIGURES_HTML = '''
 <div id="bin-figures" class="report-figures">
- <div class="card bin-figure-controls"><div><label for="bin-figure-rank">Plot rank</label><select id="bin-figure-rank" aria-describedby="bin-figure-help"></select></div><p class="figure-note" id="bin-figure-help">Choose a rank for both plots. This stays in sync with the table's rank selector. Taxonomic searches narrow the contiguity plot at this rank; the partition always shows the full assembly.</p></div>
  <section class="card"><h2 id="bin-partition-title">Assembly partition</h2><p id="bin-partition-total" class="partition-total"></p><div id="bin-partition-figure" class="figure-host"></div><p class="figure-note" id="bin-partition-note"></p></section>
  <section class="card"><h2 id="bin-contiguity-title">Contiguity and assembly size</h2><p class="note" id="bin-figures-status" role="status" aria-live="polite"></p><div id="bin-contiguity-figure" class="figure-host"></div><p class="figure-note">Both axes use log10 scales. Hover for original values. Bins with missing or nonpositive size or N50 are omitted. N50 is the contig length at which half the bin sequence is in contigs of that length or longer.</p></section>
 </div>
@@ -142,16 +138,13 @@ BIN_FIGURES_JS = r'''
 (function(){
   var source=document.getElementById('bin-figure-data');if(!source||!window.MHCharts)return;
   var data=JSON.parse(source.textContent),partition=JSON.parse(document.getElementById('bin-partition-data').textContent),C=window.MHCharts;
-  var rank=document.getElementById('rank-filter'),search=document.getElementById('bin-search'),plotRank=document.getElementById('bin-figure-rank');
-  if(!rank||!search||!plotRank)return;
-  Array.prototype.forEach.call(rank.options,function(item){var option=document.createElement('option');option.value=item.value;option.textContent=item.textContent;plotRank.appendChild(option);});
-  plotRank.addEventListener('change',function(){rank.value=plotRank.value;rank.dispatchEvent(new Event('change'));});
+  var rank=document.getElementById('rank-filter'),search=document.getElementById('bin-search');
+  if(!rank||!search)return;
   function bp(v){return v>=1e6?C.format(v/1e6)+' Mb':v>=1e3?C.format(v/1e3)+' kb':C.format(v)+' bp';}
   function refresh(){
     function normal(v){return String(v||'').toLowerCase().replace(/[_\s]+/g,' ').trim();}
     var query=normal(search.value),rows=data.filter(function(r){return r.rank===rank.value&&(!query||normal(r.bin).indexOf(query)>=0);});
     var rankLabel=rank.value?rank.value.charAt(0).toUpperCase()+rank.value.slice(1):'No rank available';
-    plotRank.value=rank.value;
     document.getElementById('bin-partition-title').textContent='Assembly partition · '+rankLabel;
     document.getElementById('bin-contiguity-title').textContent='Contiguity and assembly size · '+rankLabel;
     function label(r){return r.rank+' / '+r.bin.replace(/_/g,' ');}

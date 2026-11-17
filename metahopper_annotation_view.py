@@ -177,7 +177,9 @@ BROWSER_CSS = '''
 #annotation-feature-table td.product-cell{white-space:normal;min-width:260px;max-width:420px;overflow-wrap:anywhere}
 #annotation-feature-table td.reference-cell{white-space:normal;max-width:240px;min-width:140px;overflow-wrap:anywhere}
 .feature-tag{display:inline-block;font-size:.72rem;border-radius:5px;padding:2px 5px;background:#edf2f4;white-space:nowrap}
-.feature-tag.hypothetical{background:#fff0d9;color:#8c5b15}.feature-tag.pseudogene{background:#eee7f7;color:#66428c}.feature-tag.named{background:#e3f2ef;color:#246559}
+.feature-tag.hypothetical{background:#fff0d9;color:#8c5b15}.feature-tag.pseudogene{background:#fce8e6;color:#a32626;margin-left:6px}.feature-tag.named{background:#e3f2ef;color:#246559}
+.feature-pseudogene .annotation-feature-link,.feature-pseudogene .feature-gene{color:#a32626;font-weight:600}
+.feature-count-table{width:auto;min-width:320px}.feature-count-table th,.feature-count-table td{padding:7px 16px}
 .annotation-feature-link{border:0;background:none;color:var(--acc);font:inherit;text-decoration:underline;padding:0;white-space:nowrap}
 .annotation-help{font-size:.81rem;color:var(--mut);margin:6px 0}.annotation-import{font-size:.81rem}.annotation-import input{font-size:.8rem;max-width:340px;padding:4px}
 .annotation-dialog{width:min(1000px,95vw);max-height:90vh;border:1px solid var(--line);border-radius:12px;padding:20px;color:var(--ink)}
@@ -199,19 +201,16 @@ BROWSER_HTML = '''
   <div><label for="annotation-category">Annotation category</label><select id="annotation-category"><option value="all">All categories</option><option value="named">Non-hypothetical proteins</option><option value="hypothetical">Hypothetical proteins</option><option value="unassigned">Unassigned protein products</option><option value="pseudogene">Pseudogenes (flagged)</option><option value="pseudo-unknown">Pseudogene status unavailable</option></select></div>
  </div>
  <div class="annotation-chips" id="annotation-category-chips"></div>
- <p class="annotation-help">Pseudogene and hypothetical categories can overlap. Pseudogene status follows Bakta flags; older summary tables may not record those flags.</p>
+ <p class="annotation-help">Pseudogenes are marked in red and labeled in the product cell, following Bakta flags. Pseudogene and hypothetical categories can overlap.</p>
  <div class="annotation-actions"><button type="button" id="annotation-clear">Reset filters</button><button type="button" id="annotation-export">Filtered features TSV</button><button type="button" id="annotation-export-proteins">Filtered proteins FASTA</button><button type="button" id="annotation-export-genes">Filtered genes FASTA</button><a id="annotation-feature-download" class="asset-link" download>All features TSV</a><a id="annotation-protein-download" class="asset-link" download>Proteins FASTA</a><a id="annotation-fasta-download" class="asset-link" download>Bin FASTA</a></div>
  <p class="note" id="annotation-feature-status" role="status" aria-live="polite"></p>
  <div class="scroll"><table id="annotation-feature-table"><thead><tr>
-  <th class="l"><button data-feature-sort="bin">Bin</button></th><th class="l"><button data-feature-sort="locus_tag">Locus tag</button></th><th class="l"><button data-feature-sort="gene">Gene</button></th><th class="l"><button data-feature-sort="product">Product</button></th><th class="l"><button data-feature-sort="type">Type</button></th><th class="l">Product category</th><th class="l"><button data-feature-sort="pseudogene">Pseudogene</button></th><th class="l"><button data-feature-sort="contig">Contig</button></th><th><button data-feature-sort="start">Start</button></th><th><button data-feature-sort="end">End</button></th><th class="l">Strand</th><th><button data-feature-sort="aa_length">Length (aa)</button></th><th class="l">Database references</th>
+  <th class="l"><button data-feature-sort="bin">Bin</button></th><th class="l"><button data-feature-sort="locus_tag">Locus tag</button></th><th class="l"><button data-feature-sort="gene">Gene</button></th><th class="l"><button data-feature-sort="product">Product</button></th><th class="l"><button data-feature-sort="type">Type</button></th><th class="l">Product category</th><th class="l"><button data-feature-sort="contig">Contig</button></th><th><button data-feature-sort="start">Start</button></th><th><button data-feature-sort="end">End</button></th><th class="l">Strand</th><th><button data-feature-sort="aa_length">Length (aa)</button></th><th class="l">Database references</th>
  </tr></thead><tbody id="annotation-feature-body"></tbody></table></div>
  <div class="row" style="margin-top:12px"><button type="button" id="annotation-prev">Previous</button><span class="note" id="annotation-page"></span><button type="button" id="annotation-next">Next</button></div>
  <details class="annotation-import" style="margin-top:14px"><summary>Open an existing Bakta JSON file locally</summary><p class="annotation-help">Select its bin above, then choose that bin’s annotation.json. It is read in this browser. Rebuilding the report on the run directory embeds these records automatically.</p><label for="annotation-load-json">Bakta JSON for the selected bin</label><input id="annotation-load-json" type="file" accept=".json,application/json"><p id="annotation-import-status" class="annotation-help" role="status"></p></details>
 </section>
-<div class="report-figures" id="annotation-selection-figures">
- <section class="card"><h2>Feature types in the selected bin(s)</h2><div id="annotation-types-figure" class="figure-host"></div><p class="figure-note">Click a bar to filter the feature table. Counts use the loaded gene records.</p></section>
- <section class="card"><h2>Protein product categories</h2><div id="annotation-products-figure" class="figure-host"></div><p class="figure-note">Pseudogene flags may overlap either protein category and are counted separately above.</p></section>
-</div>
+<section class="card"><h2>Feature types in the selected bin(s)</h2><table class="feature-count-table"><thead><tr><th class="l">Feature type</th><th>Count</th></tr></thead><tbody id="annotation-type-counts"></tbody><tfoot><tr><th class="l">Total</th><td id="annotation-type-total"></td></tr></tfoot></table><p class="figure-note">Counts include all loaded features in the selected bins. Click a feature type to filter the explorer.</p></section>
 <dialog class="annotation-dialog" id="annotation-feature-dialog">
  <div class="dialog-head"><div><h2 id="annotation-detail-title">Feature details</h2><p id="annotation-detail-product"></p></div><button type="button" id="annotation-detail-close">Close</button></div>
  <dl id="annotation-detail-fields"></dl>

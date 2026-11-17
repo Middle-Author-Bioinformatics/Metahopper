@@ -69,10 +69,10 @@ function searchBins(query){el('bin-search').value=query;el('bin-search').listene
 let binMatches=searchBins('sOdAlIs');
 assert(binMatches.length>0);
 assert(binMatches.every(row=>row.dataset.binName.toLowerCase().includes('sodalis')));
-assert(new Set(binMatches.map(row=>row.dataset.rank)).size>=2,'search remained constrained to the selected rank');
+assert(binMatches.every(row=>row.dataset.rank==='genus'),'search escaped the selected rank');
 assert.equal(el('rank-filter').disabled,false);assert.equal(el('rank-filter').value,'genus');
-assert(el('bin-search-status').textContent.includes(binMatches.length+' matching bins'));
-const underscored=rankRows.find(row=>row.dataset.binName.includes('_'));assert(underscored);
+assert(el('bin-search-status').textContent.includes(binMatches.length+' matching bin'));
+const underscored=rankRows.find(row=>row.dataset.rank==='genus'&&row.dataset.binName.includes('_'));assert(underscored);
 binMatches=searchBins('  '+underscored.dataset.binName.replace(/_/g,'  ').toUpperCase()+'  ');
 assert(binMatches.includes(underscored),'spaces/underscores/case were not normalized');
 assert.equal(searchBins('this_taxon_does_not_exist_93264').length,0);
@@ -152,7 +152,7 @@ async function finish(){
  catalogue.run_name='wrong-run';await el('graph-file').onchange.call(el('graph-file'));
  assert(el('graph-status').textContent.includes('does not match this report'));
  el('graph-close').click();assert.equal(el('graph-dialog').open,false);
- console.log(JSON.stringify({contigs:initial.scatter.nShown,genus_colours:genus.size,checks:['exactly three tabs','Phylum default and rank switching','taxonomic-name search across ranks','case/space/underscore matching','no-match and literal-input handling','clear/Escape restore selected rank','bin metrics preserved by search','dot/legend agreement','opaque palette','unique genus colours','explicit manual colour mode','graph button selection','graph neighbourhood and strand links','source graph isolation','SVG download','wrong-run catalogue rejection']},null,2));
+ console.log(JSON.stringify({contigs:initial.scatter.nShown,genus_colours:genus.size,checks:['exactly three tabs','Phylum default and rank switching','taxonomic-name search at the selected rank','case/space/underscore matching','no-match and literal-input handling','clear/Escape restore selected rank','bin metrics preserved by search','dot/legend agreement','opaque palette','unique genus colours','explicit manual colour mode','graph button selection','graph neighbourhood and strand links','source graph isolation','SVG download','wrong-run catalogue rejection']},null,2));
 }
 finish().catch(error=>{console.error(error);process.exitCode=1;});
 

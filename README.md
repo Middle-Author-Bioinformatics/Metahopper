@@ -105,19 +105,32 @@ there is no combined all-ranks view. If Phylum was not produced, the highest
 available rank opens instead. Backend inspection and detailed audit files remain
 available in the run directory.
 Use **Search taxonomic name** above the Bins table to find matching bin names
-across every available rank. Matching ignores capitalization and treats spaces
+at the selected rank. Matching ignores capitalization and treats spaces
 and underscores alike; partial names work. Each matching row retains its rank,
 size, contig statistics, CheckM scores when available, and refinement summary.
-The **Plot rank** selector beside the figures stays synchronized with the table's
-rank selector. Both plots show the selected rank, from Phylum through Species
-when available, and name it in their titles. During a taxonomic search, the table
-shows matches across ranks while the contiguity plot shows matching bins only at
-the selected rank. The assembly partition stays complete at that rank.
+One **Taxonomic rank** selector controls the table, local name search and both
+plots, from Phylum through Species when available. Both plots name the rank in
+their titles. The partition stays complete while name searches narrow the table
+and contiguity plot. In the updated web dashboard, the dashboard's rank selector
+replaces this local control and also sets the rank for cross-sample search.
 The partition uses the full report width and expands to fit its diagram, without
 an internal vertical scrollbar.
 **Clear**, Escape, or deleting the query returns the table to that selected rank.
 No matches are shown explicitly. Annotation rows are marked
 stale if their source bin changed or disappeared since annotation.
+
+The Annotation tab has **Genes & proteins** and **Pathways** views. Gene features
+remain searchable by bin, type and category. Flagged pseudogenes have red locus
+and gene labels plus a Pseudogene tag; their flags remain in details and TSV
+exports. Feature type counts appear in a compact table, without protein-category
+bar charts. Annotation always describes the rank actually annotated.
+
+Pathways shows coverage and one HMM-hit table. **Panel genes** links open the
+configured genes/components and their HMM accessions, including unmeasured steps.
+Three filtered TSV downloads cover the pathway summary, HMM hits and panel gene
+definitions. Protein details and sequences open from the hit table. Original
+PathwayGenie files, component evidence and neighborhood results stay in the run
+directory; the report omits their separate tables and exhaustive file browser.
 
 ## Fix colors and add graph review to an existing run
 
@@ -354,6 +367,7 @@ partition. Bin size and N50 use log10 axes; CheckM values remain in the table.
 python -m unittest discover -p 'test_metahopper*.py' -v
 node test_report_frontend.cjs /path/to/metahopper_report_updated.html
 node test_bin_figures.cjs
+node test_pathway_browser.cjs
 ```
 
 The Python suite exercises graph parsing, provenance, exact/reverse-complement
