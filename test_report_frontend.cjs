@@ -47,10 +47,10 @@ const rankRows=Array.from(html.matchAll(/<tr data-rank="([^"]+)"([^>]*)>([\s\S]*
 });
 for(const id of ['x','y','xs','ys','c','bf','graph-hops','graph-limit','graph-labels'])elements.get(id).tagName='select';
 elements.get('graph-hops').value='1';elements.get('graph-limit').value='500';elements.get('graph-labels').value='yes';
-const document={getElementById:id=>elements.get(id)||null,createElement:tag=>new Element(tag),createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>({textContent:text}),querySelectorAll(query){return query==='#bin-table tbody tr'?rankRows:[];},body:new Element('body')};
+const document={getElementById:id=>elements.get(id)||null,createElement:tag=>new Element(tag),createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>({textContent:text}),querySelectorAll(query){return query==='#bin-table tbody tr'?rankRows:[];},dispatchEvent(){},body:new Element('body')};
 const window={...(process.env.TEST_POINTER==='1'?{PointerEvent:function(){}}:{}),devicePixelRatio:1,addEventListener:(name,fn)=>{events[name]=fn;}};
 let downloaded=0;
-const sandbox={document,window,console,Blob,Set,Map,Math,JSON,Number,String,Array,Object,Infinity,parseFloat,parseInt,
+const sandbox={document,window,console,Blob,Set,Map,Math,JSON,Number,String,Array,Object,Infinity,parseFloat,parseInt,CustomEvent:class{constructor(type){this.type=type;}},
  setTimeout(fn){fn();return 1;},clearTimeout(){},alert(message){throw Error(message);},
  URL:{createObjectURL(){downloaded++;return 'blob:test';},revokeObjectURL(){}},
  XMLSerializer:class{serializeToString(){return '<svg xmlns="http://www.w3.org/2000/svg"/>';}}};
