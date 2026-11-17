@@ -108,7 +108,13 @@ Use **Search taxonomic name** above the Bins table to find matching bin names
 across every available rank. Matching ignores capitalization and treats spaces
 and underscores alike; partial names work. Each matching row retains its rank,
 size, contig statistics, CheckM scores when available, and refinement summary.
-The rank selector controls the partition even while a search spans ranks.
+The **Plot rank** selector beside the figures stays synchronized with the table's
+rank selector. Both plots show the selected rank, from Phylum through Species
+when available, and name it in their titles. During a taxonomic search, the table
+shows matches across ranks while the contiguity plot shows matching bins only at
+the selected rank. The assembly partition stays complete at that rank.
+The partition uses the full report width and expands to fit its diagram, without
+an internal vertical scrollbar.
 **Clear**, Escape, or deleting the query returns the table to that selected rank.
 No matches are shown explicitly. Annotation rows are marked
 stale if their source bin changed or disappeared since annotation.
@@ -347,6 +353,7 @@ partition. Bin size and N50 use log10 axes; CheckM values remain in the table.
 ```bash
 python -m unittest discover -p 'test_metahopper*.py' -v
 node test_report_frontend.cjs /path/to/metahopper_report_updated.html
+node test_bin_figures.cjs
 ```
 
 The Python suite exercises graph parsing, provenance, exact/reverse-complement

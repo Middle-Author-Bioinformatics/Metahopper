@@ -671,6 +671,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       : count + ' bin' + (count === 1 ? '' : 's') + ' at the ' + sel.value + ' rank.';
     empty.hidden = count !== 0;
     empty.textContent = query ? 'No bins match this taxonomic name. Try a shorter name.' : 'No bins are available at this rank.';
+    document.dispatchEvent(new CustomEvent('metahopper:bins-filter'));
   }
   sel.onchange = apply;
   search.addEventListener('input', apply);
@@ -1406,7 +1407,7 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=Non
                         ranks[0]['rank'] if ranks else '')
     out = ['<div class="card"><div class="row" style="margin-bottom:12px">'
            '<div style="max-width:220px"><label for="rank-filter">Rank</label>'
-           '<select id="rank-filter" title="Choose a rank when the taxonomic-name search is empty">']
+           '<select id="rank-filter" title="Choose the table and plot rank; taxonomic searches show table matches across ranks">']
     for row in ranks:
         selected = ' selected' if row['rank'] == default_rank else ''
         out.append(f'<option value="{esc(row["rank"])}"{selected}>{esc(row["rank"].capitalize())}</option>')
@@ -1418,7 +1419,7 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=Non
                '<button type="button" id="bin-search-clear" disabled>Clear</button></div>'
                '<p id="bin-search-help" class="note">Searches bin names across all ranks. '
                'Matching bins retain their rank and all available size, quality and refinement metrics. '
-               'The rank selector also controls the full assembly partition below.</p>'
+               'The rank selector also controls both plots below.</p>'
                '<p id="bin-search-status" class="note" role="status" aria-live="polite"></p>')
     quality_ranks = sorted({r['rank'] for r in bin_rows if r.get('completeness_percent') is not None
                             or r.get('contamination_percent') is not None}, key=rank_key)

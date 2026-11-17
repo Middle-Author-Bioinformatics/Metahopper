@@ -29,7 +29,14 @@ DOWNLOAD_LAYOUT_CSS = '''
 FIGURE_CSS = '''
 .report-figures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-bottom:16px}
 .report-figures .card{margin:0;min-width:0}.report-figures .wide{grid-column:1/-1}
+#bin-figures{grid-template-columns:minmax(0,1fr)}
+.bin-figure-controls{display:flex;align-items:end;gap:16px;flex-wrap:wrap}
+.bin-figure-controls label{display:block}.bin-figure-controls select{min-width:160px}
+.bin-figure-controls .figure-note{flex:1;min-width:220px;margin:0}
 .figure-host{max-height:500px;overflow:auto;min-height:120px}.figure-host svg{width:100%;height:auto;display:block;font-family:inherit}
+#bin-figures .figure-host{max-height:none;overflow:visible}
+#bin-figures .figure-host svg{min-width:0;margin:0 auto;max-width:1100px}
+#bin-figures #bin-contiguity-figure svg{max-width:900px}
 .figure-host text{fill:var(--ink);font-size:12px}.figure-host .axis-label{fill:var(--mut);font-size:11px}
 .figure-host .chart-pick{cursor:pointer}.figure-host .chart-pick:focus{outline:2px solid var(--acc)}
 .figure-host .flow:hover path,.figure-host .flow:focus path{fill-opacity:.55}
@@ -100,7 +107,7 @@ CHART_JS = r'''
   function color(name){var colors=['#207b86','#708c58','#9b72aa','#c88340','#4f81ad','#b46f78','#658f92','#a0914b'],hash=0;for(var i=0;i<name.length;i++)hash=(hash*31+name.charCodeAt(i))|0;return colors[(hash>>>0)%colors.length];}
   function flow(host,parts,total,options){
     if(!total||!parts.length){empty(host,'The assembly has no sequence to partition.');return;}
-    clear(host);var scale=280/total,y=65,sourceY=65,sourceOffset=0,width=820;
+    clear(host);var scale=280/total,y=65,sourceY=65,sourceOffset=0,width=1000;
     var positions=parts.map(function(p){var size=p.bp*scale,box=Math.max(32,size+12),pos={p:p,y:y+(box-size)/2,h:size};y+=box;return pos;});
     var height=Math.max(380,y+20),svg=node('svg',{viewBox:'0 0 '+width+' '+height,role:'img','aria-label':'Full assembly partition at the '+options.rank+' rank'});
     svg.appendChild(node('title',{},'Full assembly to '+options.rank+' bins, including unbinned sequence'));
@@ -111,10 +118,10 @@ CHART_JS = r'''
     positions.forEach(function(pos){var p=pos.p,c=p.unbinned?'#000000':color(p.bin),s=sourceY+sourceOffset,t=pos.y,h=pos.h;
       var group=node('g',{class:'flow',tabindex:0});
       group.appendChild(node('title',{},p.bin.replace(/_/g,' ')+' — '+options.bp(p.bp)+' ('+fmt(p.bp/total*100)+'%); '+fmt(p.contigs)+' contigs'));
-      if(h>0){group.appendChild(node('path',{d:'M39 '+s+' C205 '+s+' 205 '+t+' 390 '+t+' L390 '+(t+h)+' C205 '+(t+h)+' 205 '+(s+h)+' 39 '+(s+h)+' Z',fill:c,'fill-opacity':p.unbinned ? 1 : .25}));
-        group.appendChild(node('rect',{x:390,y:t,width:11,height:Math.max(.7,h),rx:1,fill:c}));}
-      var label=p.bin.replace(/_/g,' ');group.appendChild(node('text',{x:414,y:t+h/2-2,style:'font-size:14px'},label.length>47?label.slice(0,45)+'…':label));
-      group.appendChild(node('text',{x:414,y:t+h/2+14,class:'axis-label',style:'font-size:12px'},options.bp(p.bp)+' · '+fmt(p.bp/total*100)+'%'));
+      if(h>0){group.appendChild(node('path',{d:'M39 '+s+' C265 '+s+' 265 '+t+' 500 '+t+' L500 '+(t+h)+' C265 '+(t+h)+' 265 '+(s+h)+' 39 '+(s+h)+' Z',fill:c,'fill-opacity':p.unbinned ? 1 : .25}));
+        group.appendChild(node('rect',{x:500,y:t,width:11,height:Math.max(.7,h),rx:1,fill:c}));}
+      var label=p.bin.replace(/_/g,' ');group.appendChild(node('text',{x:524,y:t+h/2-2,style:'font-size:14px'},label.length>47?label.slice(0,45)+'…':label));
+      group.appendChild(node('text',{x:524,y:t+h/2+14,class:'axis-label',style:'font-size:12px'},options.bp(p.bp)+' · '+fmt(p.bp/total*100)+'%'));
       if(!p.unbinned)action(group,function(){options.onPick(p);});svg.appendChild(group);sourceOffset+=h;
     });host.appendChild(svg);
   }
@@ -125,8 +132,9 @@ CHART_JS = r'''
 
 BIN_FIGURES_HTML = '''
 <div id="bin-figures" class="report-figures">
- <section class="card"><h2>Assembly partition</h2><p id="bin-partition-total" class="partition-total"></p><div id="bin-partition-figure" class="figure-host"></div><p class="figure-note" id="bin-partition-note"></p></section>
- <section class="card"><h2>Contiguity and assembly size</h2><p class="note" id="bin-figures-status"></p><div id="bin-contiguity-figure" class="figure-host"></div><p class="figure-note">Both axes use log10 scales. Hover for original values. Bins with missing or nonpositive size or N50 are omitted. N50 is the contig length at which half the bin sequence is in contigs of that length or longer.</p></section>
+ <div class="card bin-figure-controls"><div><label for="bin-figure-rank">Plot rank</label><select id="bin-figure-rank" aria-describedby="bin-figure-help"></select></div><p class="figure-note" id="bin-figure-help">Choose a rank for both plots. This stays in sync with the table's rank selector. Taxonomic searches narrow the contiguity plot at this rank; the partition always shows the full assembly.</p></div>
+ <section class="card"><h2 id="bin-partition-title">Assembly partition</h2><p id="bin-partition-total" class="partition-total"></p><div id="bin-partition-figure" class="figure-host"></div><p class="figure-note" id="bin-partition-note"></p></section>
+ <section class="card"><h2 id="bin-contiguity-title">Contiguity and assembly size</h2><p class="note" id="bin-figures-status" role="status" aria-live="polite"></p><div id="bin-contiguity-figure" class="figure-host"></div><p class="figure-note">Both axes use log10 scales. Hover for original values. Bins with missing or nonpositive size or N50 are omitted. N50 is the contig length at which half the bin sequence is in contigs of that length or longer.</p></section>
 </div>
 '''
 
@@ -134,10 +142,18 @@ BIN_FIGURES_JS = r'''
 (function(){
   var source=document.getElementById('bin-figure-data');if(!source||!window.MHCharts)return;
   var data=JSON.parse(source.textContent),partition=JSON.parse(document.getElementById('bin-partition-data').textContent),C=window.MHCharts;
+  var rank=document.getElementById('rank-filter'),search=document.getElementById('bin-search'),plotRank=document.getElementById('bin-figure-rank');
+  if(!rank||!search||!plotRank)return;
+  Array.prototype.forEach.call(rank.options,function(item){var option=document.createElement('option');option.value=item.value;option.textContent=item.textContent;plotRank.appendChild(option);});
+  plotRank.addEventListener('change',function(){rank.value=plotRank.value;rank.dispatchEvent(new Event('change'));});
   function bp(v){return v>=1e6?C.format(v/1e6)+' Mb':v>=1e3?C.format(v/1e3)+' kb':C.format(v)+' bp';}
-  function refresh(){var rank=document.getElementById('rank-filter'),search=document.getElementById('bin-search');
+  function refresh(){
     function normal(v){return String(v||'').toLowerCase().replace(/[_\s]+/g,' ').trim();}
-    var query=normal(search&&search.value),rows=data.filter(function(r){return query?normal(r.bin).indexOf(query)>=0:!rank||r.rank===rank.value;});
+    var query=normal(search.value),rows=data.filter(function(r){return r.rank===rank.value&&(!query||normal(r.bin).indexOf(query)>=0);});
+    var rankLabel=rank.value?rank.value.charAt(0).toUpperCase()+rank.value.slice(1):'No rank available';
+    plotRank.value=rank.value;
+    document.getElementById('bin-partition-title').textContent='Assembly partition · '+rankLabel;
+    document.getElementById('bin-contiguity-title').textContent='Contiguity and assembly size · '+rankLabel;
     function label(r){return r.rank+' / '+r.bin.replace(/_/g,' ');}
     var host=document.getElementById('bin-partition-figure'),entry=(partition.ranks||{})[rank&&rank.value];
     document.getElementById('bin-partition-total').textContent=partition.total_bp===null?'':bp(partition.total_bp);
@@ -145,9 +161,9 @@ BIN_FIGURES_JS = r'''
     if(partition.error||!entry||entry.error)C.empty(host,partition.error||(entry&&entry.error)||'No verified partition is available at this rank.');
     else C.flow(host,entry.parts,partition.total_bp,{rank:rank.value,bp:bp,onPick:function(p){search.value=p.bin;search.dispatchEvent(new Event('input'));document.getElementById('bin-table').scrollIntoView({block:'start',behavior:'smooth'});}});
     C.scatter(document.getElementById('bin-contiguity-figure'),rows.map(function(r){return {label:label(r),x:r.total_length_bp===null?null:r.total_length_bp/1e6,y:r.N50===null?null:r.N50/1e3,color:C.color(r.bin)};}),{title:'Contiguity and assembly size',xlabel:'Bin size (Mb, log10)',ylabel:'N50 (kb, log10)',xlog:true,ylog:true});
-    document.getElementById('bin-figures-status').textContent=rows.length+' bin'+(rows.length===1?'':'s')+' in the current table selection.';
+    document.getElementById('bin-figures-status').textContent=rows.length+' bin'+(rows.length===1?'':'s')+' at the '+rank.value+' rank'+(query?' matching the taxonomic search':'')+'.';
   }
-  ['rank-filter','bin-search','bin-search-clear'].forEach(function(id){var n=document.getElementById(id);if(n)['change','input','click'].forEach(function(event){n.addEventListener(event,function(){setTimeout(refresh,0);});});});
+  document.addEventListener('metahopper:bins-filter',refresh);
   refresh();
 })();
 '''
