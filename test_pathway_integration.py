@@ -59,6 +59,17 @@ class PathwayTests(unittest.TestCase):
         self.assertIn('components',data)  # The source evidence is retained.
         self.assertEqual(shown['proteins']['A\x1fc0000001_1']['aa'],'MK*')
 
+    def test_compact_component_states_preserve_candidates_without_failed_or_stale_calls(self):
+        content = view.render_pathways(self.data())
+        shown = json.loads(re.search(r'id="metahopper-pathways-data">(.*?)</script>', content, re.S)[1])
+        states = {(r['bin_id'], r['component']): r for r in shown['component_states']}
+        self.assertEqual({name for name, _ in states}, {'A', 'Zero'})
+        self.assertEqual(states['Zero', 'c1']['state'], 'not_detected')
+        self.assertTrue(states['Zero', 'c1']['has_hits'])
+        self.assertFalse(states['Zero', 'c2']['has_hits'])
+        self.assertEqual(states['A', 'c3']['state'], 'not_assayed')
+        self.assertEqual(set(states['Zero', 'c2']), {'bin_id', 'component', 'state', 'has_hits'})
+
     def test_legacy_results_are_discovered_without_running_tools(self):
         legacy=self.root/'final/bins/pathwaygenie';shutil.move(str(self.output),legacy)
         layout=report.RunLayout(self.root,'final');data=view.collect_pathways(layout)

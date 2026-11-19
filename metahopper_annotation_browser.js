@@ -51,9 +51,8 @@
   var selected=bins.find(function(b){return b.key===select.value;});
   el('annotation-browser-title').textContent='Gene and protein explorer'+(selected?' — '+selected.bin.replace(/_/g,' '):' — all bins');
   var missing=bins.filter(function(b){return (select.value==='all'||b===selected)&&b.error;});
-  var message=matches.length.toLocaleString()+' matching features of '+pool.length.toLocaleString()+' loaded features.';
-  if(!pool.length)message='No gene records are loaded for this selection. Regenerate this report from the existing Bakta outputs, or select a bin and open its Bakta JSON below.';
-  if(selected&&selected.source)message+=' Source: '+selected.source+'.';
+  var message=matches.length.toLocaleString()+' / '+pool.length.toLocaleString()+' features';
+  if(!pool.length)message='No gene records available.';
   if(missing.length)message+=' Gene records unavailable for '+missing.map(function(b){return b.bin+': '+b.error;}).join('; ')+'.';
   el('annotation-feature-status').textContent=message;el('annotation-page').textContent='Page '+(page+1)+' of '+pages+' · '+pageSize+' rows per page';el('annotation-prev').disabled=page===0;el('annotation-next').disabled=page+1>=pages;
   el('annotation-export').disabled=!matches.length;var aa=matches.filter(function(r){return protein(r)&&r.detail.aa;}).length,nt=matches.filter(function(r){return r.detail.nt;}).length;
