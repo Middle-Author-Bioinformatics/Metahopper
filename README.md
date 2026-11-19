@@ -119,18 +119,33 @@ an internal vertical scrollbar.
 No matches are shown explicitly. Annotation rows are marked
 stale if their source bin changed or disappeared since annotation.
 
-The Annotation tab has **Genes & proteins** and **Pathways** views. Gene features
+The Annotation tab has smaller **Genes & proteins** and **Pathways** sub-tabs.
+Section controls and counts replace instructional paragraphs. Gene features
 remain searchable by bin, type and category. Flagged pseudogenes have red locus
 and gene labels plus a Pseudogene tag; their flags remain in details and TSV
 exports. Feature type counts appear in a compact table, without protein-category
 bar charts. Annotation always describes the rank actually annotated.
 
-Pathways shows coverage and one HMM-hit table. **Panel genes** links open the
+Pathways shows panel coverage and one **HMM hits & missing components** table.
+Its default view combines accepted hits with recorded missing components. The
+filter can isolate accepted hits, missing components, all hits, or review hits.
+**No hits** means no model evidence was recorded for that component; **No accepted
+hit** and **Candidate only** retain evidence that did not pass acceptance.
+Fusion-only panels use **No fusion hit**, rather than claiming a gene is absent.
+Unmeasured components remain in Panel genes and are not labeled missing. Failed
+and stale bins do not contribute negative calls. Missing rows are included in the
+filtered HMM TSV with empty protein, coordinate and score fields. **Panel genes** links open the
 configured genes/components and their HMM accessions, including unmeasured steps.
 Three filtered TSV downloads cover the pathway summary, HMM hits and panel gene
 definitions. Protein details and sequences open from the hit table. Original
 PathwayGenie files, component evidence and neighborhood results stay in the run
 directory; the report omits their separate tables and exhaustive file browser.
+
+Reports follow the system light/dark preference when opened standalone. The live
+dashboard’s persistent theme choice controls the hosted report, including canvas
+labels, SVG figures, tables, status badges and sequence dialogs. Regenerate and
+republish existing reports to embed component states and the new report styling;
+this reads saved outputs and does not rerun annotation or HMM searches.
 
 ## Fix colors and add graph review to an existing run
 

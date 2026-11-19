@@ -26,9 +26,9 @@ const document={getElementById:id=>elements.get(id),createElement:tag=>new Eleme
 vm.runInNewContext(code,{document,window:{MHCharts:{bar(){}}},console,Blob,setTimeout:fn=>fn(),URL:{createObjectURL(value){blob=value;return 'blob:test';},revokeObjectURL(){}}});
 const el=id=>elements.get(id),trigger=(id,name)=>el(id).listeners[name].call(el(id)),rows=()=>el('annotation-feature-body').children;
 (async()=>{
- assert.equal(rows().length,100);assert.equal(el('annotation-type-total').textContent,'207');assert(!html.includes('id="annotation-products-figure"'));assert(!html.includes('data-feature-sort="pseudogene"'));assert(el('annotation-feature-status').textContent.includes('207 matching features'));
+ assert.equal(rows().length,100);assert.equal(el('annotation-type-total').textContent,'207');assert(!html.includes('id="annotation-products-figure"'));assert(!html.includes('data-feature-sort="pseudogene"'));assert(el('annotation-feature-status').textContent.includes('207 / 207 features'));
  el('annotation-bin').value=data.bins[0].key;trigger('annotation-bin','change');
- assert(el('annotation-feature-status').textContent.includes('206 matching features'));
+ assert(el('annotation-feature-status').textContent.includes('206 / 206 features'));
  trigger('annotation-next','click');assert(el('annotation-page').textContent.startsWith('Page 2 of 3'));
  trigger('annotation-next','click');assert.equal(rows().length,6);
  el('annotation-search').value='chromosomal replication';trigger('annotation-search','input');

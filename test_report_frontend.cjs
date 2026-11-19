@@ -29,7 +29,8 @@ class Element{
  getContext(){return context2d;}
 }
 const canvasFills=[];
-const context2d={globalAlpha:1,fillStyle:'',clearRect(){canvasFills.length=0;},arc(x,y,r){this.lastArc={x,y,r};},fill(){canvasFills.push({colour:this.fillStyle,alpha:this.globalAlpha,point:this.lastArc});},setTransform(){},beginPath(){},moveTo(){},lineTo(){},stroke(){},fillText(){},save(){},translate(){},rotate(){},restore(){},closePath(){},setLineDash(){}};
+const canvasLabels=[],palette={'--ink':'#16222b','--mut':'#63757f','--grid':'#e3eaed'};
+const context2d={globalAlpha:1,fillStyle:'',clearRect(){canvasFills.length=0;canvasLabels.length=0;},arc(x,y,r){this.lastArc={x,y,r};},fill(){canvasFills.push({colour:this.fillStyle,alpha:this.globalAlpha,point:this.lastArc});},setTransform(){},beginPath(){},moveTo(){},lineTo(){},stroke(){},fillText(value){canvasLabels.push({value,colour:this.fillStyle});},save(){},translate(){},rotate(){},restore(){},closePath(){},setLineDash(){}};
 for(const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)){
  const element=new Element(match[1]);elements.set(match[3],element);
  const value=match[2].match(/\bvalue="([^"]*)"/);if(value)element.value=value[1];
@@ -50,12 +51,15 @@ elements.get('graph-hops').value='1';elements.get('graph-limit').value='500';ele
 const document={getElementById:id=>elements.get(id)||null,createElement:tag=>new Element(tag),createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>({textContent:text}),querySelectorAll(query){return query==='#bin-table tbody tr'?rankRows:[];},dispatchEvent(){},body:new Element('body')};
 const window={...(process.env.TEST_POINTER==='1'?{PointerEvent:function(){}}:{}),devicePixelRatio:1,addEventListener:(name,fn)=>{events[name]=fn;}};
 let downloaded=0;
-const sandbox={document,window,console,Blob,Set,Map,Math,JSON,Number,String,Array,Object,Infinity,parseFloat,parseInt,CustomEvent:class{constructor(type){this.type=type;}},
+const sandbox={document,window,console,Blob,Set,Map,Math,JSON,Number,String,Array,Object,Infinity,parseFloat,parseInt,getComputedStyle:()=>({getPropertyValue:key=>palette[key]||''}),CustomEvent:class{constructor(type){this.type=type;}},
  setTimeout(fn){fn();return 1;},clearTimeout(){},alert(message){throw Error(message);},
  URL:{createObjectURL(){downloaded++;return 'blob:test';},revokeObjectURL(){}},
  XMLSerializer:class{serializeToString(){return '<svg xmlns="http://www.w3.org/2000/svg"/>';}}};
 vm.runInNewContext(script,sandbox,{timeout:10000});
 const el=id=>elements.get(id);
+palette['--ink']='#e2edf1';palette['--mut']='#a2b6c1';palette['--grid']='#344953';window.__draw();
+assert(canvasLabels.length>0&&canvasLabels.every(label=>['#e2edf1','#a2b6c1'].includes(label.colour)),'canvas labels must follow the dark palette');
+palette['--ink']='#16222b';palette['--mut']='#63757f';palette['--grid']='#e3eaed';window.__draw();
 function change(id,value){el(id).value=value;el(id).onchange();}
 assert.deepEqual(el('tabs').children.map(button=>button.textContent),['Bins','BinaRena','Annotation']);
 assert.equal(el('rank-filter').value,'phylum');

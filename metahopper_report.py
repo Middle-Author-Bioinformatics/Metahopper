@@ -69,6 +69,7 @@ from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
 from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, json_script
+from metahopper_report_theme import THEME_CSS, THEME_SCRIPT
 from metahopper_taxonomy import is_unbinned, taxonomy_summary, assembly_partition
 from metahopper_pathway_view import collect_pathways, render_pathways, render_annotation_sections
 from datetime import datetime
@@ -599,7 +600,8 @@ dialog.graph-dialog::backdrop{background:rgba(15,23,42,.45)}
 .graph-stage svg:active{cursor:grabbing}.graph-detail{white-space:pre-wrap;overflow-wrap:anywhere}
 .graph-stage .graph-node{cursor:move}
 __DOWNLOAD_LAYOUT_CSS__
-</style></head><body><div class="wrap">
+__THEME_CSS__
+</style><script>__THEME_SCRIPT__</script></head><body><div class="wrap">
 <header><h1>__TITLE__</h1>
 <p class="sub">__SUBTITLE__</p></header>
 <div class="tabs" id="tabs"></div>
@@ -875,20 +877,21 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     sx = function(v){ return M.l + (v - ex[0]) / (ex[1] - ex[0]) * pw; };
     sy = function(v){ return M.t + ph - (v - ey[0]) / (ey[1] - ey[0]) * ph; };
     // axes
-    ctx.strokeStyle = '#c8d4d9'; ctx.lineWidth = 1; ctx.fillStyle = '#63757f';
+    var palette=getComputedStyle(document.documentElement),ink=palette.getPropertyValue('--ink').trim(),mut=palette.getPropertyValue('--mut').trim(),grid=palette.getPropertyValue('--grid').trim();
+    ctx.strokeStyle = grid; ctx.lineWidth = 1; ctx.fillStyle = mut;
     ctx.font = '11px system-ui'; ctx.beginPath();
     ctx.moveTo(M.l, M.t); ctx.lineTo(M.l, M.t + ph); ctx.lineTo(M.l + pw, M.t + ph);
     ctx.stroke();
     for (var g = 0; g <= 4; g++){
       var vx = ex[0] + (ex[1] - ex[0]) * g / 4, vy = ey[0] + (ey[1] - ey[0]) * g / 4;
-      ctx.strokeStyle = '#eef3f5'; ctx.beginPath();
+      ctx.strokeStyle = grid; ctx.beginPath();
       ctx.moveTo(sx(vx), M.t); ctx.lineTo(sx(vx), M.t + ph); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(M.l, sy(vy)); ctx.lineTo(M.l + pw, sy(vy)); ctx.stroke();
-      ctx.fillStyle = '#63757f'; ctx.textAlign = 'center';
+      ctx.fillStyle = mut; ctx.textAlign = 'center';
       ctx.fillText(fmt(inv(vx, xsc)), sx(vx), M.t + ph + 15);
       ctx.textAlign = 'right'; ctx.fillText(fmt(inv(vy, ysc)), M.l - 6, sy(vy) + 3);
     }
-    ctx.textAlign = 'center'; ctx.fillStyle = '#16222b'; ctx.font = '600 12px system-ui';
+    ctx.textAlign = 'center'; ctx.fillStyle = ink; ctx.font = '600 12px system-ui';
     var xlab = el('x').value + (xsc[3] ? '  [' + xsc[3] + ']' : '');
     var ylab = el('y').value + (ysc[3] ? '  [' + ysc[3] + ']' : '');
     ctx.fillText(xlab, M.l + pw / 2, h - 8);
@@ -908,7 +911,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
       ctx.beginPath(); ctx.arc(sx(TX[i]), sy(TY[i]), r, 0, 6.2832);
       ctx.fillStyle = col; ctx.globalAlpha = 1; ctx.fill();
       if (selected.has(id)){
-        ctx.globalAlpha = 1; ctx.strokeStyle = '#16222b'; ctx.lineWidth = 1.8; ctx.stroke();
+        ctx.globalAlpha = 1; ctx.strokeStyle = ink; ctx.lineWidth = 1.8; ctx.stroke();
       }
     }
     ctx.globalAlpha = 1;
@@ -956,7 +959,7 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     });
     el('shown').textContent = view.length + ' of ' + S.nShown + ' plotted contigs' +
       (nHiddenByScale ? ' (' + nHiddenByScale + ' hidden: not positive on a log axis)' : '');
-    el('selinfo').innerHTML = n === 0 ? '<span class="note">Drag on the plot to lasso contigs.</span>'
+    el('selinfo').innerHTML = n === 0 ? '<span class="note">0 contigs selected</span>'
       : '<b>' + n + '</b> selected &middot; ' + (bp / 1e6).toFixed(3) + ' Mb' +
         (gn ? ' &middot; GC ' + (gsum / gn).toFixed(1) + '%' : '') +
         (cn ? ' &middot; cov ' + (csum / cn).toFixed(1) + '&times;' : '');
@@ -1415,16 +1418,9 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=Non
                '<div style="flex:1;min-width:220px;max-width:640px">'
                '<label for="bin-search">Search taxonomic name</label>'
                '<input id="bin-search" type="search" placeholder="e.g. Sodalis or Wolbachia" '
-               'autocomplete="off" spellcheck="false" aria-describedby="bin-search-help bin-search-status"></div>'
+               'autocomplete="off" spellcheck="false" aria-describedby="bin-search-status"></div>'
                '<button type="button" id="bin-search-clear" disabled>Clear</button></div>'
-               '<p id="bin-search-help" class="note">Search bin names at the selected taxonomic rank. '
-               'One rank controls this table and both plots below.</p>'
                '<p id="bin-search-status" class="note" role="status" aria-live="polite"></p>')
-    quality_ranks = sorted({r['rank'] for r in bin_rows if r.get('completeness_percent') is not None
-                            or r.get('contamination_percent') is not None}, key=rank_key)
-    out.append('<p class="note">' + ('Saved CheckM results: ' + esc(', '.join(quality_ranks))
-                + '. NA means no quality result for that bin.' if quality_ranks else
-                'No saved CheckM results were found for these bins.') + '</p>')
     out.append('<div class="scroll"><table class="sortable" id="bin-table"><thead><tr>'
                + "".join(head) + "</tr></thead><tbody>")
     for row in bin_rows:
@@ -1486,10 +1482,7 @@ def render_binarena(scatter):
     <div>
       <canvas id="cv" height="520"></canvas>
       <div class="legend" id="lg"></div>
-      <p class="note" style="margin-top:8px">
-        Drag to lasso. Hold <b>Shift</b> while dragging to add to the selection.
-        Hover a point for its values. <span id="shown"></span>
-      </p>
+      <p class="note" id="shown"></p>
       {warn}
     </div>
     <div>
@@ -1502,30 +1495,22 @@ def render_binarena(scatter):
         <button id="clr">Clear</button>
         <button class="p" id="graph-open" disabled>View assembly graph</button>
       </div>
-      <p class="note">Dot colours follow Colour by. Choose Manual sub-bin to colour by your assignments.</p>
       <h2>Sub-bins</h2>
       <div id="sblist"></div>
       <div class="row" style="margin-top:12px">
         <button class="p" id="exp" disabled>Download manual_bins.tsv</button>
       </div>
       <h2 style="margin-top:18px">Download FASTA</h2>
-      <p class="note">Published reports load this sample’s FASTA from S3 when you export.
-         For an offline report, choose the contig FASTA below. Manual assignments stay in this browser.</p>
-      <p class="note" style="margin-top:6px">Expected:<br><code>{esc(scatter['fastaHint']) or 'no assembly FASTA found in this run'}</code></p>
+      <label for="fa">Local FASTA (offline)</label>
       <input id="fa" type="file" multiple accept=".fasta,.fa,.fna,.fasta.gz,.fa.gz,.txt"
              style="margin-top:8px">
       <div class="row" style="margin-top:10px">
         <button class="p" id="expfa" disabled>Write FASTA per sub-bin</button>
       </div>
       <p class="note" id="fastat" style="margin-top:9px"></p>
-      <p class="note" style="margin-top:12px">Or do it from the TSV on the server:</p>
-      <p><code>metahopper_report.py -i &lt;outdir&gt; --apply-split manual_bins.tsv</code></p>
+
     </div>
   </div>
-  <p class="note" style="margin-top:12px">Source:
-     <code>{esc(scatter['source'])}</code> &middot; {scatter['nTotal']:,} rows,
-     {scatter['nEligible']:,} at or above {scatter['minLength']:,} bp with ordination
-     coordinates.</p>
 </div>"""
 
 
@@ -1733,9 +1718,8 @@ def collect_annotation_rows(layout):
 def render_bakta_annotation(layout, rows=None):
     rows = collect_annotation_rows(layout) if rows is None else rows
     out = ['<div class="card"><h2>Per-bin Bakta annotation</h2>']
-    out.append('<p>One selected rank is annotated. Original contig IDs are preserved. These are taxonomic bins and may contain multiple genomes. HMM pathway evidence is shown under Pathways when available. Dedicated BGC and virulence screening are separate analyses.</p>')
     if not rows:
-        out.append('<p class="note">No Bakta annotation summary found. Run metahopper_annotate.py on this run directory, then regenerate the report.</p></div>')
+        out.append('<p class="note">No Bakta annotation results available.</p></div>')
         return ''.join(out)
     columns = [('rank','rank'),('bin','bin'),('status','status'),('translation_table','genetic code'),
                ('cds','CDS'),('sorf','sORF'),('hypothetical_proteins','hypothetical proteins'),
@@ -1755,7 +1739,7 @@ def render_bakta_annotation(layout, rows=None):
                     if (layout.root / rel).is_file():
                         links.append('<a class="asset-link" href="'+esc(quote(rel.as_posix(),safe='/'))+'" data-sample-asset="'+esc(rel.as_posix())+'" download>'+('Protein FASTA' if label == 'proteins' else label)+'</a>')
         out.append('<td class="l annotation-path"><div class="asset-links">'+(''.join(links) or '&ndash;')+'</div></td></tr>')
-    out.append('</tbody></table></div><p class="note">Click a completed bin to inspect its gene and product list below. The list is embedded in this HTML. Sequence and annotation file downloads use this sample’s published assets in the AWS viewer, or the adjacent run files offline.</p></div>')
+    out.append('</tbody></table></div></div>')
     out.append(render_browser(collect_features(layout, rows)))
     return ''.join(out)
 
@@ -1806,6 +1790,8 @@ def build_report(layout: RunLayout, args) -> str:
 
     return (HTML
             .replace("__DOWNLOAD_LAYOUT_CSS__", DOWNLOAD_LAYOUT_CSS)
+            .replace("__THEME_CSS__", THEME_CSS)
+            .replace("__THEME_SCRIPT__", THEME_SCRIPT)
             .replace("__TITLE__", esc(title))
             .replace("__SUBTITLE__", subtitle)
             .replace("__TABS__", json.dumps(tabs))

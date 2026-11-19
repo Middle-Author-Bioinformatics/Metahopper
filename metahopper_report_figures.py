@@ -130,7 +130,7 @@ CHART_JS = r'''
 BIN_FIGURES_HTML = '''
 <div id="bin-figures" class="report-figures">
  <section class="card"><h2 id="bin-partition-title">Assembly partition</h2><p id="bin-partition-total" class="partition-total"></p><div id="bin-partition-figure" class="figure-host"></div><p class="figure-note" id="bin-partition-note"></p></section>
- <section class="card"><h2 id="bin-contiguity-title">Contiguity and assembly size</h2><p class="note" id="bin-figures-status" role="status" aria-live="polite"></p><div id="bin-contiguity-figure" class="figure-host"></div><p class="figure-note">Both axes use log10 scales. Hover for original values. Bins with missing or nonpositive size or N50 are omitted. N50 is the contig length at which half the bin sequence is in contigs of that length or longer.</p></section>
+ <section class="card"><h2 id="bin-contiguity-title">Contiguity and assembly size</h2><p class="note" id="bin-figures-status" role="status" aria-live="polite"></p><div id="bin-contiguity-figure" class="figure-host"></div></section>
 </div>
 '''
 
@@ -150,7 +150,7 @@ BIN_FIGURES_JS = r'''
     function label(r){return r.rank+' / '+r.bin.replace(/_/g,' ');}
     var host=document.getElementById('bin-partition-figure'),entry=(partition.ranks||{})[rank&&rank.value];
     document.getElementById('bin-partition-total').textContent=partition.total_bp===null?'':bp(partition.total_bp);
-    document.getElementById('bin-partition-note').textContent='One rank at a time; the full assembly is retained while searching. Black is unbinned sequence. Hover for sizes and percentages; click a named bin to find it in the table.'+(partition.source?' Source: '+partition.source+'.':'');
+    document.getElementById('bin-partition-note').textContent=partition.source?'Source: '+partition.source:'';
     if(partition.error||!entry||entry.error)C.empty(host,partition.error||(entry&&entry.error)||'No verified partition is available at this rank.');
     else C.flow(host,entry.parts,partition.total_bp,{rank:rank.value,bp:bp,onPick:function(p){search.value=p.bin;search.dispatchEvent(new Event('input'));document.getElementById('bin-table').scrollIntoView({block:'start',behavior:'smooth'});}});
     C.scatter(document.getElementById('bin-contiguity-figure'),rows.map(function(r){return {label:label(r),x:r.total_length_bp===null?null:r.total_length_bp/1e6,y:r.N50===null?null:r.N50/1e3,color:C.color(r.bin)};}),{title:'Contiguity and assembly size',xlabel:'Bin size (Mb, log10)',ylabel:'N50 (kb, log10)',xlog:true,ylog:true});

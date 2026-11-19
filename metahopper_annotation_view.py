@@ -193,7 +193,6 @@ BROWSER_CSS = '''
 BROWSER_HTML = '''
 <section class="card" id="annotation-browser">
  <h2 id="annotation-browser-title">Gene and protein explorer</h2>
- <p class="annotation-help">Browse all annotated features or choose a bin. Click a locus tag for its predicted product, sequence and annotation details.</p>
  <div class="annotation-controls">
   <div><label for="annotation-bin">Bin</label><select id="annotation-bin"></select></div>
   <div><label for="annotation-search">Search genes, products, locus tags or contigs</label><input id="annotation-search" type="search" placeholder="e.g. dnaA, transporter, ribosomal" autocomplete="off"></div>
@@ -201,16 +200,15 @@ BROWSER_HTML = '''
   <div><label for="annotation-category">Annotation category</label><select id="annotation-category"><option value="all">All categories</option><option value="named">Non-hypothetical proteins</option><option value="hypothetical">Hypothetical proteins</option><option value="unassigned">Unassigned protein products</option><option value="pseudogene">Pseudogenes (flagged)</option><option value="pseudo-unknown">Pseudogene status unavailable</option></select></div>
  </div>
  <div class="annotation-chips" id="annotation-category-chips"></div>
- <p class="annotation-help">Pseudogenes are marked in red and labeled in the product cell, following Bakta flags. Pseudogene and hypothetical categories can overlap.</p>
  <div class="annotation-actions"><button type="button" id="annotation-clear">Reset filters</button><button type="button" id="annotation-export">Filtered features TSV</button><button type="button" id="annotation-export-proteins">Filtered proteins FASTA</button><button type="button" id="annotation-export-genes">Filtered genes FASTA</button><a id="annotation-feature-download" class="asset-link" download>All features TSV</a><a id="annotation-protein-download" class="asset-link" download>Proteins FASTA</a><a id="annotation-fasta-download" class="asset-link" download>Bin FASTA</a></div>
  <p class="note" id="annotation-feature-status" role="status" aria-live="polite"></p>
  <div class="scroll"><table id="annotation-feature-table"><thead><tr>
   <th class="l"><button data-feature-sort="bin">Bin</button></th><th class="l"><button data-feature-sort="locus_tag">Locus tag</button></th><th class="l"><button data-feature-sort="gene">Gene</button></th><th class="l"><button data-feature-sort="product">Product</button></th><th class="l"><button data-feature-sort="type">Type</button></th><th class="l">Product category</th><th class="l"><button data-feature-sort="contig">Contig</button></th><th><button data-feature-sort="start">Start</button></th><th><button data-feature-sort="end">End</button></th><th class="l">Strand</th><th><button data-feature-sort="aa_length">Length (aa)</button></th><th class="l">Database references</th>
  </tr></thead><tbody id="annotation-feature-body"></tbody></table></div>
  <div class="row" style="margin-top:12px"><button type="button" id="annotation-prev">Previous</button><span class="note" id="annotation-page"></span><button type="button" id="annotation-next">Next</button></div>
- <details class="annotation-import" style="margin-top:14px"><summary>Open an existing Bakta JSON file locally</summary><p class="annotation-help">Select its bin above, then choose that bin’s annotation.json. It is read in this browser. Rebuilding the report on the run directory embeds these records automatically.</p><label for="annotation-load-json">Bakta JSON for the selected bin</label><input id="annotation-load-json" type="file" accept=".json,application/json"><p id="annotation-import-status" class="annotation-help" role="status"></p></details>
+ <details class="annotation-import" style="margin-top:14px"><summary>Open an existing Bakta JSON file locally</summary><label for="annotation-load-json">Bakta JSON for the selected bin</label><input id="annotation-load-json" type="file" accept=".json,application/json"><p id="annotation-import-status" class="annotation-help" role="status"></p></details>
 </section>
-<section class="card"><h2>Feature types in the selected bin(s)</h2><table class="feature-count-table"><thead><tr><th class="l">Feature type</th><th>Count</th></tr></thead><tbody id="annotation-type-counts"></tbody><tfoot><tr><th class="l">Total</th><td id="annotation-type-total"></td></tr></tfoot></table><p class="figure-note">Counts include all loaded features in the selected bins. Click a feature type to filter the explorer.</p></section>
+<section class="card"><h2>Feature types in the selected bin(s)</h2><table class="feature-count-table"><thead><tr><th class="l">Feature type</th><th>Count</th></tr></thead><tbody id="annotation-type-counts"></tbody><tfoot><tr><th class="l">Total</th><td id="annotation-type-total"></td></tr></tfoot></table></section>
 <dialog class="annotation-dialog" id="annotation-feature-dialog">
  <div class="dialog-head"><div><h2 id="annotation-detail-title">Feature details</h2><p id="annotation-detail-product"></p></div><button type="button" id="annotation-detail-close">Close</button></div>
  <dl id="annotation-detail-fields"></dl>

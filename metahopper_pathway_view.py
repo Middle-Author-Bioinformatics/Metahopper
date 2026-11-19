@@ -282,10 +282,17 @@ def collect_pathways(layout, rank='genus', explicit=None):
 def render_pathways(data=None, error=''):
     if data is None:
         return ('<section class="card"><h2>HMM pathway annotation</h2><p class="note">'
-                + html.escape(error or 'No PathwayGenie results found. Run metahopper_pathways.py, or import an existing PathwayGenie output folder, then regenerate the report.') + '</p></section>')
+                + html.escape(error or 'No PathwayGenie results available.') + '</p></section>')
     script = Path(__file__).with_name('metahopper_pathway_browser.js').read_text()
-    # Original evidence stays on disk; the report needs only hits and panel definitions.
+    # Keep compact, verified component states so absent targets do not have to be
+    # inferred from a filtered hit table. Failed/stale bins were removed above.
     displayed = {key: value for key, value in data.items() if key not in {'components', 'neighborhoods', 'operons'}}
+    hit_components = {(row['bin_id'], component) for row in data['hits']
+                      for component in row.get('components', '').split(';') if component}
+    displayed['component_states'] = [dict(bin_id=row['bin_id'], component=row['component'],
+        state=row['state'], has_hits=bool(row.get('candidate_proteins') or row.get('proteins')
+                                       or (row['bin_id'], row['component']) in hit_components))
+        for row in data['components']]
     hit_proteins = {row['bin_id'] + '\x1f' + row['protein'] for row in data['hits']}
     displayed['proteins'] = {key: value for key, value in data['proteins'].items() if key in hit_proteins}
     return ('<style>' + PATHWAY_CSS + '</style>' + PATHWAY_HTML
@@ -293,7 +300,7 @@ def render_pathways(data=None, error=''):
 
 
 def render_annotation_sections(genes, pathways, default='genes'):
-    return ('<style>.annotation-section-tabs{display:flex;gap:7px;margin:0 0 14px}.annotation-section-tabs button.active{background:var(--acc);color:white;border-color:var(--acc)}.annotation-section[hidden]{display:none!important}</style>'
+    return ('<style>.annotation-section-tabs{display:flex;gap:18px;margin:0 0 16px;padding:0 4px;border-bottom:1px solid var(--line)}.annotation-section-tabs button{font-size:.8rem;font-weight:560;padding:7px 2px 9px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--mut)}.annotation-section-tabs button.active{color:var(--acc);border-bottom-color:var(--acc)}.annotation-section[hidden]{display:none!important}</style>'
             '<div class="annotation-section-tabs" role="tablist" aria-label="Annotation results">'
             '<button type="button" id="annotation-genes-tab" role="tab" aria-controls="annotation-genes-section">Genes &amp; proteins</button>'
             '<button type="button" id="annotation-pathways-tab" role="tab" aria-controls="annotation-pathways-section">Pathways</button></div>'
@@ -311,7 +318,8 @@ PATHWAY_CSS = '''
 .pathway-scroll th,.pathway-scroll td{padding:7px 10px;vertical-align:top}.pathway-scroll td.wrap-text{white-space:normal;min-width:190px;max-width:320px}
 .pathway-scroll .pathway-text-button{font:inherit;background:none;border:0;padding:0;color:var(--acc);text-decoration:underline;text-align:left;white-space:nowrap}
 .pathway-tag{display:inline-block;white-space:nowrap;font-size:.75rem;border-radius:5px;padding:2px 5px;background:#eef2f4;color:#51616c}
-.pathway-tag.ok{background:#e1f1e9;color:#246442}.pathway-tag.partial{background:#fff0d9;color:#8b5d16}.pathway-tag.bad{background:#f9e5e2;color:#9d3b30}
+.pathway-tag.ok{background:var(--ok-bg,#e1f1e9);color:var(--ok,#246442)}.pathway-tag.partial{background:var(--review-bg,#fff0d9);color:var(--review,#8b5d16)}.pathway-tag.bad{background:var(--warn-bg,#f9e5e2);color:var(--warn,#9d3b30)}
+.pathway-tag.missing{background:var(--review-bg,#fff0d9);color:var(--review,#8b5d16)}.pathway-missing td{color:var(--mut)}
 .pathway-map table{font-size:.77rem}.pathway-map th{min-width:95px;white-space:normal;max-width:115px;text-align:center}.pathway-map th:first-child{min-width:230px;text-align:left;white-space:nowrap;position:sticky;left:0;z-index:2}
 .pathway-map td{padding:2px;min-width:95px}.pathway-map button{width:100%;border:0;border-radius:3px;padding:8px 4px;font-size:.78rem;font-variant-numeric:tabular-nums}.pathway-map button:focus-visible{outline:2px solid #16222b;outline-offset:-3px}
 .pathway-map tbody th{background:var(--card);font-weight:500}.pathway-key{display:flex;gap:12px;flex-wrap:wrap;font-size:.78rem;color:var(--mut);margin:8px 0}.pathway-key i{display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle;border:1px solid var(--line)}
@@ -325,22 +333,21 @@ PATHWAY_CSS = '''
 PATHWAY_HTML = '''
 <section class="card" id="pathway-browser">
  <h2>Pathway annotation</h2>
- <p class="note">Coverage shows how much of the configured HMM panel was detected. It does not establish a complete or active pathway. Taxonomic bins may contain multiple genomes.</p>
  <div id="pathway-warnings"></div>
  <div class="pathway-controls"><div><label for="pathway-bin">Bin</label><select id="pathway-bin"></select></div><div><label for="pathway-pathway">Pathway</label><select id="pathway-pathway"></select></div><div><label for="pathway-search">Search genes, pathways or HMMs</label><input id="pathway-search" type="search" placeholder="e.g. Wolbachia, biotin, bioB" autocomplete="off"></div></div>
  <div class="pathway-actions"><label class="pathway-check"><input type="checkbox" id="pathway-hide-zero" checked>Hide bins with 0% coverage</label><button type="button" id="pathway-reset">Reset filters</button><button type="button" id="pathway-bakta">Bakta annotations for this bin</button></div>
  <p class="note" id="pathway-selection-status" role="status" aria-live="polite"></p>
- <div class="pathway-scroll"><table id="pathway-summary-table"><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th>Coverage</th><th>Detected / measured</th><th class="l">Status</th><th class="l">Panel</th></tr></thead><tbody id="pathway-summary-body"></tbody></table></div>
+ <div class="pathway-scroll"><table id="pathway-summary-table"><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th title="Detected components / measured HMM panel components; not evidence of a complete or active pathway">Panel coverage</th><th>Detected / measured</th><th class="l">Status</th><th class="l">Panel</th></tr></thead><tbody id="pathway-summary-body"></tbody></table></div>
  <div class="pathway-actions"><button type="button" id="pathway-summary-prev">Previous</button><span class="note" id="pathway-summary-page"></span><button type="button" id="pathway-summary-next">Next</button></div>
 </section>
-<section class="card"><h2>Pathway coverage by bin</h2><div class="pathway-key"><span><i style="background:#eff3f4"></i>No detected panel genes</span><span><i style="background:#8bbcc1"></i>Some targets detected</span><span><i style="background:#176d79"></i>All panel targets detected</span><span><i style="background:#ddd7e2"></i>Unavailable</span></div><div class="pathway-scroll pathway-map" id="pathway-heatmap"></div><p class="note">Click a cell to see its HMM hits. Use “Panel genes” in the table above to inspect what was measured.</p></section>
-<section class="card" id="pathway-hits-card"><h2>HMM hits</h2><p class="note">One row per model hit. Shared-family matches do not identify an exact gene. Click a protein for its sequence and details, or a pathway to view its panel genes.</p>
- <div class="pathway-actions"><label for="pathway-hit-filter">Show</label><select id="pathway-hit-filter" style="width:auto"><option value="accepted">Accepted hits</option><option value="all">All hits</option><option value="review">Hits to review</option></select></div>
+<section class="card"><h2>Pathway coverage by bin</h2><div class="pathway-key"><span><i style="background:#eff3f4"></i>No detected panel genes</span><span><i style="background:#8bbcc1"></i>Some targets detected</span><span><i style="background:#176d79"></i>All panel targets detected</span><span><i style="background:#ddd7e2"></i>Unavailable</span></div><div class="pathway-scroll pathway-map" id="pathway-heatmap"></div></section>
+<section class="card" id="pathway-hits-card"><h2>HMM hits &amp; missing components</h2>
+ <div class="pathway-actions"><label for="pathway-hit-filter">Show</label><select id="pathway-hit-filter" style="width:auto"><option value="overview">Hits &amp; missing components</option><option value="accepted">Accepted hits</option><option value="missing">Missing components</option><option value="all">All hits</option><option value="review">Hits to review</option></select></div>
  <p class="note" id="pathway-hit-status" role="status"></p>
  <div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th class="l">Gene / product</th><th class="l">Protein</th><th class="l">HMM</th><th class="l">Match</th><th>E-value</th><th>HMM coverage</th></tr></thead><tbody id="pathway-hit-body"></tbody></table></div>
  <div class="pathway-actions"><button type="button" id="pathway-hit-prev">Previous</button><span class="note" id="pathway-hit-page"></span><button type="button" id="pathway-hit-next">Next</button></div>
 </section>
-<section class="card"><h2>Download pathway tables</h2><div class="pathway-actions"><button type="button" id="pathway-export-summary">Pathway summary TSV</button><button type="button" id="pathway-export-hits">HMM hits TSV</button><button type="button" id="pathway-export-panels">Panel genes TSV</button></div><p class="note">Downloads follow the selected bins, pathways and filters.</p>
+<section class="card"><h2>Download pathway tables</h2><div class="pathway-actions"><button type="button" id="pathway-export-summary">Pathway summary TSV</button><button type="button" id="pathway-export-hits">HMM hits TSV</button><button type="button" id="pathway-export-panels">Panel genes TSV</button></div>
  <details><summary>Run details</summary><p class="note" id="pathway-run-details"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Bin</th><th class="l">Run status</th><th class="l">Input check</th><th>Size (bp)</th><th>Predicted proteins</th><th class="l">Reason</th></tr></thead><tbody id="pathway-qc-body"></tbody></table></div><dl id="pathway-parameters"></dl></details>
 </section>
 <dialog class="pathway-dialog" id="pathway-panel-dialog"><div class="row" style="justify-content:space-between"><h2 id="pathway-panel-title">Panel genes</h2><button type="button" id="pathway-panel-close">Close</button></div><p class="note" id="pathway-panel-note"></p><div class="pathway-scroll"><table><thead><tr><th class="l">Gene / component</th><th class="l">HMM models</th><th class="l">Notes</th></tr></thead><tbody id="pathway-panel-body"></tbody></table></div></dialog>

@@ -214,7 +214,7 @@ class AnnotationTests(unittest.TestCase):
         html=report.render_annotation(report.RunLayout(self.root,'final'))
         self.assertIn('GenBank',html)
         self.assertIn('id="annotation-pathways-tab"',html)
-        self.assertIn('No PathwayGenie results found',html)
+        self.assertIn('No PathwayGenie results available',html)
         self.assertNotIn('virulence factors: 0',html)
 
 

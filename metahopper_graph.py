@@ -535,7 +535,6 @@ VIEWER_HTML = r'''
     <h2 id="graph-heading" style="margin:0">Assembly graph for selected contigs</h2>
     <button id="graph-close" type="button">Close</button>
   </div>
-  <p class="note">Segments and links come from source GFA files. Contigs can map to one or more segments. Connections are never inferred from taxonomy or proximity in the scatter plot.</p>
   <div class="row">
     <div><label for="graph-hops">Neighbourhood</label><select id="graph-hops"><option value="0">Selected segments only</option><option value="1" selected>One link away</option><option value="2">Two links away</option></select></div>
     <div><label for="graph-limit">Node limit</label><select id="graph-limit"><option value="200">200</option><option value="500" selected>500</option><option value="1000">1000</option></select></div>
@@ -546,11 +545,9 @@ VIEWER_HTML = r'''
   <p id="graph-status" class="note" role="status"></p>
   <p id="graph-sources" class="note"></p>
   <div id="graph-stage" class="graph-stage"></div>
-  <p class="note">Drag the background to pan, scroll to zoom, or drag a node. Selected segments use the current scatter colours; grey nodes are neighbours. Hatched nodes belong to selected contigs with different colours. Dashed edges are GFA jump records. Node spacing is a layout choice, not genomic distance.</p>
   <p id="graph-detail" class="note graph-detail"></p>
   <details id="graph-unmapped"><summary>Contigs without a usable graph mapping</summary><p id="graph-missing" class="note graph-detail"></p></details>
   <details><summary>Load graph data for an existing report</summary>
-    <p class="note">On the server, run <code>python metahopper_graph.py -i RUN --bin-set final</code>, then select the resulting assembly_graphs.final.json file below. Regenerating the report with the updated metahopper_report.py embeds these data automatically. A final report needs a final catalogue from the same run.</p>
     <input id="graph-file" type="file" accept=".json,application/json">
   </details>
 </dialog>
