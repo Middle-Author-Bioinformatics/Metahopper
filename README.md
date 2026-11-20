@@ -125,10 +125,18 @@ remain searchable by bin, type and category. Flagged pseudogenes have red locus
 and gene labels plus a Pseudogene tag; their flags remain in details and TSV
 exports. Feature type counts appear in a compact table, without protein-category
 bar charts. Annotation always describes the rank actually annotated.
+If a rank summary is missing or incomplete, the report can recover entries from
+saved per-bin `result.json` records. Completed entries still require a matching
+current-bin sequence hash; stale genes are not embedded. This recovery reads
+existing outputs and does not run Bakta. Publishing alone cannot supply Bakta
+annotations that have never been generated.
 
 Pathways shows panel coverage and one **HMM hits & missing components** table.
 Its default view combines accepted hits with recorded missing components. The
 filter can isolate accepted hits, missing components, all hits, or review hits.
+All analyzed bins are initially visible, including zero-coverage bins. **Hide bins
+with 0% coverage** is opt-in. **Reset filters** clears bin/pathway selections,
+search, zero-coverage hiding and hit filters, restoring the full overview.
 **No hits** means no model evidence was recorded for that component; **No accepted
 hit** and **Candidate only** retain evidence that did not pass acceptance.
 Fusion-only panels use **No fusion hit**, rather than claiming a gene is absent.

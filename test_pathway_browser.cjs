@@ -49,7 +49,11 @@ vm.runInNewContext(code,{document,window:{},console,Blob,URL:{createObjectURL(bl
 const el=id=>elements.get(id),rows=id=>el('pathway-'+id+'-body').children;
 const trigger=(id,event='change')=>{for(const callback of el(id).listeners[event]||[])callback();};
 (async()=>{
-  assert.equal(rows('summary').length,3); // The all-zero bin is hidden; failed/stale remain explicit.
+  assert.equal(el('pathway-hide-zero').checked,false);
+  assert.equal(rows('summary').length,4,'all analyzed bins, including zero-coverage bins, show initially');
+  assert.equal(rows('hit').length,4,'the initial view includes accepted and missing component rows');
+  el('pathway-hide-zero').checked=true;trigger('pathway-hide-zero');
+  assert.equal(rows('summary').length,3); // Explicitly opt in to hiding all-zero bins.
   assert.equal(rows('hit').length,2);assert.equal(rows('hit')[0].children.length,8);
   assert(rows('hit')[1].children[5].textContent.includes('Shared family'));
   assert(!rows('hit').some(row=>row.children[0].textContent==='Stale'));
@@ -69,7 +73,12 @@ const trigger=(id,event='change')=>{for(const callback of el(id).listeners[event
   assert.equal(tsv.trim().split('\n').length,2);assert(tsv.includes('SYNTHETIC_c1'));assert(!tsv.includes('SYNTHETIC_c2'));
   el('pathway-export-summary').click();assert.equal(filename,'pathways.tsv');assert((await downloaded.text()).includes('coverage_percent'));
   el('pathway-export-panels').click();assert.equal(filename,'pathway_panels.tsv');assert((await downloaded.text()).includes('SYNTHETIC_c1'));
-  el('pathway-reset').click();el('pathway-bin').value='Zero';trigger('pathway-bin');
+  el('pathway-reset').click();
+  assert.equal(el('pathway-hide-zero').checked,false,'Reset must not silently restore zero-coverage filtering');
+  assert.equal(el('pathway-bin').value,'all');assert.equal(el('pathway-pathway').value,'all');
+  assert.equal(el('pathway-search').value,'');assert.equal(el('pathway-hit-filter').value,'overview');
+  assert.equal(rows('summary').length,4);assert.equal(rows('hit').length,4);
+  el('pathway-bin').value='Zero';trigger('pathway-bin');
   assert.equal(rows('summary')[0].children[2].textContent,'0%');assert.equal(rows('hit').length,2);
   assert(rows('hit').every(row=>row.className==='pathway-missing'));
   assert.deepEqual(rows('hit').map(row=>row.children[2].textContent),['g1','g2']);
@@ -92,6 +101,6 @@ const trigger=(id,event='change')=>{for(const callback of el(id).listeners[event
   el('pathway-hit-filter').value='missing';trigger('pathway-hit-filter');assert.equal(rows('hit').length,0);
   el('pathway-bin').value='Failed';trigger('pathway-bin');assert.equal(rows('hit').length,0);
   el('pathway-reset').click();el('pathway-search').value='Synthetic panel';trigger('pathway-search','input');
-  assert.equal(rows('hit').length,2,'pathway-name searches must retain their gene hits');
+  assert.equal(rows('hit').length,4,'pathway-name searches must retain hits and missing components from all bins');
   console.log('Pathway view passed: hits and recorded missing components, queries, exports, sequences, unmeasured steps and stale/failed handling.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1710,9 +1710,30 @@ def current_annotation_row(layout, row):
 
 
 def collect_annotation_rows(layout):
-    return [current_annotation_row(layout, row)
-            for path in sorted((layout.base / 'annotation').glob('*/summary.tsv'))
+    directory = layout.base / 'annotation'
+    rows = [current_annotation_row(layout, row)
+            for path in sorted(directory.glob('*/summary.tsv'))
             for row in read_tsv(path)]
+    seen = {(row.get('rank'), row.get('bin')) for row in rows}
+    # A stopped annotation run can leave completed per-bin records before the
+    # rank summary is written. Recover those records without rerunning Bakta;
+    # current_annotation_row still verifies each completed bin's input hash.
+    for path in sorted(directory.glob('*/*/result.json')):
+        rank, name = path.parent.parent.name, path.parent.name
+        if (rank, name) in seen or not path.resolve().is_relative_to(layout.root.resolve()):
+            continue
+        try:
+            record = json.loads(path.read_text())
+            row = record.get('summary')
+            if (not isinstance(row, dict) or row.get('rank') != rank or row.get('bin') != name
+                    or row.get('status') not in ('completed', 'failed', 'skipped')
+                    or row.get('status') != record.get('status')):
+                continue
+            rows.append(current_annotation_row(layout, row))
+            seen.add((rank, name))
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return rows
 
 
 def render_bakta_annotation(layout, rows=None):

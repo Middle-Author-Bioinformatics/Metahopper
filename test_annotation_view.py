@@ -64,6 +64,41 @@ class AnnotationViewTests(unittest.TestCase):
         self.assertEqual(rows[0]['status'],'stale')
         self.assertEqual(view.collect_features(self.layout,rows)['bins'],[])
 
+    def record_summary(self):
+        path = self.directory / 'result.json'
+        record = json.loads(path.read_text())
+        record['summary'] = self.row
+        path.write_text(json.dumps(record))
+
+    def test_missing_rank_summary_recovers_verified_bin_records(self):
+        self.record_summary()
+        (self.directory.parent / 'summary.tsv').unlink()
+        rows = report.collect_annotation_rows(self.layout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['status'], 'completed')
+        content = report.render_bakta_annotation(self.layout, rows)
+        self.assertIn('data-annotation-bin="genus/Test"', content)
+        self.assertIn('Chromosomal replication initiator', content)
+
+    def test_bin_records_do_not_duplicate_an_existing_summary_row(self):
+        self.record_summary()
+        self.assertEqual(len(report.collect_annotation_rows(self.layout)), 1)
+
+    def test_recovered_bin_record_still_checks_current_sequence(self):
+        self.record_summary()
+        (self.directory.parent / 'summary.tsv').unlink()
+        self.bin.write_text('>contig_1\nATGCCCTAA\n')
+        rows = report.collect_annotation_rows(self.layout)
+        self.assertEqual(rows[0]['status'], 'stale')
+        self.assertEqual(view.collect_features(self.layout, rows)['bins'], [])
+
+    def test_recovery_rejects_foreign_or_malformed_bin_records(self):
+        (self.directory.parent / 'summary.tsv').unlink()
+        path = self.directory / 'result.json'
+        for contents in ('not json', json.dumps(dict(status='completed', summary=dict(self.row, bin='Other')))):
+            path.write_text(contents)
+            self.assertEqual(report.collect_annotation_rows(self.layout), [])
+
     def test_feature_rows_from_another_bin_are_rejected(self):
         self.features[1]['bin']='Another'
         self.write_features()

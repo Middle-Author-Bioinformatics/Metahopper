@@ -105,7 +105,7 @@
  function fasta(b,p,field){var g=D.proteins[key(b,p)];return g&&g[field]?'>'+b+'|'+p+' '+(g.original_contig||'')+'\n'+g[field].match(/.{1,70}/g).join('\n')+'\n':'';}
  ['summary','hit'].forEach(function(name){E('pathway-'+name+'-prev').addEventListener('click',()=>{pages[name]--;refresh();});E('pathway-'+name+'-next').addEventListener('click',()=>{pages[name]++;refresh();});});
  [bin,path,hide,E('pathway-hit-filter')].forEach(el=>el.addEventListener('change',()=>{resetPages();refresh();}));search.addEventListener('input',()=>{resetPages();refresh();});
- E('pathway-reset').addEventListener('click',()=>{bin.value='all';path.value='all';search.value='';hide.checked=true;E('pathway-hit-filter').value='overview';resetPages();sorts={};refresh();});
+ E('pathway-reset').addEventListener('click',()=>{bin.value='all';path.value='all';search.value='';hide.checked=false;E('pathway-hit-filter').value='overview';resetPages();sorts={};refresh();});
  E('pathway-bakta').addEventListener('click',()=>document.dispatchEvent(new CustomEvent('metahopper:annotation-bin',{detail:{key:D.rank+'/'+bin.value}})));
  E('pathway-export-summary').addEventListener('click',()=>tsvDownload(current.summary,[['bin',r=>r.bin_id],['pathway',r=>r.pathway],['coverage_percent',r=>r.panel_percent],['detected',r=>r.detected_scored_components],['measured',r=>r.total_scored_components],['status',r=>label(r.panel_status)]],'pathways.tsv'));
  E('pathway-export-hits').addEventListener('click',()=>tsvDownload(current.hit,[['bin',r=>r.bin_id],['pathway',r=>hitPaths(r).map(p=>p.id).join('; ')],['gene',r=>r.target_gene],['product',r=>r.source_product],['protein',r=>r.protein],['hmm',r=>r.model_accession],['match',r=>label(matchStatus(r))],['evalue',r=>r.independent_evalue],['hmm_coverage',r=>r.hmm_coverage],['contig',r=>r.contig],['start',r=>r.start],['end',r=>r.end]],'hmm_hits.tsv'));
@@ -116,5 +116,5 @@
  E('pathway-locate-contig').addEventListener('click',()=>{if(!selectedProtein)return;var g=D.proteins[key(selectedProtein.bin,selectedProtein.protein)]||{},h=D.hits.find(h=>h.bin_id===selectedProtein.bin&&h.protein===selectedProtein.protein),contig=g.original_contig||(h&&h.contig);var q=document.getElementById('q'),tab=document.querySelector('.tab[data-id="binarena"]');if(q&&tab&&contig){E('pathway-protein-dialog').close();tab.click();q.value=contig;q.dispatchEvent(new Event('input',{bubbles:true}));q.scrollIntoView({block:'center'});}});
  E('pathway-run-details').textContent='PathwayGenie '+D.version+' · rank '+D.rank+' · finished '+D.finished_utc+' · '+D.directory+'.';
  Object.keys(D.parameters||{}).forEach(k=>{E('pathway-parameters').appendChild(text('dt',k.replace(/_/g,' ')));E('pathway-parameters').appendChild(text('dd',D.parameters[k]===null?'Per-template default':String(D.parameters[k])));});
- bin.value='all';path.value='all';E('pathway-hit-filter').value='overview';refresh();
+ bin.value='all';path.value='all';hide.checked=false;E('pathway-hit-filter').value='overview';refresh();
 })();

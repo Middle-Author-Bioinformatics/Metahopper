@@ -335,7 +335,7 @@ PATHWAY_HTML = '''
  <h2>Pathway annotation</h2>
  <div id="pathway-warnings"></div>
  <div class="pathway-controls"><div><label for="pathway-bin">Bin</label><select id="pathway-bin"></select></div><div><label for="pathway-pathway">Pathway</label><select id="pathway-pathway"></select></div><div><label for="pathway-search">Search genes, pathways or HMMs</label><input id="pathway-search" type="search" placeholder="e.g. Wolbachia, biotin, bioB" autocomplete="off"></div></div>
- <div class="pathway-actions"><label class="pathway-check"><input type="checkbox" id="pathway-hide-zero" checked>Hide bins with 0% coverage</label><button type="button" id="pathway-reset">Reset filters</button><button type="button" id="pathway-bakta">Bakta annotations for this bin</button></div>
+ <div class="pathway-actions"><label class="pathway-check"><input type="checkbox" id="pathway-hide-zero">Hide bins with 0% coverage</label><button type="button" id="pathway-reset">Reset filters</button><button type="button" id="pathway-bakta">Bakta annotations for this bin</button></div>
  <p class="note" id="pathway-selection-status" role="status" aria-live="polite"></p>
  <div class="pathway-scroll"><table id="pathway-summary-table"><thead><tr><th class="l">Bin</th><th class="l">Pathway</th><th title="Detected components / measured HMM panel components; not evidence of a complete or active pathway">Panel coverage</th><th>Detected / measured</th><th class="l">Status</th><th class="l">Panel</th></tr></thead><tbody id="pathway-summary-body"></tbody></table></div>
  <div class="pathway-actions"><button type="button" id="pathway-summary-prev">Previous</button><span class="note" id="pathway-summary-page"></span><button type="button" id="pathway-summary-next">Next</button></div>
