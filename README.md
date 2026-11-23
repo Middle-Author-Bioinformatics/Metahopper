@@ -115,6 +115,13 @@ and contiguity plot. In the updated web dashboard, the dashboard's rank selector
 replaces this local control and also sets the rank for cross-sample search.
 The partition uses the full report width and expands to fit its diagram, without
 an internal vertical scrollbar.
+An assembly-scope label identifies the actual source FASTA. Final consolidated
+reports say **Retained assembly**: totals exclude removed host and other filtered
+contigs and include any accepted reassembly. These totals are not the initial
+host-inclusive assembly size or read abundance. Reports using the initial FASTA
+say **Initial assembly**; unknown sources say **Displayed assembly**. The partition
+total and source node use the same label. No sequence totals are changed by this
+presentation clarification.
 **Clear**, Escape, or deleting the query returns the table to that selected rank.
 No matches are shown explicitly. Annotation rows are marked
 stale if their source bin changed or disappeared since annotation.
