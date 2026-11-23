@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import metahopper_report as report
 from metahopper_taxonomy import assembly_partition, is_unbinned, taxonomy_summary
+from metahopper_report_figures import assembly_context
 import metahopper_postprocess as postprocess
 import MetaHopper as pipeline
 
@@ -52,6 +53,21 @@ class BinPartitionTests(unittest.TestCase):
             self.assertEqual(sum(p['bp'] for p in parts), 2200)
             self.assertEqual(parts[-1], dict(bin='Unbinned', bp=900, contigs=2, unbinned=True))
         self.assertIn('unclassified_Bacteria', [p['bin'] for p in data['ranks']['genus']['parts']])
+
+    def test_assembly_scope_describes_the_actual_fasta_without_changing_totals(self):
+        data = self.partition()
+        html = report.render_bins(self.rows(), report.rank_totals(self.rows()), partition=data)
+        self.assertIn('id="assembly-scope-note"', html)
+        self.assertIn('Removed host and other excluded contigs are not shown.', html)
+        self.assertIn('"assembly_label":"Retained assembly"', html)
+        self.assertEqual(data['total_bp'], 2200)
+        self.assertNotIn('assembly_label', data)
+        for path in ('megahit/final.contigs.fa', 'assembly/preliminary_contigs.fasta'):
+            label, note = assembly_context(dict(source=path))
+            self.assertEqual(label, 'Initial assembly')
+            self.assertIn('Before taxonomic filtering', note)
+        self.assertEqual(assembly_context(dict(source='unknown.fasta'))[0], 'Displayed assembly')
+        self.assertEqual(assembly_context(None)[0], 'Displayed assembly')
 
     def test_generic_catchalls_hidden_but_domain_assignments_remain_and_quality_is_preserved(self):
         for name in ('Unclassified', 'unbinned', 'Unassigned'):

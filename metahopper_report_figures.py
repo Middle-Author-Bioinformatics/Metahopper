@@ -2,6 +2,15 @@
 import json
 
 
+def assembly_context(partition):
+    source = (partition or {}).get('source')
+    if source in ('final/assembly/consolidated_contigs.fasta', 'final/assembly/contigs.fasta'):
+        return ('Retained assembly', 'After filtering and any accepted reassembly. Removed host and other excluded contigs are not shown.')
+    if source in ('megahit/final.contigs.fa', 'assembly/preliminary_contigs.fasta'):
+        return ('Initial assembly', 'Before taxonomic filtering. Each bin size describes only the contigs assigned to that bin.')
+    return ('Displayed assembly', 'Sizes describe the displayed contigs; the initial assembly total is not established by this report.')
+
+
 def json_script(identifier, data):
     payload = json.dumps(data, separators=(',', ':'), ensure_ascii=False, allow_nan=False, default=str)
     payload = payload.replace('<', '\\u003c').replace('&', '\\u0026')
@@ -38,6 +47,7 @@ FIGURE_CSS = '''
 .figure-host .chart-pick{cursor:pointer}.figure-host .chart-pick:focus{outline:2px solid var(--acc)}
 .figure-host .flow:hover path,.figure-host .flow:focus path{fill-opacity:.55}
 .partition-total{font-size:1.2rem;font-weight:650;margin:3px 0 10px}.partition-total span{font-size:.8rem;font-weight:400;color:var(--mut)}
+.assembly-scope-note{margin:0 0 10px;color:var(--mut);font-size:.8rem;line-height:1.45}.assembly-scope-note strong{color:var(--ink)}
 .figure-key{display:flex;gap:12px;flex-wrap:wrap;color:var(--mut);font-size:.8rem;margin:6px 0 12px}
 .figure-key i{display:inline-block;width:11px;height:11px;margin-right:5px;border-radius:2px}
 .figure-note{margin:7px 0 0;color:var(--mut);font-size:.8rem}.figure-empty{padding:24px 5px;color:var(--mut);font-size:.85rem}
@@ -106,10 +116,11 @@ CHART_JS = r'''
     if(!total||!parts.length){empty(host,'The assembly has no sequence to partition.');return;}
     clear(host);var scale=280/total,y=65,sourceY=65,sourceOffset=0,width=1000;
     var positions=parts.map(function(p){var size=p.bp*scale,box=Math.max(32,size+12),pos={p:p,y:y+(box-size)/2,h:size};y+=box;return pos;});
-    var height=Math.max(380,y+20),svg=node('svg',{viewBox:'0 0 '+width+' '+height,role:'img','aria-label':'Full assembly partition at the '+options.rank+' rank'});
-    svg.appendChild(node('title',{},'Full assembly to '+options.rank+' bins, including unbinned sequence'));
+    var assemblyLabel=options.assemblyLabel||'Displayed assembly';
+    var height=Math.max(380,y+20),svg=node('svg',{viewBox:'0 0 '+width+' '+height,role:'img','aria-label':assemblyLabel+' partition at the '+options.rank+' rank'});
+    svg.appendChild(node('title',{},assemblyLabel+' to '+options.rank+' bins, including unbinned sequence'));
     svg.appendChild(node('desc',{},'Ribbon thickness represents sequence length. Each assembly base is counted once at this rank. Black represents unbinned sequence.'));
-    svg.appendChild(node('text',{x:25,y:25},'Full assembly'));
+    svg.appendChild(node('text',{x:25,y:25},assemblyLabel));
     svg.appendChild(node('text',{x:25,y:44,class:'axis-label'},options.bp(total)+' · '+options.rank+' rank'));
     svg.appendChild(node('rect',{x:25,y:sourceY,width:14,height:280,rx:3,fill:'#465e69'}));
     positions.forEach(function(pos){var p=pos.p,c=p.unbinned?'#000000':color(p.bin),s=sourceY+sourceOffset,t=pos.y,h=pos.h;
@@ -149,10 +160,11 @@ BIN_FIGURES_JS = r'''
     document.getElementById('bin-contiguity-title').textContent='Contiguity and assembly size · '+rankLabel;
     function label(r){return r.rank+' / '+r.bin.replace(/_/g,' ');}
     var host=document.getElementById('bin-partition-figure'),entry=(partition.ranks||{})[rank&&rank.value];
-    document.getElementById('bin-partition-total').textContent=partition.total_bp===null?'':bp(partition.total_bp);
+    var assemblyLabel=partition.assembly_label||'Displayed assembly';
+    document.getElementById('bin-partition-total').textContent=partition.total_bp===null?'':assemblyLabel+' · '+bp(partition.total_bp);
     document.getElementById('bin-partition-note').textContent=partition.source?'Source: '+partition.source:'';
     if(partition.error||!entry||entry.error)C.empty(host,partition.error||(entry&&entry.error)||'No verified partition is available at this rank.');
-    else C.flow(host,entry.parts,partition.total_bp,{rank:rank.value,bp:bp,onPick:function(p){search.value=p.bin;search.dispatchEvent(new Event('input'));document.getElementById('bin-table').scrollIntoView({block:'start',behavior:'smooth'});}});
+    else C.flow(host,entry.parts,partition.total_bp,{rank:rank.value,bp:bp,assemblyLabel:assemblyLabel,onPick:function(p){search.value=p.bin;search.dispatchEvent(new Event('input'));document.getElementById('bin-table').scrollIntoView({block:'start',behavior:'smooth'});}});
     C.scatter(document.getElementById('bin-contiguity-figure'),rows.map(function(r){return {label:label(r),x:r.total_length_bp===null?null:r.total_length_bp/1e6,y:r.N50===null?null:r.N50/1e3,color:C.color(r.bin)};}),{title:'Contiguity and assembly size',xlabel:'Bin size (Mb, log10)',ylabel:'N50 (kb, log10)',xlog:true,ylog:true});
     document.getElementById('bin-figures-status').textContent=rows.length+' bin'+(rows.length===1?'':'s')+' at the '+rank.value+' rank'+(query?' matching the taxonomic search':'')+'.';
   }
@@ -168,7 +180,8 @@ def render_bin_figures(rows, partition=None):
     data = [{field: row.get(field) for field in fields} for row in rows]
     return ('<style>' + FIGURE_CSS + '</style>' + BIN_FIGURES_HTML
             + json_script('bin-figure-data', data)
-            + json_script('bin-partition-data', partition or {'total_bp': None, 'ranks': {}})
+            + json_script('bin-partition-data', dict(partition or {'total_bp': None, 'ranks': {}},
+                                                    assembly_label=assembly_context(partition)[0]))
             + '<script>' + CHART_JS + BIN_FIGURES_JS + '</script>')
 
 

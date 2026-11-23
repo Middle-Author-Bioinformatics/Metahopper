@@ -68,7 +68,7 @@ import hashlib
 from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
-from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, json_script
+from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, json_script, assembly_context
 from metahopper_report_theme import THEME_CSS, THEME_SCRIPT
 from metahopper_taxonomy import is_unbinned, taxonomy_summary, assembly_partition
 from metahopper_pathway_view import collect_pathways, render_pathways, render_annotation_sections
@@ -1408,7 +1408,10 @@ def render_bins(bin_rows, ranks, scatter=None, annotation_keys=(), partition=Non
     bin_rows = [row for row in bin_rows if row['rank'] in shown_ranks]
     default_rank = next((r['rank'] for r in ranks if r['rank'] == 'phylum'),
                         ranks[0]['rank'] if ranks else '')
-    out = ['<div class="card"><div class="row" style="margin-bottom:12px">'
+    scope, explanation = assembly_context(partition)
+    out = ['<p id="assembly-scope-note" class="assembly-scope-note"><strong>' + esc(scope) + '</strong> · '
+           + esc(explanation) + '</p>',
+           '<div class="card"><div class="row" style="margin-bottom:12px">'
            '<div id="bin-rank-control" style="max-width:220px"><label for="rank-filter">Taxonomic rank</label>'
            '<select id="rank-filter" title="Controls the bin table and both plots">']
     for row in ranks:

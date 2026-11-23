@@ -97,7 +97,8 @@ for(const [i,rank] of ranks.entries()) {
   assert.equal(report.flows().length,i+3);
   assert(report.svg('bin-partition-figure').attributes['aria-label'].includes(rank+' rank'));
   for(const id of ['bin-partition-title','bin-contiguity-title'])assert(report.el(id).textContent.endsWith(rank[0].toUpperCase()+rank.slice(1)));
-  assert.equal(report.el('bin-partition-total').textContent,'100 kb');
+  assert.equal(report.el('bin-partition-total').textContent,'Displayed assembly · 100 kb');
+  assert(report.svg('bin-partition-figure').children.some(n=>n.tagName==='text'&&n.textContent==='Displayed assembly'));
   const svg=report.svg('bin-partition-figure'), height=Number(svg.attributes.viewBox.split(' ')[3]);
   const texts=report.flows().flatMap(g=>g.children.filter(c=>c.tagName==='text'));
   assert(texts.every(n=>Number(n.attributes.y)+4<height),'SVG viewBox clips a destination label');
