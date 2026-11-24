@@ -10,10 +10,11 @@ annotation establishes that a bin is a pure, complete genome.
 
 ## Install and keep the modules together
 
-The active files are `metahopper.py`, `core.py`, `taxbin.py`,
-`metahopper_report.py`, `metahopper_inspect.py`, `metahopper_graph.py`,
-`metahopper_annotate.py`, and `metahopper_state.py`. Copy all eight into your MetaHopper installation. Do not
-replace your working `config.json` with the example configuration.
+Keep a complete checkout of the active pipeline modules together. The report also
+reads its adjacent browser JavaScript, theme, figure and control files, including
+`metahopper_report_controls.py`, `.js`, `.css`, and `metahopper_run_info.py`.
+Updating only the report entry point is insufficient. Do not replace your working
+`config.json` with the example configuration.
 
 The main pipeline requires Python with numpy, scikit-learn and pysam, plus fastp,
 Prodigal, DIAMOND and BWA. MEGAHIT is required unless an assembly is supplied.
@@ -141,9 +142,8 @@ annotations that have never been generated.
 Pathways shows panel coverage and one **HMM hits & missing components** table.
 Its default view combines accepted hits with recorded missing components. The
 filter can isolate accepted hits, missing components, all hits, or review hits.
-All analyzed bins are initially visible, including zero-coverage bins. **Hide bins
-with 0% coverage** is opt-in. **Reset filters** clears bin/pathway selections,
-search, zero-coverage hiding and hit filters, restoring the full overview.
+All analyzed bins are visible, including zero-coverage bins. **Reset filters**
+clears bin/pathway selections, search and hit filters, restoring the full overview.
 **No hits** means no model evidence was recorded for that component; **No accepted
 hit** and **Candidate only** retain evidence that did not pass acceptance.
 Fusion-only panels use **No fusion hit**, rather than claiming a gene is absent.
@@ -161,6 +161,35 @@ dashboard’s persistent theme choice controls the hosted report, including canv
 labels, SVG figures, tables, status badges and sequence dialogs. Regenerate and
 republish existing reports to embed component states and the new report styling;
 this reads saved outputs and does not rerun annotation or HMM searches.
+
+## Report navigation and run downloads
+
+One prominent **Reset filters** button clears the report's searches, bin/category
+filters and temporary contig selection while keeping the selected taxonomic rank
+and all manual bin assignments. **Back** restores the previous filtered view,
+including tabs, contig selection and scroll position; it can also undo a reset.
+Changing rank starts a new navigation history. **Download features** groups the
+filtered feature TSV and protein/gene FASTA exports in one menu.
+
+The contiguity plot shows bin name, rank, size, N50, contig count, GC, and available
+CheckM completeness/contamination on hover or keyboard focus. Selecting a point
+opens that bin in the table. Repeated counts, source paths, category shortcuts,
+local JSON import and command-parameter lists are omitted from the presentation;
+data and scientific warnings remain intact. Pagination appears only when needed.
+
+Report generation writes `report_support/run_info.json` and
+`report_support/full_run.log`. Run info includes saved pipeline, annotation and
+PathwayGenie settings/status records, plus a source-file checksum catalog. The log
+combines the complete saved pipeline, postprocessing and tool logs in this sample,
+including `logs/commands.jsonl`, without truncation. Missing/deleted logs and
+terminal output never saved by the pipeline cannot be reconstructed. The log link
+is omitted when no saved execution logs exist. These files are regenerated from
+saved outputs; generating them does not rerun scientific stages or edit inputs.
+
+The live publisher stages both files under the same private sample asset rules as
+FASTA/annotation downloads. Update both repositories and republish to add these
+downloads to existing reports. The viewer can apply navigation, hover and visual
+cleanup to recognized older reports before their HTML is republished.
 
 ## Fix colors and add graph review to an existing run
 
@@ -398,6 +427,8 @@ python -m unittest discover -p 'test_metahopper*.py' -v
 node test_report_frontend.cjs /path/to/metahopper_report_updated.html
 node test_bin_figures.cjs
 node test_pathway_browser.cjs
+node test_report_controls.cjs
+python -m unittest test_run_info
 ```
 
 The Python suite exercises graph parsing, provenance, exact/reverse-complement

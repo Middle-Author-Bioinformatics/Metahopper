@@ -69,6 +69,8 @@ from urllib.parse import quote
 from metahopper_graph import build_catalog, VIEWER_HTML, VIEWER_JS
 from metahopper_annotation_view import bin_button, collect_features, render_browser
 from metahopper_report_figures import DOWNLOAD_LAYOUT_CSS, render_bin_figures, json_script, assembly_context
+from metahopper_report_controls import CONTROL_CSS, CONTROL_JS
+from metahopper_run_info import run_files
 from metahopper_report_theme import THEME_CSS, THEME_SCRIPT
 from metahopper_taxonomy import is_unbinned, taxonomy_summary, assembly_partition
 from metahopper_pathway_view import collect_pathways, render_pathways, render_annotation_sections
@@ -601,6 +603,7 @@ dialog.graph-dialog::backdrop{background:rgba(15,23,42,.45)}
 .graph-stage .graph-node{cursor:move}
 __DOWNLOAD_LAYOUT_CSS__
 __THEME_CSS__
+__CONTROL_CSS__
 </style><script>__THEME_SCRIPT__</script></head><body><div class="wrap">
 <header><h1>__TITLE__</h1>
 <p class="sub">__SUBTITLE__</p></header>
@@ -1262,10 +1265,15 @@ Array.prototype.forEach.call(document.querySelectorAll('table.sortable'), functi
     clearTimeout(qt); qt = setTimeout(rebuild, 160);   // debounce so typing stays smooth
   });
   window.addEventListener('resize', function(){ if (view.length) draw(); });
+  window.MHBinarenaView = {
+    capture:function(){return Array.from(selected);},
+    restore:function(ids){selected.clear();(ids||[]).forEach(function(id){if(IDX[id]!==undefined)selected.add(id);});draw();},
+    reset:function(){selected.clear();rebuild();}
+  };
   __GRAPH_JS__
   rebuild();
 })();
-</script></body></html>
+</script><script>__CONTROL_JS__</script></body></html>
 """
 
 
@@ -1746,8 +1754,7 @@ def render_bakta_annotation(layout, rows=None):
         out.append('<p class="note">No Bakta annotation results available.</p></div>')
         return ''.join(out)
     columns = [('rank','rank'),('bin','bin'),('status','status'),('translation_table','genetic code'),
-               ('cds','CDS'),('sorf','sORF'),('hypothetical_proteins','hypothetical proteins'),
-               ('named_proteins','non-hypothetical proteins'),('trna','tRNA'),('rrna','rRNA'),('reason','reason')]
+               ('cds','CDS'),('sorf','sORF'),('trna','tRNA'),('rrna','rRNA'),('reason','reason')]
     out.append('<div class="scroll annotation-summary-scroll"><table class="sortable annotation-summary-table" id="annotation-summary-table"><thead><tr>'+''.join('<th class="l">'+label+'</th>' for _,label in columns)+'<th class="l">outputs</th></tr></thead><tbody>')
     for row in rows:
         out.append('<tr>')
@@ -1788,6 +1795,7 @@ def build_report(layout: RunLayout, args) -> str:
     bin_rows = collect_bins(layout, compute_missing=not args.no_fasta_stats)
     ranks = rank_totals(bin_rows)
     partition = assembly_partition(layout, bin_rows, iter_fasta, read_tsv)
+    support = run_files(layout.root, layout.stage)
     taxonomy = taxonomy_summary(layout.root.name, layout.stage, bin_rows)
     scatter = build_scatter(layout, args.min_length, args.max_points,
                             not args.include_uncoordinated)
@@ -1815,9 +1823,11 @@ def build_report(layout: RunLayout, args) -> str:
     return (HTML
             .replace("__DOWNLOAD_LAYOUT_CSS__", DOWNLOAD_LAYOUT_CSS)
             .replace("__THEME_CSS__", THEME_CSS)
+            .replace("__CONTROL_CSS__", CONTROL_CSS)
+            .replace("__CONTROL_JS__", CONTROL_JS)
             .replace("__THEME_SCRIPT__", THEME_SCRIPT)
             .replace("__TITLE__", esc(title))
-            .replace("__SUBTITLE__", subtitle)
+            .replace("__SUBTITLE__", subtitle + json_script('metahopper-run-downloads', support))
             .replace("__TABS__", json.dumps(tabs))
             .replace("__BINS__", render_bins(bin_rows, ranks, scatter, annotation_keys, partition)
                      + json_script('metahopper-taxonomy-data', taxonomy))
